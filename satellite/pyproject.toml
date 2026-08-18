@@ -1,0 +1,38 @@
+[project]
+name = "jarvis-satellite"
+version = "0.1.0"
+description = "Thin Raspberry Pi voice satellite for JARV1S"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyusb>=1.3.1",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+pyaudio = ["pyaudio>=0.2.14"]
+wakeword = [
+    "numpy>=2.2.3",
+    "onnxruntime==1.24.4",
+    "openwakeword>=0.6.0",
+]
+
+[project.scripts]
+jarvis-satellite = "jarvis_satellite.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jarvis_satellite"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

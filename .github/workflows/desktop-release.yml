@@ -1,0 +1,125 @@
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-macos-arm64:
+    runs-on: macos-latest
+    env:
+      HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            apps/desktop/package-lock.json
+
+      - uses: astral-sh/setup-uv@v8
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install build dependencies
+        run: brew install portaudio create-dmg
+
+      - name: Verify release tag matches backend version
+        run: node apps/desktop/scripts/verify-release-tag.mjs "${GITHUB_REF_NAME}"
+
+      - name: Backend tests
+        working-directory: backend
+        run: |
+          uv sync --locked --python 3.12
+          uv run --python 3.12 python -c "from openwakeword.utils import download_models; download_models(['silero_vad'])"
+          uv run --python 3.12 pytest -q
+          uv run --python 3.12 python tools/eval_wakeword.py
+          uv run --python 3.12 python tools/eval_stt.py
+          uv run --python 3.12 python tools/evaluate_tool_routing.py --policy voice_default --categories
+          uv run --python 3.12 python tools/evaluate_agent_behavior.py --priority P0 --label release-agent-p0
+
+      - name: Frontend build
+        working-directory: frontend
+        run: npm ci && npm run build && npm audit --omit=dev --audit-level=high
+
+      - name: Desktop tests
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run build:shell
+          npm run test:release-scripts
+          npm audit --omit=dev --audit-level=high
+          cargo test --locked --release --target aarch64-apple-darwin --manifest-path src-tauri/Cargo.toml
+
+      - name: Validate updater configuration
+        env:
+          JARVIS_UPDATE_BASE_URL: ${{ vars.JARVIS_UPDATE_BASE_URL }}
+        run: |
+          if [[ ! "$JARVIS_UPDATE_BASE_URL" =~ ^https:// ]]; then
+            echo "JARVIS_UPDATE_BASE_URL must be configured as an HTTPS URL" >&2
+            exit 1
+          fi
+
+      - name: Import Apple certificate
+        if: ${{ env.HAS_APPLE_CERTIFICATE == 'true' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+      - name: Build and release desktop app
+        working-directory: apps/desktop
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          JARVIS_RELEASE_CHANNEL: ${{ vars.JARVIS_RELEASE_CHANNEL || 'internal' }}
+          JARVIS_UPDATE_BASE_URL: ${{ vars.JARVIS_UPDATE_BASE_URL }}
+          CI: "true"
+        run: npm run release:macos
+
+      - name: Validate signed beta artifacts
+        run: bash apps/desktop/scripts/validate-beta-artifact.sh apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JARVIS_RELEASE_CHANNEL: ${{ vars.JARVIS_RELEASE_CHANNEL || 'internal' }}
+        run: bash apps/desktop/scripts/publish-github-release.sh

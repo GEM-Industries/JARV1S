@@ -1,0 +1,87 @@
+# Trigger delivery eval fixture definitions.
+#
+# These checks verify the post-refactor TriggerInstance delivery path.
+
+scenarios:
+
+  - id: scheduler_fire_publishes_trigger
+    description: "Trigger scheduler publishes TRIGGER_DUE for due instances."
+    new:
+      checks:
+        - kind: symbol_exists
+          module: services.events.types
+          symbol: EventType.TRIGGER_DUE
+        - kind: pattern_in_source
+          file: core/triggers/service.py
+          pattern: "class TriggerService"
+        - kind: pattern_not_in_source
+          file: core/turns/orchestrator.py
+          pattern: "_handle_alert_triggered|mongodb\\.db\\.alerts"
+
+  - id: session_reconnect_retries_awaiting
+    description: "SESSION_CONNECTED wakes awaiting_delivery trigger retry."
+    new:
+      checks:
+        - kind: symbol_exists
+          module: services.events.types
+          symbol: EventType.TRIGGER_RETRY_AWAITING
+        - kind: pattern_in_source
+          file: core/turns/orchestrator.py
+          pattern: "TRIGGER_RETRY_AWAITING"
+
+  - id: offer_decision_exists
+    description: "Conditional triggers use TriggerAction.decision='offer'."
+    new:
+      checks:
+        - kind: pattern_in_source
+          file: core/triggers/models.py
+          pattern: "decision.*offer|offer.*decision"
+
+  - id: automation_fire_creates_trigger
+    description: "Automation service creates trigger instances."
+    new:
+      checks:
+        - kind: pattern_in_source
+          file: services/automation.py
+          pattern: "TriggerInstance|trigger_service"
+        - kind: pattern_not_in_source
+          file: services/automation.py
+          pattern: "system\\.alert\\.triggered"
+
+  - id: soft_muted_ambient_speech_does_not_interrupt
+    description: "VOICE_USER_START while soft_muted must not cancel active proactive delivery."
+    new:
+      checks:
+        - kind: pattern_in_source
+          file: core/turns/orchestrator.py
+          pattern: "soft_muted"
+        - kind: pattern_in_source
+          file: core/turns/orchestrator.py
+          pattern: "VOICE_USER_START"
+
+  - id: stale_websocket_recovery
+    description: "Stale WebSocket recovery republishes availability for retry."
+    new:
+      checks:
+        - kind: pattern_in_source
+          file: api/websockets/connection.py
+          pattern: "TRIGGER_RETRY_AWAITING|SESSION_CONNECTED"
+
+  - id: agent_task_completion_creates_trigger
+    description: "Background agent task completion creates a trigger instance."
+    new:
+      checks:
+        - kind: pattern_in_source
+          file: plugins/agents/client.py
+          pattern: "trigger_service|TriggerAction"
+        - kind: pattern_not_in_source
+          file: plugins/agents/client.py
+          pattern: "system\\.alert\\.triggered"
+
+  - id: orchestrator_cleanup
+    description: "Orchestrator no longer contains alert persistence helpers."
+    new:
+      checks:
+        - kind: pattern_not_in_source
+          file: core/turns/orchestrator.py
+          pattern: "_mark_alert_delivered|_wrap_with_alert_finalize|mongodb\\.db\\.alerts"

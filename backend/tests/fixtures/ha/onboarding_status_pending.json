@@ -1,0 +1,6 @@
+[
+  {"step": "user", "done": false},
+  {"step": "core_config", "done": false},
+  {"step": "analytics", "done": false},
+  {"step": "integration", "done": false}
+]

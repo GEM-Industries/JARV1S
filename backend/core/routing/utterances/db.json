@@ -1,0 +1,10 @@
+{
+  "utterances": [
+    "Store this tool data",
+    "Read persisted tool data",
+    "Clear saved conversation history",
+    "Delete stored tool data",
+    "Look up saved plugin state",
+    "Save this plugin value in the database"
+  ]
+}

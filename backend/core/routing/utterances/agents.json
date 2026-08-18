@@ -1,0 +1,14 @@
+{
+  "utterances": [
+    "Delegate that refactoring job to a background agent",
+    "Spin up a subagent for the database migration",
+    "Check on that long-running task",
+    "Escalate this architecture decision to a smarter model",
+    "Cancel the background job that's still running",
+    "What's the status of my delegated work?",
+    "Resume the agent that was building the API",
+    "Use deep reasoning to compare these deployment strategies",
+    "Show me everything running in the background",
+    "Send that cleanup to a background worker"
+  ]
+}

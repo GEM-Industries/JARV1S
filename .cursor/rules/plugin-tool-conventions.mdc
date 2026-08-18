@@ -1,0 +1,394 @@
+---
+description: Conventions for building JARV1S plugins and tools. Covers plugin structure, docstring style, capability disclosure via tools=, and the @tool decorator.
+alwaysApply: false
+---
+# Plugin & Tool Conventions
+
+## Plugin Structure
+
+Every plugin is a `JarvisPlugin` subclass in `backend/plugins/`, auto-discovered by the registry. Public tools are capabilities named `plugin.tool` (provider `tools=` uses a sanitized form of that FQN). The module name, class-level `metadata.name`, and tool-namespace prefix must match — this is enforced at import time via `__init_subclass__`.
+
+```python
+from core.decorators import tool
+from core.plugins.types import JarvisPlugin, PluginMetadata
+
+class MyPlugin(JarvisPlugin):
+    metadata = PluginMetadata(
+        name="myplugin",
+        version="1.0.0",
+        description="One-line for the LLM.",
+    )
+
+    @tool
+    async def do_thing(self, arg: str) -> str:
+        """What the tool does."""
+        ...
+```
+
+- Single-file plugins (e.g. `todo.py`) for simple tools. Package-based (e.g. `weather/`) when you need a `client.py` factory.
+- Use `plugins.db` (`store_tool_data` / `get_tool_data`) for persistence. Data is user-scoped automatically via `core.context`.
+- `get_tools()` auto-discovers every `@tool`-decorated bound method. Only override it when tools are module-level functions (`DbPlugin`) or built dynamically at runtime (`MCPBridgePlugin`).
+
+### Plugin Visibility & Toggling
+
+Every plugin in the registry is shown in the Tools UI unless `hidden=True` is set on its `PluginMetadata` (e.g. `db`, `profile`, `composio`).
+
+Users can enable/disable any non-hidden plugin at runtime via the Tools panel. The `PATCH /integrations/{name}/toggle` endpoint calls `registry.set_plugin_enabled()`, which:
+- Persists state to `system_config` MongoDB collection
+- Rebuilds the capability catalog so the next turn's `tools=` set reflects the change
+- Is respected by ToolRouter and the per-turn `tools=` set on the next turn
+
+## Capability Disclosure
+
+`CapabilityDefinition` is the source of truth. The registry derives the provider
+`tools=` schema from the visible signature, and the first docstring line becomes
+the tool description. The system prompt carries only global behavior and
+per-turn runtime facts — it does not repeat tool signatures, docstrings, or
+return schemas.
+
+This means: **the docstring is the tool description**. Keep it concise; every
+token still costs schema budget when the tool is offered.
+
+### Capability Contract Conformance
+
+The registry `CapabilityDefinition` and the
+provider `tools=` schema shown to the model must come from the same name,
+visible signature, and return metadata. `PluginRegistry` owns the catalog; structured capability calls and UI
+actions call through `CapabilityDispatcher`. Unknown methods and invalid
+arguments must report the current callable and accepted parameters so the next
+iteration can recover. Domain plugin tests may keep using `invoke_tool` to
+bypass the `@tool` wrapper; harness-boundary tests should use `invoke_capability`.
+
+Before adding or materially changing a public tool, check the domain contract:
+
+1. Common user intent is expressible in one user-shaped call.
+2. A consequential negative lookup distinguishes complete absence, ambiguity,
+   and incomplete coverage using `match_status` + `coverage` from
+   `core.plugins.read_evidence`; provider failure is never represented as an
+   empty result.
+3. Lookup results expose the stable identifier and scope accepted by mutations.
+4. Risky mutations fetch the target, validate scope and expected guards, apply
+   consent at the domain edge, then return provider/store-confirmed evidence.
+5. Instance, series, whole-object, and other mutation scopes are explicit and
+   fail closed when omitted or unsupported.
+6. Reads return small typed models; public `Any`/raw dictionaries are reserved
+   for genuinely schemaless external payloads.
+7. UI is presentation only. `ToolResult.content` or the typed return carries the
+   model-visible evidence.
+8. Routing, tracing, context, and generic execution policy stay in the harness;
+   do not patch domain failures with global prompt rules.
+
+Use a domain-owned result model when evidence is needed. Reuse the shared
+`MatchStatus` / `ReadCoverage` enums; do not create a universal search-result
+or mutation-receipt framework from one plugin.
+
+## Docstring Style (Tools as Policy)
+
+Docstrings teach the LLM how to use the tool. Keep them concise and inline — no labeled sections unless critical.
+
+**Pattern:**
+- Line 1: What the tool does
+- Line 2+: Behavioral rules, voice guidance, guardrails — all inline
+- `Args:` section only when parameter names aren't self-explanatory
+- Use concrete examples over abstract rules
+
+```python
+# Good — concise, actionable, inline rules
+async def web(self, query: str) -> List[SearchResult]:
+    """
+    Search the web for real-time information.
+    Use when user asks about current events or needs up-to-date data.
+    NEVER read the 'url' field aloud.
+    """
+
+# Bad — verbose, labeled sections, repeats what the signature already says
+async def web(self, query: str) -> List[SearchResult]:
+    """
+    Search the web for real-time information.
+
+    WHEN TO USE:
+    - Current events
+    - Factual questions
+
+    VOICE RULES:
+    - Do not read URLs
+
+    Args:
+        query: The search query string
+    """
+```
+
+## Agent-Friendly Tool Shape
+
+When the model repeatedly chooses valid-looking but wrong calls, treat it as an API-shape smell before adding prompt text. Make the common operation easier to express in one correct call.
+
+- Prefer focused query parameters over broad list-and-filter outputs. A list tool that returns mixed records should accept ordinary user filters such as `kind`, `status`, `local_time`, `message`, or `recurrence` when those are common decision boundaries.
+- Do not require users to know internal storage taxonomy. If colloquial terms like "automation" can mean a durable rule or one-off deferred action, provide an umbrella lookup or make the tool error point to the exact alternate lookup.
+- If users can inspect disabled durable definitions, keep them discoverable through the agent's definitions inventory. Soft-off (`enabled=false`) is not delete, and pending-only inventories should not be stretched to represent disabled definitions.
+- Avoid nullable-parameter puzzles where two optional identifiers encode different scopes. If the model must choose between occurrence vs series, file vs folder, or user vs channel, make that scope explicit in parameter names, enums, separate tools, or fail-closed validation.
+- Return only the fields needed for the likely next step by default. Include stable downstream IDs, human labels, and scope; avoid dumping unrelated records that require the model to manually classify domain state.
+- Add a new workflow tool only for repeated, high-risk multi-step mutations. For rare repair flows, prefer improving lookup/filtering and validation first; do not grow the tool surface just to encode one transcript.
+- If the fix is "tell the model harder," stop and ask whether code can make the invalid or confusing path unrepresentable.
+
+## The @tool Decorator (External Integrations)
+
+Use `@tool` to control injection. The kwarg is optional.
+
+### `inject` — hide injected dependencies from the LLM
+
+```python
+from core.decorators import tool
+
+@tool(inject=["weather"])
+async def get_weather(self, city: str = None, weather: httpx.AsyncClient = None) -> WeatherReport:
+    """Get current weather and the 7-day forecast. Uses current location if city omitted."""
+    ...
+```
+
+The LLM sees `get_weather(city: str = None)` — the `weather` client is invisible and auto-injected at runtime via the Integration Gate.
+
+Only needed for external API clients. Core tools using `plugins.db` or `core.context` don't need it.
+
+For hidden/core utilities that the model must reliably invoke from natural language, decorate the callable with `@tool` so the catalog can read its signature and docstring. Always-on offering is an explicit ToolRouter allowlist, not a decorator flag.
+
+## Destructive Tool Contracts
+
+Destructive or persistent state-changing tools must not rely on the LLM to keep opaque provider IDs straight after a lookup.
+
+- Resolve or fetch the concrete target before calling `require_consent()`.
+- Use human-readable approval descriptions, not raw IDs alone.
+- Put stable target details in approval `detail`: ID, account/source, title/name, time/path/recipient.
+- Return unambiguous confirmed or failed outcomes (see Tool Returns). Avoid bare phrases like "not found" that can be misread as success.
+- For risky ID-based mutations, prefer optional expected guards such as `expected_title`, `expected_start`, or `expected_account`; refuse if the fetched target does not match.
+
+## Durable Mutation Contracts
+
+Tools that create or update persistent user-facing state must fail closed before writing. Fetch the existing record, merge partial patches through a typed Pydantic model, validate the full intended state and domain invariants, then write. Use `core.plugins.mutations.merge_model_patch()` for simple nested config patches. Keep domain truth near the owner: valid condition fields in watchers, valid device actions in smart home, valid schedule scopes in scheduler. Return actionable `CapabilityErrorDetail` messages and do not write on validation failure. Create and update paths that share the same nested schema must use the same validation + error formatting.
+
+For domain-owned scheduled behavior, persist the domain plan first and materialize scheduler/trigger rows from it. Do not use `trigger_rules`, reminders, or provider IDs as the domain's source of truth; store downstream IDs only as delivery artifacts so setup/list/edit tools can reconcile status without reverse-owning another subsystem's storage.
+
+### Managed Setup Contract
+
+User-managed configuration participates in the `setups` control plane without giving up domain ownership:
+
+- Project source records at read time; do not mirror them into a generic behavior collection.
+- Return a stable `resource_ref`, user-facing `setup_type`, `managed_by` domain, status, `supported_actions`, exact downstream IDs, and `edit_tool`.
+- Implement pause/resume/delete in the owning domain service, including cancellation of already-materialized work. The `setups` facade only resolves and delegates.
+- Keep structural edits domain-owned. Do not add generic update dictionaries or advertise actions that no public tool implements.
+- Treat a linked occurrence whose parent definition is missing, disabled, or paused as cancelled; lifecycle safety must fail closed.
+
+## Persistence Choice
+
+Choose the smallest persistence shape that fits the product behavior:
+
+- **Simple owner-scoped list** → use `plugins.db.load_models()` / `save_models()`.
+- **Single owner config blob** → use `plugins.db.get_tool_data()` / `store_tool_data()`.
+- **Queryable or indexed domain** → create a plugin-owned `store.py` with named MongoDB collections and indexes.
+
+Do not add generic repositories, CRUD mixins, or storage abstractions. A `store.py` should express domain operations and query/index behavior, not wrap MongoDB for its own sake. Avoid mixing persistence styles inside one plugin unless the boundary is explicit, such as config blob plus indexed event history.
+
+## Tool Returns
+
+The dispatcher maps plugin returns onto `CapabilityOutcome`. The model observes
+`outcome.observation()` (error message, confirmation text, or JSON-safe data).
+Choose one return shape; do not invent a new error class, result wrapper, or
+`tool_error()` helper. Reuse `CapabilityErrorDetail`, `ToolResult`, and
+domain-owned models.
+
+### Choose exactly one shape
+
+| Shape | When |
+|---|---|
+| `CapabilityErrorDetail` | Expected, user-correctable failure (not found, bad input, wrong state, missing prerequisite) |
+| Typed `BaseModel` / `list[Model]` | Structured reads or domain mutation receipts the model needs for follow-up |
+| `ToolResult(content=..., ui=[...])` | Confirmation text for the model **and** a widget/receipt for the frontend |
+
+Do not prefix confirmation or failure text with `Success:` or `Error:`. When
+returning `ToolResult` for a mutation, put a prefix-free confirmation in
+`content`. Do not wrap typed reads in `ToolResult` just to attach UI — keep the
+typed return and use `push_receipt(...)` / `push_content(...)` only when the
+typed model must be preserved for follow-up calls. Consent and auth return
+blocked `CapabilityErrorDetail` values (`approval_needed`, `reauth_needed`,
+`skipped`); do not emit those as strings.
+
+### Errors vs exceptions
+
+- Expected failures → `return CapabilityErrorDetail(code="...", message="...")`.
+  Actionable and self-contained (`Use one of: turn_on, turn_off, toggle`).
+  Never bare `"not found"` or stack-trace-style strings.
+- Unexpected failures (provider down, network, bugs) → `raise`. Do not catch
+  just to return a vague string.
+- Validate cheap bad input before side effects and before `require_consent()`.
+- Only constrain closed input sets; leave open-ended provider surfaces pass-through.
+
+When a tool may return either a validation failure or a successful `ToolResult`,
+annotate `-> ToolResult | CapabilityErrorDetail`. Prefer that over catching and rewriting.
+
+### Nested dict / closed-param schemas
+
+Most tools use flat typed params and domain checks — that is enough. The special
+case is when the model builds a nested `dict` (or freeform `params`) that you
+validate with Pydantic `extra="forbid"` or a closed key set:
+
+- Catch `ValidationError` / domain `ValueError` at the call site.
+- Return `CapabilityErrorDetail` with accepted fields or allowed keys — never
+  let unexpected exceptions become the model's only recovery signal.
+- Use `core.plugins.mutations.validation_error_message(label, Model, error)` for
+  Pydantic forbid-schemas (see `automations.create_rule` / `update_rule`).
+- Prefer flat typed params when the contract is small; nested forbid-models only
+  when the dict is an intentional authoring surface.
+- Do **not** auto-wrap all tools or invent a global `tool_error()` layer. Domain
+  guidance still belongs in the plugin (`Use list_available_triggers`,
+  `Call get_habit_status`, …).
+
+```python
+try:
+    trigger = TriggerConfig.model_validate(trigger).model_dump()
+except ValidationError as error:
+    return validation_error_message("trigger", TriggerConfig, error)
+```
+
+
+### Structured reads
+
+Define a small LLM-facing `BaseModel`. The registry derives the provider
+input schema from the visible signature; do not add global prompt text for
+a new typed plugin. Avoid `Any`, `dict`, `list[dict]`, raw Mongo rows, or opaque provider
+payloads on public tools unless the tool is an intentional escape hatch. Include
+stable downstream IDs, human labels, status, and only fields useful for likely
+follow-up calls. Domain projection stays in the owning plugin; generic
+serialization stays in `core.plugins.serialization`.
+
+When a lookup can honestly report "nothing found", include the shared evidence
+axes from `core.plugins.read_evidence`:
+
+- `match_status`: `none` | `single` | `multiple` (use `match_status_from_count`)
+- `coverage`: `complete` | `partial`
+
+Keep truncation and provider/fetch failure details as domain fields that explain
+`coverage=partial`. Only claim absence when `coverage=complete` and
+`match_status=none`. Do not invent a third coverage value for truncation, wrap
+lookups in `ToolResult` for evidence, or ask the dispatcher/ledger to interpret
+domain coverage.
+
+The dispatcher returns a typed observation. Put rows on a named field
+(`result.alerts`, `result.events`, `result.emails`) and document that path in
+the docstring. Do not add `__iter__`, `__getitem__`, `__len__`, or dict helpers
+so the model can treat the envelope as a list or the row as a dict. Return a
+bare `list[Model]` only when the lookup cannot be incomplete.
+
+```python
+class WeatherReport(BaseModel):
+    temperature: float
+    condition: str
+
+async def get_weather(self) -> WeatherReport:
+    ...
+```
+
+### Text + UI (`ToolResult`)
+
+`content` is what the LLM sees; `ui` is pushed to the frontend and never fed
+back to the model. Prefer this over `push_ui(...)` + `return str`.
+
+```python
+return ToolResult(
+    content="Added 'buy milk'.",
+    ui=[receipt_envelope("Todo", "buy milk")],
+)
+```
+
+- Extract envelope builders into pure `_*_envelope()` helpers.
+- Domain tools that have a widget attach it themselves. Use `ToolResult.ui`
+  when the return is already `ToolResult`; use `push_ui(envelope)` when the
+  typed return must stay on the model observation. Do not expose a public
+  `render_*_widget` and do not add a `show=` / `render=` flag.
+- Reserve bare `push_ui()` for streaming/progress mid-tool, not string-only
+  terminal returns.
+
+### Reviewable artifacts
+
+Tools that create user-visible state choose their own display. Do not ask the
+LLM to call `display.push_content` afterward.
+
+- **No push** — self-evident effects (volume, lights, playback).
+- **Receipt** — glanceable confirmations: `ToolResult(..., ui=[receipt_envelope(...)])`.
+  Title + one line + optional compact metadata only. No long bodies or raw IDs.
+- **Content** — readable artifacts: `ToolResult(..., ui=[content_envelope(...)])`.
+
+## Structural Truths (build plugins the same way)
+
+- **Runtime context vs tools.** Universal per-turn facts already injected by the orchestrator (current local time/date/timezone, origin node, modality) should be answered from fresh runtime context, not by inventing trivial tools. Mutable provider/domain state (devices, files, messages, events) must be fetched inside the tool at call time. For long-running loops where "now" can drift mid-turn, expose a clock/read tool or re-inject runtime context at the loop boundary.
+- **Batch-first tools.** Public `@tool` methods accept a list and act on one-or-many (`control_devices(entity_ids=[...])`). Keep singular forms as internal, non-`@tool` wrappers when needed for compatibility.
+- **Stable identifiers across the chain.** Search/list tools return the exact field downstream tools accept (`entity_id` → `control_devices(entity_ids=...)`). The model never translates a generic `id` into a provider-specific param.
+- **Targeted lookup before mutation.** If a mutation depends on choosing one row from a mixed domain list, expose enough filters on the lookup tool for the model to fetch only plausible targets before it edits, cancels, or answers count/existence questions.
+- **Relative/ambiguous intent is the tool's job.** When users speak in relative terms ("warmer", "brighter", "more orange"), expose one helper that reads current state and computes the concrete change, instead of pushing unit math (Kelvin, 0–255) onto the model.
+- **Explicit intent beats inferred shape.** If a tool name encodes a user-visible product choice, honor that noun and use shape only to fill missing details: `add_alarm("30m")` remains a snoozable alarm, while `add_timer("5pm")` can compute a countdown to 5pm. Do not silently swap products just because the argument shape could fit another tool.
+- **Domain logic lives in the plugin, not the docstring.** Docstrings teach selection and policy; normalization, clamping, and aliasing belong in code near the data model (see `tool-layer-boundaries`).
+- **Policy belongs at the domain edge.** Core delivery mechanisms may carry opaque domain context, but they must not branch on domain nouns or hard-code domain directives. Express special behavior as domain data/tool parameters that materialize into generic trigger policy.
+- **Do not export speculative helper surfaces.** Keep parse/classification helpers internal until more than one real caller needs the abstraction. Tests should exercise the public behavior and boundary helpers that actually carry policy, not unused return fields added for symmetry.
+
+## User-Shaped Input Normalization
+
+If a tool parameter represents a common user concept, accept the ordinary spoken/written forms in code instead of relying on the LLM to pre-convert them. Keep this small and domain-owned:
+- Dates/times/durations: reuse `core.time` / `core.scheduling` helpers for `"tomorrow 3pm"`, `"5m 30s"`, `"1.5h"`, and date-only ranges.
+- Keep canonical machine time deterministic: zero-padded `HH:MM` is 24-hour (`07:30` means 7:30 AM). Only unpadded forms such as `7:30` may use nearest-future AM/PM inference. Recurring schedules must persist and return `original_local_time` so the tool can verify the intended wall clock.
+- Shared, domain-neutral normalization belongs in shared helpers once more than one boundary can plausibly need it; keep domain-specific normalization near the plugin.
+- Relative time phrases should accept ordinary suffixes such as `"from now"` at the parser boundary (`"30 minutes from now"` → duration). The model should not have to strip conversational filler before calling a scheduler tool.
+- Percentages and units: strip simple unit suffixes such as `"50%"` at the plugin boundary before provider payload construction.
+- Aliases: normalize obvious closed-set synonyms such as `"every day"` → `"daily"` or `"Mon-Fri"` → weekday lists.
+- Preserve the internal contract immediately after normalization: providers and services should still receive stable IDs, aware UTC datetimes, integer minutes, or provider-native payloads.
+- Do not add fuzzy natural-language parsers for open-ended phrases unless the domain has a clear, tested mapping. Prefer a dedicated helper tool for relative intent.
+
+When fixing one of these gaps, add the smallest test at the boundary that failed: parser/helper test for shared normalization, or one plugin test proving the downstream service/provider receives the normalized value. See `.cursor/rules/test-strategy.mdc` for when to add tests at all.
+
+## Prompt/Tool Regression Evals
+
+When a tool or prompt change fixes model behavior, add the smallest eval that measures the intended boundary (only when the failure mode is prompt/routing related):
+- For tool selection, assert the exact tool call and forbid misleading language such as `permission`, `approval`, or `error` when the tool should execute directly.
+- For repeated stale or invalid call shapes, assert the exact current tool name
+  and arguments; do not teach compatibility with a nonexistent method.
+- For prompt-only fixes, assert `max_tool_calls: 0` so the eval proves the model used runtime context instead of unnecessary tools.
+- For history-sensitive bugs, include a stale or conflicting previous assistant turn. This catches recency bleed without hard-coding the one transcript that failed.
+
+Promote a production failure deliberately:
+
+1. Use the turn's ledger `invocations` to classify the failure as routing/tool
+   selection, call shape, domain evidence, provider/auth, policy, or runtime.
+2. Put domain evidence and mutation invariants in deterministic plugin/provider
+   tests. Put only selection, arguments, and response grounding in
+   `agent_behavior.yaml`; keep plugin disclosure/confusers in routing evals.
+3. Generalize the transcript into one invariant plus an adjacent negative case.
+   Do not copy names, dates, or wording that are irrelevant to the mechanism.
+4. Record `source: field_regression` and keep the smallest stable assertions.
+5. Preserve a passing neighboring behavior so the fix cannot simply reject or
+   over-trigger every similar request.
+
+## Replacement / Update Tools
+
+If users naturally ask to edit, reschedule, replace, or retarget persistent state, expose one tool that performs the whole mutation safely. Do not make the LLM compose a fragile sequence like list → cancel/delete → create when a missed step can leave duplicate or stale state.
+
+Keep the tool small and domain-owned:
+- Accept the stable identifier plus only fields that can change.
+- Fetch the existing object inside the tool and preserve omitted fields.
+- Validate the replacement before cancelling/deleting the old object when possible.
+- Return one clear result with the new identifier/details.
+- In create-tool docstrings, add one short line pointing edit/reschedule intents to the replacement tool.
+- Keep cancel as its own tool. Editing a message (or other fields) to say "cancelled" is not cancellation; create/replace docstrings should point clear/stop intents to the cancel tool.
+- If an update fails, return the actionable error and stop. Never recover by creating a second durable object unless the old one was atomically replaced or explicitly disabled; otherwise both can fire.
+
+This does not require a generic CRUD framework. Prefer a narrow tool such as `replace_alert(identifier, when=None, message=None, ...)` when the domain has specific invariants.
+
+For recurring or materialized state, make the mutation scope explicit instead of accepting one opaque ID and guessing. List tools should return the exact downstream identifiers and their scope, e.g. `instance_id` for a one-shot/current occurrence and `series_id` for a recurring rule. The edit tool should accept those same names (`replace_alert(series_id=...)` vs `replace_alert(instance_id=...)`) and reject ambiguous calls.
+
+When rejecting ambiguous mutation scope, make the error steer toward the least-destructive valid option and name when the broader scope is appropriate. Example: date-specific or one-off changes should point to the occurrence identifier; permanent/all-future changes should point to the durable rule identifier.
+
+If a durable rule materializes future instances, edits must update durable intent and the materializer must read that current rule when creating the next instance. Do not clone stale instance snapshots forward after a rule edit. The same applies to anticipated external automations: `PendingFire` may keep a schedule-time rule for prefetch, but dispatch (`_fire`) must reload the live rule so `update_rule` action/instruction changes apply even when `fire_time` did not change.
+
+When a stored setting is only author intent and runtime resolution happens later, expose it honestly. For example, list `delivery_target="bedroom"` or `"anywhere"` from the stored plan, but do not claim a concrete live endpoint before fire time.
+
+## Time Fields in Tool Results
+
+Tools should persist and compare datetimes as aware UTC values, but user-facing result fields must be local to the user's timezone. Use `core.time.local_datetime_fields(...)` for scheduled or event payloads: `time` is the local ISO time, `local_time` / `local_date` are display helpers, and `utc_time` is audit/debug only. Do not expose raw UTC as a field named `time`.
+
+For recurring schedules, preserve the user's intended wall-clock time separately from the UTC fire time, e.g. `original_local_time="23:00"`, so future occurrences survive timezone and DST conversion.

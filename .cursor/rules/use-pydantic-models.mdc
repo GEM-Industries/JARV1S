@@ -1,0 +1,9 @@
+---
+description: All data models must use Pydantic for validation and serialization.
+globs: **/*models.py, **/models/*.py
+---
+
+# Pydantic Models
+
+- Use `BaseModel` for data exchange between components (e.g., AudioChunk, TranscriptionResult).
+- Provide type hints for all fields.

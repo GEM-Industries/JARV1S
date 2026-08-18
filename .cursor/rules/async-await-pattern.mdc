@@ -1,0 +1,18 @@
+---
+description: Use async/await consistently for all I/O operations.
+globs: **/*.py
+---
+
+# Async/Await Pattern
+
+- All I/O operations must be async (network, file, audio).
+- Use `await` for calling async functions.
+- Avoid mixing async and sync code unless necessary (e.g. running blocking VAD on CPU is fine if fast, but prefer offloading if slow).
+
+Example:
+```python
+async def get_data():
+    async with aiohttp.ClientSession() as session:
+        async with session.get("http://example.com") as response:
+            return await response.json()
+```

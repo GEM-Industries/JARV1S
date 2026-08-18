@@ -1,0 +1,191 @@
+# MCP Servers Configuration
+#
+# OPTIONAL OVERRIDE LAYER — Composio integrations no longer require a YAML entry.
+# Any valid Composio toolkit slug can be connected and auto-bridged without config.
+#
+# Use this file to:
+#   - Override auto-generated utterances for important plugins
+#   - Specify a tools allowlist for large toolkits
+#   - Auto-register Composio triggers when an app connects
+#
+# Non-Composio MCP servers (stdio, HTTP) still require YAML entries.
+#
+# Fields:
+#   name        Required. Used as jarvis.<name>.* namespace.
+#   command     Required for stdio servers. List of command tokens.
+#   url         Required for HTTP servers. Mutually exclusive with command.
+#   env         Optional. Env vars passed to the subprocess. Supports ${VAR} interpolation.
+#   tools       Optional mounted-tool allowlist for large toolkits. If present,
+#               only these tools are mounted on jarvis.<name>.* and promoted when
+#               the plugin routes. If omitted, all fetched tools are mounted.
+#               Routing is plugin-level today: when a plugin matches, all mounted
+#               tools for that plugin are added to the full-detail tail.
+#   utterances  Optional hand-curated utterances for the Tool Router.
+#               If omitted, utterances are auto-generated from tool names/descriptions.
+#   type        Set to "composio" for Composio-managed servers.
+#   triggers    Composio trigger slugs to register automatically when this app connects.
+#               Only meaningful for type: composio entries.
+#               e.g. ["SLACK_NEW_MESSAGE", "SLACK_NEW_MENTION"]
+#
+# Promotion path: to replace an auto-bridged server with a bespoke plugin,
+# create a JarvisPlugin subclass in backend/plugins/ with the same name.
+# The bespoke plugin always wins — the auto-bridge entry is silently skipped.
+
+servers:
+  - name: github
+    type: composio
+    tools:
+      - GITHUB_CREATE_ISSUE
+      - GITHUB_LIST_ISSUES
+      - GITHUB_CREATE_A_PULL_REQUEST
+      - GITHUB_LIST_PULL_REQUESTS
+      - GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER
+      - GITHUB_GET_A_REPOSITORY
+    utterances:
+      - "GitHub issue"
+      - "pull request"
+      - "repository"
+      - "code review"
+      - "create an issue"
+      - "my GitHub"
+      - "list repos"
+      - "check GitHub"
+
+  - name: slack
+    type: composio
+    tools:
+      - SLACK_SEND_MESSAGE
+      - SLACK_FETCH_CONVERSATION_HISTORY
+      - SLACK_SEARCH_MESSAGES
+      - SLACK_FIND_CHANNELS
+      - SLACK_FIND_USERS
+      - SLACK_LIST_CONVERSATIONS
+      - SLACK_LIST_ALL_USERS
+      - SLACK_RETRIEVE_DETAILED_USER_INFORMATION
+      - SLACK_RETRIEVE_CONVERSATION_INFORMATION
+      - SLACK_FETCH_MESSAGE_THREAD_FROM_A_CONVERSATION
+      - SLACK_CREATE_A_REMINDER
+      - SLACK_LIST_REMINDERS
+      - SLACK_ADD_REACTION_TO_AN_ITEM
+      - SLACK_UPDATES_A_SLACK_MESSAGE
+      - SLACK_UPLOAD_OR_CREATE_A_FILE_IN_SLACK
+    utterances:
+      - "send a Slack message"
+      - "message on Slack"
+      - "Slack"
+      - "check Slack"
+      - "Slack channel"
+      - "search Slack"
+      - "Slack DM"
+      - "message the team"
+      - "post in Slack"
+      - "Slack notification"
+
+  - name: spotify
+    type: composio
+    tools:
+      - SPOTIFY_SEARCH_FOR_ITEM
+      - SPOTIFY_START_RESUME_PLAYBACK
+      - SPOTIFY_PAUSE_PLAYBACK
+      - SPOTIFY_SKIP_TO_NEXT
+      - SPOTIFY_GET_AVAILABLE_DEVICES
+      - SPOTIFY_GET_CURRENTLY_PLAYING_TRACK
+      - SPOTIFY_GET_CURRENT_USER_S_PLAYLISTS
+      - SPOTIFY_SET_PLAYBACK_VOLUME
+      - SPOTIFY_ADD_ITEM_TO_PLAYBACK_QUEUE
+    utterances:
+      - "play music"
+      - "play playlist"
+      - "play song"
+      - "Spotify"
+      - "pause"
+      - "skip"
+      - "next song"
+      - "what's playing"
+      - "volume"
+      - "shuffle"
+
+  - name: google_maps
+    type: composio
+    tools:
+      - GOOGLE_MAPS_TEXT_SEARCH
+      - GOOGLE_MAPS_NEARBY_SEARCH
+      - GOOGLE_MAPS_GET_PLACE_DETAILS
+      - GOOGLE_MAPS_GEOCODE_ADDRESS_WITH_QUERY
+      - GOOGLE_MAPS_GEOCODE_LOCATION
+      - GOOGLE_MAPS_GET_ROUTE
+      - GOOGLE_MAPS_COMPUTE_ROUTE_MATRIX
+    utterances:
+      - "find a place nearby"
+      - "find a business by name"
+      - "look for that place near me"
+      - "look up a local cafe"
+      - "find a coffee shop near me"
+      - "search for a cafe or restaurant nearby"
+      - "is this place open"
+      - "is it open now"
+      - "business opening hours"
+      - "where is the nearest place"
+      - "directions to a place"
+      - "travel time to a destination"
+      - "distance to an address"
+      - "how long is the drive to"
+      - "drive time to"
+      - "how far away is"
+      - "what's nearby"
+      - "check places in that suburb"
+      - "Google Maps place search"
+
+  - name: zoom
+    type: composio
+    tools:
+      - ZOOM_CREATE_A_MEETING
+      - ZOOM_GET_A_MEETING
+      - ZOOM_LIST_MEETINGS
+      - ZOOM_UPDATE_A_MEETING
+      - ZOOM_DELETE_A_MEETING
+      - ZOOM_GET_MEETING_RECORDINGS
+      - ZOOM_LIST_ALL_RECORDINGS
+    utterances:
+      - "create a Zoom meeting"
+      - "schedule a Zoom call"
+      - "set up a Zoom call"
+      - "Zoom meeting tomorrow"
+      - "list my Zoom meetings"
+      - "get Zoom meeting details"
+      - "update a Zoom meeting"
+      - "delete a Zoom meeting"
+      - "Zoom recordings"
+
+# Example stdio server (uncomment and configure to use):
+#
+#  - name: github
+#    command:
+#      - npx
+#      - -y
+#      - "@modelcontextprotocol/server-github"
+#    env:
+#      GITHUB_TOKEN: ${GITHUB_TOKEN}
+#    tools:  # optional: restrict which tools are mounted
+#      - create_issue
+#      - list_issues
+#      - create_pull_request
+#      - list_pull_requests
+#      - search_repositories
+#      - get_file_contents
+#    utterances:
+#      - "GitHub issue"
+#      - "pull request"
+#      - "repository"
+#      - "code review"
+
+# Example HTTP transport server (Phase 1b, for remote MCP servers):
+#
+#  - name: remote_tool
+#    url: https://mcp.example.com/server
+#    tools:
+#      - search
+#      - fetch
+#    utterances:
+#      - "search the web"
+

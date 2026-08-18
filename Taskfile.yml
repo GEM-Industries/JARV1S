@@ -1,0 +1,541 @@
+version: '3'
+
+tasks:
+  # ─────────────────────────────────────────────────────────────
+  # Common
+  # ─────────────────────────────────────────────────────────────
+  install:
+    desc: Install all dependencies (backend + frontend)
+    deps: [be:install, fe:install]
+
+  db:
+    desc: Start MongoDB (Docker) and wait until healthy
+    cmd: docker compose -p jarv1s up -d --wait
+
+  db:stop:
+    desc: Stop database containers
+    cmd: docker compose -p jarv1s down
+
+  start:
+    desc: Contributor only — start Docker services and the browser Host
+    deps: [install]
+    cmd: |
+      set -e
+      task db
+      FE_DIST="frontend/dist"
+      FE_SRC_HASH_FILE="$FE_DIST/.source-hash"
+      CURRENT_HASH="$(find frontend/src frontend/index.html frontend/vite.config.ts frontend/package.json -type f -print0 2>/dev/null | sort -z | xargs -0 shasum | shasum | awk '{print $1}')"
+      NEED_BUILD=1
+      if [ -f "$FE_DIST/index.html" ] && [ -f "$FE_SRC_HASH_FILE" ] && [ "$(cat "$FE_SRC_HASH_FILE")" = "$CURRENT_HASH" ]; then
+        NEED_BUILD=0
+      fi
+      if [ "$NEED_BUILD" = "1" ]; then
+        echo "Building frontend..."
+        task fe:build
+        mkdir -p "$FE_DIST"
+        echo "$CURRENT_HASH" > "$FE_SRC_HASH_FILE"
+      fi
+      export JARVIS_APP_MODE=1
+      export BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+      export BACKEND_PORT="${BACKEND_PORT:-8000}"
+      task be:app &
+      BACKEND_PID=$!
+      trap 'kill "$BACKEND_PID" 2>/dev/null || true' EXIT
+      for i in $(seq 1 60); do
+        if curl -fsS "http://${BACKEND_HOST}:${BACKEND_PORT}/api/v1/health" >/dev/null 2>&1; then
+          open "http://${BACKEND_HOST}:${BACKEND_PORT}"
+          wait "$BACKEND_PID"
+          exit $?
+        fi
+        sleep 1
+      done
+      echo "Timed out waiting for Jarvis Host readiness" >&2
+      exit 1
+
+  be:app:
+    desc: Run Jarvis Host backend in app mode (serves built frontend from /)
+    deps: [db]
+    dir: backend
+    cmd: |
+      export JARVIS_APP_MODE=1
+      export BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+      export BACKEND_PORT="${BACKEND_PORT:-8000}"
+      uv run uvicorn main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" --ws-ping-interval 20 --ws-ping-timeout 20
+    env:
+      PYTHONPATH: .
+      DYLD_LIBRARY_PATH: /opt/homebrew/lib
+      WEBSOCKETS_MAX_LINE_LENGTH: "32768"
+
+  # ─────────────────────────────────────────────────────────────
+  # Backend (be:*)
+  # ─────────────────────────────────────────────────────────────
+  be:install:
+    desc: Install backend dependencies
+    dir: backend
+    cmd: uv sync --locked
+
+  be:update-deps:
+    desc: Intentionally update backend dependency lockfile
+    dir: backend
+    cmd: uv lock --upgrade
+
+  be:dev:
+    desc: Run FastAPI dev server on localhost (127.0.0.1:8000)
+    deps: [db]
+    dir: backend
+    cmd: |
+      set -e
+      export BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+      export BACKEND_PORT="${BACKEND_PORT:-8000}"
+      export VOICE__stt_streaming_enabled="${VOICE__stt_streaming_enabled:-true}"
+      export VOICE__apple_speech_url="${VOICE__apple_speech_url:-ws://127.0.0.1:9091/asr}"
+      export VOICE__apple_speech_token="${VOICE__apple_speech_token:-jarvis-dev-speech}"
+      export VOICE__local_tts_url="${VOICE__local_tts_url:-ws://127.0.0.1:9092/tts}"
+      export VOICE__local_tts_token="${VOICE__local_tts_token:-jarvis-dev-tts}"
+      export JARVIS_TTS_ASSETS_DIR="${JARVIS_TTS_ASSETS_DIR:-../apps/desktop/local-tts}"
+
+      cleanup_helpers() {
+        if [ -n "${APPLE_SPEECH_PID:-}" ]; then
+          pkill -TERM -P "$APPLE_SPEECH_PID" 2>/dev/null || true
+          kill "$APPLE_SPEECH_PID" 2>/dev/null || true
+          wait "$APPLE_SPEECH_PID" 2>/dev/null || true
+        fi
+        if [ -n "${TTS_HELPER_PID:-}" ]; then
+          pkill -TERM -P "$TTS_HELPER_PID" 2>/dev/null || true
+          kill "$TTS_HELPER_PID" 2>/dev/null || true
+          wait "$TTS_HELPER_PID" 2>/dev/null || true
+        fi
+      }
+      trap 'cleanup_helpers' EXIT
+
+      # Launch Apple Speech helper (Swift app when built; Python protocol helper otherwise).
+      # Never block Host startup if the helper fails.
+      if ! nc -z 127.0.0.1 9091 >/dev/null 2>&1; then
+        mkdir -p logs
+        HELPER_BIN="../apps/desktop/resources/helpers/JARV1SSpeechHelper.app/Contents/MacOS/JARV1SSpeechHelper"
+        if [ -x "$HELPER_BIN" ]; then
+          echo "Starting Apple Speech helper on $VOICE__apple_speech_url"
+          JARVIS_SPEECH_HOST=127.0.0.1 JARVIS_SPEECH_PORT=9091 JARVIS_SPEECH_TOKEN="$VOICE__apple_speech_token" \
+            "$HELPER_BIN" > logs/apple_speech_helper.log 2>&1 &
+          APPLE_SPEECH_PID=$!
+        else
+          echo "Starting Apple Speech protocol helper on $VOICE__apple_speech_url"
+          JARVIS_SPEECH_HOST=127.0.0.1 JARVIS_SPEECH_PORT=9091 JARVIS_SPEECH_TOKEN="$VOICE__apple_speech_token" \
+            uv run python tools/apple_speech_helper.py > logs/apple_speech_helper.log 2>&1 &
+          APPLE_SPEECH_PID=$!
+        fi
+        for i in $(seq 1 30); do
+          if nc -z 127.0.0.1 9091 >/dev/null 2>&1; then
+            break
+          fi
+          sleep 0.2
+        done
+        if ! nc -z 127.0.0.1 9091 >/dev/null 2>&1; then
+          echo "Apple Speech helper did not become ready; continuing without local STT" >&2
+          if [ -n "${APPLE_SPEECH_PID:-}" ]; then
+            pkill -TERM -P "$APPLE_SPEECH_PID" 2>/dev/null || true
+            kill "$APPLE_SPEECH_PID" 2>/dev/null || true
+            wait "$APPLE_SPEECH_PID" 2>/dev/null || true
+          fi
+          APPLE_SPEECH_PID=""
+        fi
+      fi
+
+      if ! nc -z 127.0.0.1 9092 >/dev/null 2>&1; then
+        mkdir -p logs
+        if [ -f "$JARVIS_TTS_ASSETS_DIR/kokoro-v1.0.int8.onnx" ]; then
+          echo "Starting Kokoro TTS helper on $VOICE__local_tts_url"
+          JARVIS_TTS_HOST=127.0.0.1 JARVIS_TTS_PORT=9092 JARVIS_TTS_TOKEN="$VOICE__local_tts_token" \
+            JARVIS_TTS_ASSETS_DIR="$JARVIS_TTS_ASSETS_DIR" \
+            uv run python tools/kokoro_tts_server.py > logs/kokoro_tts_helper.log 2>&1 &
+          TTS_HELPER_PID=$!
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 9092 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.2
+          done
+          if ! nc -z 127.0.0.1 9092 >/dev/null 2>&1; then
+            echo "Kokoro TTS helper did not become ready; continuing without local TTS" >&2
+            if [ -n "${TTS_HELPER_PID:-}" ]; then
+              pkill -TERM -P "$TTS_HELPER_PID" 2>/dev/null || true
+              kill "$TTS_HELPER_PID" 2>/dev/null || true
+              wait "$TTS_HELPER_PID" 2>/dev/null || true
+            fi
+            TTS_HELPER_PID=""
+            export VOICE__local_tts_url=""
+            export VOICE__local_tts_token=""
+          fi
+        else
+          echo "Local TTS assets missing under $JARVIS_TTS_ASSETS_DIR; run apps/desktop/scripts/build-local-tts-assets.sh" >&2
+          export VOICE__local_tts_url=""
+          export VOICE__local_tts_token=""
+        fi
+      fi
+
+      UVICORN_ARGS=(--reload --host "$BACKEND_HOST" --port "$BACKEND_PORT" --ws-ping-interval 20 --ws-ping-timeout 20)
+      if [ "${BACKEND_PROXY_HEADERS:-0}" = "1" ]; then
+        UVICORN_ARGS+=(--proxy-headers --forwarded-allow-ips "${BACKEND_FORWARDED_ALLOW_IPS:-127.0.0.1}")
+      fi
+      echo "Starting backend on ${BACKEND_HOST}:${BACKEND_PORT} (ws://<host>:${BACKEND_PORT}/api/v1/ws)"
+      uv run uvicorn main:app "${UVICORN_ARGS[@]}"
+    env:
+      PYTHONPATH: .
+      DYLD_LIBRARY_PATH: /opt/homebrew/lib
+      WEBSOCKETS_MAX_LINE_LENGTH: "32768"
+
+  be:dev:lan:
+    desc: Run FastAPI dev server reachable on the LAN (0.0.0.0:8000) for satellite testing
+    dir: .
+    env:
+      BACKEND_HOST: "0.0.0.0"
+      BACKEND_PORT: "8000"
+    cmd: task be:dev
+
+  be:stt:stop:
+    desc: Stop local Apple Speech helper on port 9091
+    dir: backend
+    cmd: |
+      pids="$(lsof -tiTCP:9091 -sTCP:LISTEN || true)"
+      if [ -z "$pids" ]; then
+        echo "No local STT helper listening on 9091"
+        exit 0
+      fi
+      for pid in $pids; do
+        pkill -TERM -P "$pid" 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
+      done
+
+  be:test-audio:
+    desc: Test VAD/STT (no LLM)
+    dir: backend
+    cmd: uv run python tools/audio_test_client.py {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:stress:
+    desc: Run stress test
+    dir: backend
+    cmd: uv run python tools/stress_test.py {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:latency:
+    desc: Probe WebSocket turn latency
+    dir: backend
+    cmd: uv run python tools/latency_probe.py {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:eval-stt:
+    desc: Evaluate raw STT fixture quality
+    dir: backend
+    cmd: uv run python tools/eval_stt.py {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:eval-wakeword:
+    desc: Offline wakeword clip and public/ambient FA/hr eval
+    dir: backend
+    cmd: uv run python tools/eval_wakeword.py {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:eval-barge-in-speaker:
+    desc: Offline barge-in speaker duplex scoreboard (SER mix + cosine thresholds)
+    dir: backend
+    cmd: uv run python tools/eval_barge_in_speaker.py {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:eval-routing:
+    desc: Evaluate tool routing policy accuracy
+    dir: backend
+    cmd: uv run python tools/evaluate_tool_routing.py --policy voice_default --categories {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:eval-agent:
+    desc: Agent/LLM behavior regression (mock tier by default)
+    dir: backend
+    cmd: uv run python tools/evaluate_agent_behavior.py --priority P0 --label agent-p0 {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  be:eval:
+    desc: Run the consolidated offline voice, routing, and agent trust gate
+    cmds:
+      - task be:eval-wakeword
+      - task be:eval-stt
+      - task be:eval-routing
+      - task be:eval-agent
+
+  # ─────────────────────────────────────────────────────────────
+  # Satellite (sat:*)
+  # ─────────────────────────────────────────────────────────────
+  sat:install:
+    desc: Install satellite dependencies
+    dir: satellite
+    cmd: uv sync --locked
+
+  sat:update-deps:
+    desc: Intentionally update satellite dependency lockfile
+    dir: satellite
+    cmd: uv lock --upgrade
+
+  sat:test:
+    desc: Run satellite tests
+    dir: satellite
+    cmd: uv run pytest
+
+  sat:list-devices:
+    desc: List satellite audio devices on the local machine
+    dir: satellite
+    cmd: uv run python -m jarvis_satellite --list-devices {{.CLI_ARGS}}
+
+  sat:deploy:
+    desc: Deploy satellite client to Raspberry Pi
+    dir: satellite
+    cmd: bash deploy/deploy.sh
+
+  sat:logs:
+    desc: Tail Raspberry Pi satellite service logs
+    cmd: ssh ${SATELLITE_USER:-pi}@${SATELLITE_HOST:-jarvis-satellite-1.local} 'if [ -f ~/.jarvis-satellite/satellite.log ]; then tail -f ~/.jarvis-satellite/satellite.log; else journalctl --user -u ${SERVICE_NAME:-jarvis-satellite} -f; fi'
+
+  sat:proxy:
+    desc: "Legacy: TCP relay 0.0.0.0:8001 -> localhost:8000. Prefer task be:dev:lan instead."
+    cmd: |
+      python3 -u -c 'import asyncio
+      async def handle(reader, writer):
+          try:
+              upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", 8000)
+          except Exception:
+              writer.close()
+              await writer.wait_closed()
+              return
+          async def pipe(src, dst):
+              try:
+                  while data := await src.read(65536):
+                      dst.write(data)
+                      await dst.drain()
+              finally:
+                  dst.close()
+          await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer), return_exceptions=True)
+      async def main():
+          server = await asyncio.start_server(handle, "0.0.0.0", 8001)
+          print("satellite proxy listening on 0.0.0.0:8001 -> 127.0.0.1:8000", flush=True)
+          async with server:
+              await server.serve_forever()
+      asyncio.run(main())'
+
+  # ─────────────────────────────────────────────────────────────
+  # Frontend (fe:*)
+  # ─────────────────────────────────────────────────────────────
+  fe:install:
+    desc: Install frontend dependencies
+    dir: frontend
+    cmd: npm ci
+
+  fe:update-deps:
+    desc: Intentionally update frontend dependency lockfile
+    dir: frontend
+    cmd: npm install
+
+  fe:dev:
+    desc: Run Vite dev server (HMR)
+    dir: frontend
+    cmd: npm run dev
+
+  fe:build:
+    desc: Build for production
+    dir: frontend
+    cmd: npm run build
+
+  # ─────────────────────────────────────────────────────────────
+  # Desktop (desktop:*) — Tauri host app
+  # ─────────────────────────────────────────────────────────────
+  desktop:install:
+    desc: Install desktop shell npm dependencies
+    dir: apps/desktop
+    cmd: npm ci
+
+  desktop:prepare:
+    desc: Build frontend assets required by the desktop host app
+    deps: [fe:build]
+
+  desktop:build-runtime:
+    desc: Build app-owned Python backend runtime for packaged desktop app
+    dir: apps/desktop
+    deps: [desktop:prepare]
+    cmd: npm run build:host-runtime
+
+  desktop:bootstrap:
+    desc: Install desktop dependencies and build required frontend assets
+    deps: [desktop:install, desktop:prepare]
+
+  desktop:dev:
+    desc: Run unsigned Jarvis desktop app in contributor dev mode
+    dir: apps/desktop
+    cmd: npm run tauri dev
+    env:
+      JARVIS_REPO_ROOT: "{{.ROOT_DIR}}"
+      JARVIS_RUNTIME_MODE: dev_repo
+
+  desktop:build:
+    desc: Build unsigned macOS Jarvis desktop app with bundled runtime
+    deps: [desktop:install, desktop:build-runtime]
+    dir: apps/desktop
+    cmd: npm run build
+    env:
+      JARVIS_RUNTIME_MODE: packaged_runtime
+
+  desktop:push:
+    desc: Build, replace /Applications/JARV1S.app, and open it for local dogfood
+    deps: [desktop:build]
+    dir: apps/desktop
+    cmd: npm run install:local
+
+  desktop:dogfood:
+    desc: Build, install, and open the packaged desktop app
+    cmd: task desktop:push
+
+  desktop:doctor:
+    desc: Check the desktop build surface without creating a full release
+    cmds:
+      - cd apps/desktop/src-tauri && cargo check
+      - bash apps/desktop/scripts/build-service-binaries.sh
+      - bash apps/desktop/scripts/smoke-services.sh
+
+  desktop:release:
+    desc: Build signed/notarized arm64 macOS release (requires Apple credentials)
+    deps: [desktop:install]
+    dir: apps/desktop
+    cmd: npm run release:macos
+
+  desktop:release:local:
+    desc: Build a local signed/notarized release (configures credentials on first run)
+    cmd: bash apps/desktop/scripts/release-local.sh {{.CLI_ARGS}}
+
+  desktop:release:publish:
+    desc: Publish the latest local release bundle to GitHub Releases
+    cmd: bash apps/desktop/scripts/publish-github-release.sh
+
+  desktop:validate-artifact:
+    desc: Verify signed/notarized app, DMG, and updater manifest (set BUNDLE=...)
+    cmd: bash apps/desktop/scripts/validate-beta-artifact.sh "{{.BUNDLE}}"
+    requires:
+      vars: [BUNDLE]
+
+  release:candidate:
+    desc: Run the complete local technical-beta candidate gate
+    cmds:
+      - cd backend && uv sync --locked && uv run pytest -q
+      - cd frontend && npm ci && npm run build && npm audit --omit=dev --audit-level=high
+      - cd apps/desktop && npm ci && npm run build:shell && npm run test:release-scripts && npm audit --omit=dev --audit-level=high
+      - cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - task desktop:doctor
+      - task sat:test
+      - task be:eval
+
+  desktop:data:backup:
+    desc: Save dogfood durable state to JARV1S Backups/daily (quit app first; optional NAME=…)
+    dir: backend
+    vars:
+      NAME: '{{.NAME | default "daily"}}'
+    cmd: uv run python tools/jarvis_data.py backup --name "{{.NAME}}"
+
+  desktop:data:restore:
+    desc: Restore dogfood durable state from JARV1S Backups/daily (quit app first; optional SOURCE=…)
+    dir: backend
+    vars:
+      SOURCE: '{{.SOURCE | default "daily"}}'
+    cmd: uv run python tools/jarvis_data.py restore --source "{{.SOURCE}}" --yes
+
+  desktop:data:reset:
+    desc: First-run wipe (mongo + credentials + voice); keeps host-prefs and models
+    dir: backend
+    cmd: uv run python tools/jarvis_data.py reset --yes
+
+  # ─────────────────────────────────────────────────────────────
+  # Setup (setup:*) — one-time credential configuration
+  # ─────────────────────────────────────────────────────────────
+
+  devices:pair-code:
+    desc: Installed-app recovery — issue a browser/phone pairing code
+    dir: backend
+    cmd: uv run python tools/device_provision.py pair-code {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  devices:satellite-token:
+    desc: Installed-app recovery — mint a room-speaker device token
+    dir: backend
+    cmd: uv run python tools/device_provision.py satellite-token {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  devices:revoke:
+    desc: Installed-app recovery — revoke a provisioned device credential
+    dir: backend
+    cmd: uv run python tools/device_provision.py revoke {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  devices:list:
+    desc: Installed-app recovery — list provisioned device credentials
+    dir: backend
+    cmd: uv run python tools/device_provision.py list {{.CLI_ARGS}}
+    env:
+      PYTHONPATH: .
+
+  setup:home:
+    desc: Contributor only — configure Home Assistant outside the app
+    dir: backend
+    cmd: uv run python cli/setup_home.py
+    env:
+      PYTHONPATH: .
+
+  setup:home:bootstrap:
+    desc: Contributor only — provision Home Assistant Container via Docker
+    dir: backend
+    cmd: uv run python cli/setup_home.py --bootstrap
+    env:
+      PYTHONPATH: .
+
+  setup:home:capture-fixtures:
+    desc: Capture HA API fixtures against pinned bootstrap image (requires running HA)
+    dir: backend
+    cmd: uv run python tools/capture_ha_fixtures.py --onboarding
+    env:
+      PYTHONPATH: .
+
+  setup:home:fixture-drift:
+    desc: Capture HA fixture shapes to temp storage and fail on pinned-image drift
+    dir: backend
+    cmd: uv run python tools/capture_ha_fixtures.py --onboarding --check-drift
+    env:
+      PYTHONPATH: .
+
+  setup:graphify:
+    desc: Install graphify CLI (uv tool) and register Cursor project rules + git hooks
+    cmds:
+      - uv tool install "graphifyy[anthropic]"
+      - graphify cursor install
+      - graphify hook install
+
+  graphify:build:
+    desc: Build knowledge graph headless (uses ANTHROPIC_API_KEY from .env; Cursor has no /graphify skill)
+    dotenv: ['.env']
+    cmd: graphify extract . --backend claude
+
+  graphify:update:
+    desc: Re-extract changed code files (AST-only, no API cost)
+    cmd: graphify update .
+
+  graphify:query:
+    desc: Query the knowledge graph (pass question via CLI_ARGS)
+    cmd: graphify query "{{.CLI_ARGS}}"
+
+  public:publish:
+    desc: Export sanitized snapshot to GEM-Industries/JARV1S (dry-run; pass --push to push)
+    cmd: bash scripts/publish-public.sh {{.CLI_ARGS}}

@@ -1,0 +1,24 @@
+[
+  {
+    "area_id": "office",
+    "name": "Office",
+    "icon": null,
+    "floor_id": null,
+    "labels": [],
+    "picture": null,
+    "aliases": [],
+    "created_at": 1717500000.0,
+    "modified_at": 1717500000.0
+  },
+  {
+    "area_id": "living_room",
+    "name": "Living Room",
+    "icon": null,
+    "floor_id": null,
+    "labels": [],
+    "picture": null,
+    "aliases": [],
+    "created_at": 1717500000.0,
+    "modified_at": 1717500000.0
+  }
+]

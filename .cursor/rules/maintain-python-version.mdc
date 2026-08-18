@@ -1,0 +1,7 @@
+---
+description: Maintain Python 3.11+ compatibility for all code.
+globs: **/*.py
+---
+
+# Python Version
+- Use Python 3.11+ features where available (e.g. better type hints, new asyncio features).

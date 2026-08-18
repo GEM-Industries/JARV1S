@@ -1,0 +1,50 @@
+---
+description: Error handling conventions for watchers and background pollers
+globs: backend/services/watchers/**/*.py, backend/services/automation.py, backend/services/health.py
+alwaysApply: false
+---
+
+# Watcher & Background Poller Error Handling
+
+## Principle: Raise, Don't Catch
+
+Watchers (data providers) must let API errors propagate. Never catch-and-return-empty — the consumer cannot distinguish "no data" from "API down."
+
+```python
+# WRONG — silent failure, consumer sees []
+try:
+    events = await _fetch_events(...)
+except Exception:
+    return []
+
+# RIGHT — consumer tracks health centrally
+events = await _fetch_events(...)
+return [e.model_dump() for e in events]
+```
+
+Exception: integration-not-configured checks may return `[]` (the source genuinely has no data).
+
+## Health Tracking: Use `IntegrationHealth`
+
+Consumers wrap `poll()` in try/except and delegate to `IntegrationHealth` from `services/health.py`:
+
+```python
+from services.health import IntegrationHealth
+
+self._health = IntegrationHealth(owner="my_service")
+
+try:
+    data = await source.poll()
+    self._health.record_success(source_name)
+except Exception as e:
+    await self._health.record_failure(source_name, e)
+    continue
+```
+
+IntegrationHealth handles: consecutive failure counting, log-once on fail/recover, SYSTEM_WARNING at threshold. Never reimplement this inline.
+
+## Adding a New Watcher
+
+1. Create `backend/services/watchers/<name>.py`
+2. Implement `source: str` class attr and `async def poll(self) -> list[dict]`
+3. Let API errors raise — AutomationService discovers and handles them automatically

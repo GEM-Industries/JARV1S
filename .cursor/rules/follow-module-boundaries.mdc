@@ -1,0 +1,18 @@
+---
+description: Respect the simplified modular structure of the prototype.
+globs: **/*.py,**/*.ts,**/*.tsx
+---
+
+# Module Boundaries (Prototype Phase)
+
+## Backend
+- `backend/core/voice/`: Audio capture, VAD, STT, and TTS logic.
+- `backend/core/llm/`: Interaction with AI models.
+- `backend/main.py`: Entry point stitching components together.
+
+## Frontend
+- `frontend/src/client/`: Headless logic (WebSocket, AudioContext). NO React components here.
+- `frontend/src/store/`: Global State (Zustand).
+- `frontend/src/components/`: UI layer only. Should not contain business logic.
+
+Avoid complex abstractions. Prefer simple, direct function calls for this phase.

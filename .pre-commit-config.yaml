@@ -1,0 +1,15 @@
+# Install locally with:
+#   uvx pre-commit install        (or) pipx install pre-commit && pre-commit install
+#
+# Keeps the module-graph hygiene introduced by
+# docs/proposals/MODULE_GRAPH_CLEANUP.md from regressing: fails if anyone
+# reintroduces a cycle between backend's top-level packages.
+repos:
+  - repo: local
+    hooks:
+      - id: module-graph
+        name: backend module graph (no top-level cycles)
+        entry: uv run --project backend python backend/scripts/check_module_graph.py
+        language: system
+        pass_filenames: false
+        files: ^backend/(api|core|plugins|services)/.*\.py$

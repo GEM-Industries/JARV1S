@@ -1,0 +1,22 @@
+# Runtime / local data — not part of the architecture map
+.data/
+logs/
+backend/.cache/
+training/wakeword/data/
+training/wakeword/models/
+
+# Build artifacts
+frontend/dist/
+node_modules/
+.venv/
+venv/
+
+# Large binary / media
+*.wav
+*.mp3
+*.m4a
+*.onnx
+
+# Git / IDE
+.git/
+.cursor/plans/

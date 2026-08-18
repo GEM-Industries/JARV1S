@@ -1,0 +1,27 @@
+{
+  "name": "jarvis-desktop",
+  "private": true,
+  "version": "0.4.0",
+  "type": "module",
+  "scripts": {
+    "ensure:host-stub": "bash scripts/ensure-host-resources-stub.sh",
+    "build:shell": "npm run ensure:host-stub && vite build --config vite.config.ts",
+    "build:host-runtime": "bash scripts/build-host-runtime.sh",
+    "install:local": "bash scripts/install-local-app.sh",
+    "sync:version": "node scripts/sync-app-version.mjs",
+    "build:release-assets": "npm run sync:version && npm run build:shell",
+    "test:release-scripts": "node --test scripts/*.test.mjs",
+    "release:macos": "bash scripts/release-macos.sh",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build --bundles app"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-opener": "^2.5.4"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0",
+    "vite": "^6.0.5"
+  }
+}

@@ -1,0 +1,13 @@
+content: |
+  Use only offered tools. Independent tools in one response run together.
+  Wait when a later step needs the previous result.
+
+  If the current tools list does not show what you need, call search_tools.
+  Returned tools are offered on the next turn. Many tools exist but are not
+  listed every turn.
+
+  If a tool fails, read the error, fix arguments, and retry once. If the same
+  call fails twice, skip it and note the failure in the final summary.
+
+  Example — chained read:
+  Look up the inbox, then report from the returned messages.

@@ -1,0 +1,1923 @@
+# Agent behavior eval cases — model in-turn decisions only.
+#
+# Mock-tier cases drive AssistantOrchestrator._execute_turn with scripted AgentEvents.
+# Live-tier cases (tier: live) call the real LLM when the runner is invoked with --live.
+# Probe-tier cases (tier: probe) are opt-in prompt tuning probes via --probe --live.
+
+meta:
+  default_mock_runs: 1
+  default_live_runs: 3
+  default_probe_runs: 3
+  default_live_temperature: 0
+  pass_threshold: 0.67
+  probe_pass_threshold: 0.67
+cases:
+- id: maps_near_me_open_now_uses_place_details
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Is there a cafe near me that's open right now?
+  session_context:
+    location:
+      latitude: -33.8688
+      longitude: 151.2093
+      source: gps
+    device_kind: phone
+  script:
+  - type: tool_call
+    capability: google_maps.search_nearby
+    arguments:
+      included_types:
+      - cafe
+  - type: tool_output
+    content: '{"places":[{"id":"ChIJcafe1","displayName":{"text":"Local Roast"},"formattedAddress":"1 George St, Sydney"}]}'
+  - type: tool_call
+    capability: google_maps.get_place_details
+    arguments:
+      place_id: ChIJcafe1
+  - type: tool_output
+    content: '{"displayName":{"text":"Local Roast"},"currentOpeningHours":{"openNow":true},"regularOpeningHours":{"weekdayDescriptions":["Monday:
+      7:00 AM – 4:00 PM"]}}'
+  - type: text
+    content: Local Roast is open now.
+  assert:
+    tools_called:
+    - google_maps.search_nearby
+    - google_maps.get_place_details
+    tools_forbidden:
+    - search.web
+    - time
+    response_contains:
+    - open
+    max_tool_calls: 3
+- id: probe_maps_route_uses_search_route_target
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - google_maps.search_places
+  - google_maps.get_route
+  input: Find the nearest Anytime Fitness and tell me how long the drive takes.
+  session_context:
+    location:
+      latitude: 40.7128
+      longitude: -74.006
+      source: gps
+    device_kind: phone
+  live_tool_outputs:
+  - '[PlaceSummary(place_id=''places/gym-1'', name=''Anytime Fitness'', route_target=''100 Example Street, Testville'', address=''100
+    Example Street, Testville'')]'
+  - RouteSummary(route_target='100 Example Street, Testville', travel_mode='DRIVE', distance_km=4.8, duration_minutes=7.5)
+  assert:
+    tools_called:
+    - google_maps.search_places
+    - google_maps.get_route
+    expected_arguments:
+      route_target: route_target
+    response_contains:
+    - '7'
+    max_tool_calls: 3
+- id: probe_followup_transit_lookup_emits_tool_call
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - google_maps.get_route
+  - google_maps.search_places
+  history:
+  - role: user
+    content: What is the closest gym to me?
+  - role: assistant
+    content: The nearest one is in Mansfield Park.
+    metadata:
+      turn_type: text_only
+  input: What would that be by public transport?
+  session_context:
+    location:
+      latitude: -34.83
+      longitude: 138.62
+      source: gps
+    device_kind: phone
+  live_tool_output: '{"route_target":"140 Hanson Rd, Mansfield Park","travel_mode":"TRANSIT","distance_km":12.8,"duration_minutes":73}'
+  assert:
+    tools_called:
+    - google_maps.get_route
+    tools_forbidden:
+    - search.web
+    expected_arguments:
+      travel_mode: TRANSIT
+    max_tool_calls: 2
+- id: calendar_lookup_reports_fact
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: What's on my calendar tomorrow afternoon?
+  script:
+  - type: tool_call
+    capability: calendar.get_events
+    arguments:
+      start_date: tomorrow
+      end_date: tomorrow
+  - type: tool_output
+    content: '{"events":[{"id":"evt-dentist","title":"Dentist","start":"Tomorrow 2:00 PM"}],"match_status":"single","coverage":"complete","truncated":false}'
+  - type: text
+    content: You have a dentist appointment tomorrow at 2pm on Main Street.
+  assert:
+    tools_called:
+    - calendar.get_events
+    response_contains:
+    - dentist
+    - '2'
+    max_tool_calls: 2
+- id: calendar_near_match_uses_search_evidence
+  priority: P0
+  category: tool_arguments
+  tier: mock
+  source: field_regression
+  text_input: true
+  input: When is my dentst appointment?
+  script:
+  - type: tool_call
+    capability: calendar.search_events
+    arguments:
+      query: dentst
+  - type: tool_output
+    content: '{"events":[{"id":"evt-dentist","title":"Dentist appointment","start":"2026-08-14T14:00:00+10:00"}],"query":"dentst","match_status":"single","coverage":"complete","truncated":false}'
+  - type: text
+    content: Your dentist appointment is Friday at 2pm.
+  assert:
+    tools_called:
+    - calendar.search_events
+    expected_arguments:
+      query: dentst
+    response_contains:
+    - dentist
+    - '2'
+    tool_output_contains:
+    - coverage
+    - complete
+    max_tool_calls: 2
+- id: calendar_partial_coverage_does_not_claim_clear
+  priority: P0
+  category: grounded_response
+  tier: mock
+  source: field_regression
+  text_input: true
+  input: Is my afternoon clear tomorrow?
+  script:
+  - type: tool_call
+    capability: calendar.get_events
+    arguments:
+      start_date: tomorrow
+      end_date: tomorrow
+  - type: tool_output
+    content: '{"events":[],"match_status":"none","coverage":"partial","failed_providers":["microsoft"],"truncated":false}'
+  - type: text
+    content: I couldn't verify your work calendar, so I can't confirm that the afternoon is clear.
+  assert:
+    tools_called:
+    - calendar.get_events
+    response_contains:
+    - work
+    - verify
+    response_must_not_contain:
+    - no events
+    - your afternoon is clear
+    tool_output_contains:
+    - partial
+    - microsoft
+    max_tool_calls: 2
+- id: calendar_annual_series_uses_recurrence_directly
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: field_regression
+  text_input: true
+  input: Make that calendar event repeat every year.
+  script:
+  - type: tool_call
+    capability: calendar.update_event
+    arguments:
+      event_id: evt-1
+      recurrence: yearly
+      account: personal
+  - type: tool_output
+    content: '{"id":"evt-1","title":"Annual review","start":"2026-03-20","end":"2026-03-21","account":"personal","scope":"series","recurrence":"yearly"}'
+  - type: text
+    content: Done — that event now repeats yearly.
+  assert:
+    tools_called:
+    - calendar.update_event
+    expected_arguments:
+      recurrence: yearly
+    tools_forbidden:
+    - calendar.delete_event
+    - calendar.create_event
+    - scheduler.remind
+    response_contains:
+    - yearly
+    max_tool_calls: 2
+- id: scheduler_reminder_not_todo
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Please remind me tomorrow evening to buy oat milk.
+  script:
+  - type: tool_call
+    capability: scheduler.remind
+    arguments:
+      when: tomorrow evening
+      message: buy oat milk
+  - type: tool_output
+    content: 'Reminder set for tomorrow evening.'
+  - type: text
+    content: I'll remind you tomorrow evening to buy oat milk.
+  assert:
+    tools_called:
+    - scheduler.remind
+    tools_forbidden:
+    - todo
+    response_contains:
+    - remind
+    - evening
+    max_tool_calls: 2
+- id: scheduler_alarm_duration_not_timer
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Set an alarm for 30 minutes.
+  script:
+  - type: tool_call
+    capability: scheduler.add_alarm
+    arguments:
+      time_str: 30m
+      message: Alarm
+  - type: tool_output
+    content: 'Alarm set for 30 minutes from now.'
+  - type: text
+    content: Alarm set for 30 minutes.
+  assert:
+    tools_called:
+    - scheduler.add_alarm
+    tools_forbidden:
+    - scheduler.add_timer
+    max_tool_calls: 2
+- id: scheduler_timer_duration_not_alarm
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Set a timer for 20 minutes.
+  script:
+  - type: tool_call
+    capability: scheduler.add_timer
+    arguments:
+      duration: 20m
+      message: Time's up!
+  - type: tool_output
+    content: 'Timer set for 20 minutes from now.'
+  - type: text
+    content: Timer started for 20 minutes.
+  assert:
+    tools_called:
+    - scheduler.add_timer
+    tools_forbidden:
+    - scheduler.add_alarm
+    max_tool_calls: 2
+- id: scheduler_defer_timed_side_effect_not_timer
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Turn off the living room light in 5 minutes.
+  script:
+  - type: tool_call
+    capability: scheduler.defer
+    arguments:
+      when: 5 minutes
+      instruction: Turn off the living room light.
+  - type: tool_output
+    content: 'Deferred instruction scheduled for 5 minutes from now.'
+  - type: text
+    content: I'll turn off the living room light in 5 minutes.
+  assert:
+    tools_called:
+    - scheduler.defer
+    tools_forbidden:
+    - scheduler.remind
+    - scheduler.add_timer
+    - smart_home.control_devices
+    max_tool_calls: 2
+- id: scheduler_defer_conditional_check
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: In 10 minutes, check if the garage is still open and tell me if it is.
+  script:
+  - type: tool_call
+    capability: scheduler.defer
+    arguments:
+      when: 10 minutes
+      instruction: Check if the garage is still open and tell me if it is.
+  - type: tool_output
+    content: 'Deferred instruction scheduled for 10 minutes from now.'
+  - type: text
+    content: I'll check the garage in 10 minutes and tell you if it is still open.
+  assert:
+    tools_called:
+    - scheduler.defer
+    tools_forbidden:
+    - scheduler.remind
+    - scheduler.add_timer
+    - smart_home.control_devices
+    max_tool_calls: 2
+- id: scheduler_cancel_deferred_uses_inventory
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Don't turn the lights off later after all — cancel that.
+  script:
+  - type: tool_call
+    capability: scheduler.get_alerts
+    arguments: {}
+  - type: tool_output
+    content: 'alerts: [{instance_id: "trg-1"}]'
+  - type: tool_call
+    capability: scheduler.cancel_alert
+    arguments:
+      instance_id: result.alerts[0].instance_id
+  - type: tool_output
+    content: 'Notification cancelled.'
+  - type: text
+    content: Done. I won't turn the lights off later.
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    - scheduler.cancel_alert
+    tools_forbidden:
+    - setups.find
+    response_must_not_contain:
+    - vanished
+    - wrong drawer
+    max_tool_calls: 3
+- id: scheduler_cancel_colloquial_automation_uses_get_alerts
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Cancel that soccer lights automation I set for 8pm.
+  script:
+  - type: tool_call
+    capability: scheduler.get_alerts
+    arguments:
+      message: soccer
+  - type: tool_output
+    content: 'alerts: [{instance_id: "trg-soccer"}]'
+  - type: tool_call
+    capability: scheduler.cancel_alert
+    arguments:
+      instance_id: result.alerts[0].instance_id
+  - type: tool_output
+    content: 'Notification cancelled.'
+  - type: text
+    content: Cancelled — I won't turn the lights off at 8 for the soccer game.
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    - scheduler.cancel_alert
+    tools_forbidden:
+    - setups.find
+    - automations.update_rule
+    - automations.delete_rule
+    expected_arguments:
+      message: soccer
+      instance_id: regex:instance_id
+    max_tool_calls: 3
+- id: scheduler_next_alarm_excludes_silent_work
+  priority: P1
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: When is my next alarm?
+  script:
+  - type: tool_call
+    capability: scheduler.get_next_alert
+    arguments:
+      kind: alarm
+  - type: tool_output
+    content: '{"instance_id": "trg-wake", "kind": "alarm", "message": "Wake up", "time": "8:30 AM"}'
+  - type: text
+    content: Your next alarm is at 8:30 AM.
+  assert:
+    tools_called:
+    - scheduler.get_next_alert
+    tools_forbidden:
+    - setups.find
+    max_tool_calls: 2
+- id: scheduler_change_next_alarm_uses_instance_scope
+  priority: P0
+  category: tool_arguments
+  tier: mock
+  source: field_regression
+  text_input: true
+  input: Change my next alarm to 7:15, just this once.
+  script:
+  - type: tool_call
+    capability: scheduler.get_alerts
+    arguments: {}
+  - type: tool_output
+    content: 'alerts: [{instance_id: "next_alarm.instance_id"}]'
+  - type: tool_call
+    capability: scheduler.replace_alert
+    arguments:
+      instance_id: next_alarm.instance_id
+      when: '7:15'
+  - type: tool_output
+    content: 'Occurrence updated. Instance ID: trg-next. Due tomorrow at 7:15 AM.'
+  - type: text
+    content: Your next alarm is now set for 7:15; the recurring series is unchanged.
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    - scheduler.replace_alert
+    expected_arguments:
+      instance_scope: next_alarm.instance_id
+    response_contains:
+    - '7:15'
+    - unchanged
+    response_must_not_contain:
+    - series updated
+    - all future
+    max_tool_calls: 3
+- id: probe_recurring_light_routine_prefers_durable_tool
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: true
+  input: Every morning at 8 turn the lights on warm and bright, at 8pm make them red and dim, and at 11pm turn them off.
+  script:
+  - type: tool_call
+    capability: scheduler.defer
+    arguments:
+      when: 11pm
+      instruction: Turn the lights off.
+      recurrence: daily
+      confirmed: true
+  - type: tool_output
+    content: 'three recurring deferred instructions scheduled.'
+  - type: text
+    content: Done. I set those three daily light routines.
+  assert:
+    tools_called:
+    - scheduler.defer
+    tools_forbidden:
+    - automations.create_rule
+    max_tool_calls: 4
+- id: probe_conditional_monday_wake_rule_prefers_rules_create
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: true
+  input: Every Monday at 8am wake me up unless I have a meeting before 11.
+  script:
+  - type: tool_call
+    capability: rules.create
+    arguments:
+      name: Monday conditional wake up
+      origin:
+        kind: time
+        when: Monday 8am
+        recurrence: weekly
+      action:
+        decision: offer
+        message: Conditional Monday wake up
+        instructions: Check my calendar before 11am. If I do not have a meeting before 11, wake me up; otherwise do not wake
+          me.
+      delivery: announce
+      attention: critical
+      sound: alarm
+      confirmed: true
+  - type: tool_output
+    content: 'Rule ''Monday conditional wake up'' created.'
+  - type: text
+    content: Done. I'll check your calendar each Monday before waking you.
+  assert:
+    tools_called:
+    - rules.create
+    tools_forbidden:
+    - automations.create_rule
+    - scheduler.add_alarm
+    max_tool_calls: 2
+- id: probe_calendar_relative_reminder_uses_automation_contract
+  priority: P1
+  category: tool_arguments
+  tier: probe
+  source: user
+  text_input: true
+  input: Give me a heads-up ten minutes before each appointment.
+  script:
+  - type: tool_call
+    capability: automations.list_available_triggers
+    arguments:
+      source: calendar
+  - type: tool_output
+    content: calendar.starting — Calendar event starts
+  - type: tool_call
+    capability: automations.create_rule
+    arguments:
+      name: Upcoming appointment
+      trigger:
+        source: calendar
+        event: starting
+        offset: -10
+      action:
+        decision: tell
+        message: Your appointment starts in ten minutes.
+  - type: tool_output
+    content: Preview only. Automation 'Upcoming appointment' was not created.
+  - type: text
+    content: Here is the automation preview for your approval.
+  assert:
+    tools_called:
+    - automations.list_available_triggers
+    - automations.create_rule
+    expected_arguments:
+      calendar_source: '"source": "calendar"'
+      starting_event: '"event": "starting"'
+      negative_offset: '"offset": -10'
+    tools_forbidden:
+    - scheduler.remind
+    max_tool_calls: 2
+- id: confuser_scheduler_not_todo
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Add buy oat milk to my task list.
+  script:
+  - type: tool_call
+    capability: todo.add_task
+    arguments:
+      title: buy oat milk
+  - type: tool_output
+    content: "Added 'buy oat milk'."
+  - type: text
+    content: Added buy oat milk to your task list.
+  assert:
+    tools_called:
+    - todo.add_task
+    tools_forbidden:
+    - scheduler
+    max_tool_calls: 2
+- id: consent_delete_needs_approval
+  priority: P0
+  category: consent
+  tier: mock
+  source: user
+  text_input: true
+  input: Delete the project README.
+  script:
+  - type: text
+    content: I'll request approval before deleting that file.
+  - type: tool_call
+    capability: files.delete
+    arguments:
+      path: ~/project/README.md
+  - type: tool_output
+    content: 'Approval needed: Move ''README.md'' to Trash The action has not executed yet.'
+  - type: text
+    content: I need your approval before I can delete README.md.
+  assert:
+    tools_called:
+    - files.delete
+    tool_output_contains:
+    - Approval needed
+    response_must_not_contain:
+    - deleted
+    - removed
+    allow_completion_claim: true
+    max_tool_calls: 2
+- id: computer_wifi_uses_exec
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: How fast is my wifi?
+  script:
+  - type: tool_call
+    capability: system.exec
+    arguments:
+      command: networkQuality
+  - type: tool_output
+    content: '{"stdout":"Downlink: 120 Mbps","stderr":"","exit_code":0,"truncated":false}'
+  - type: text
+    content: About 120 megabits down.
+  assert:
+    tools_called:
+    - system.exec
+    tools_forbidden:
+    - search.web
+    response_contains:
+    - '120'
+    max_tool_calls: 2
+- id: computer_find_uses_files_find
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Find files with budget in the name.
+  script:
+  - type: tool_call
+    capability: files.find
+    arguments:
+      pattern: budget
+  - type: tool_output
+    content: ~/Documents/budget-2026.xlsx
+  - type: text
+    content: I found budget-2026.xlsx in Documents.
+  assert:
+    tools_called:
+    - files.find
+    tools_forbidden:
+    - system.exec
+    - search.web
+    max_tool_calls: 2
+- id: computer_prefer_files_over_shell_for_read
+  priority: P1
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Read ~/notes.txt
+  script:
+  - type: tool_call
+    capability: files.read
+    arguments:
+      path: ~/notes.txt
+  - type: tool_output
+    content: buy milk
+  - type: text
+    content: It says buy milk.
+  assert:
+    tools_called:
+    - files.read
+    tools_forbidden:
+    - system.exec
+    max_tool_calls: 2
+- id: evaluate_offtopic_no_reply
+  priority: P0
+  category: no_reply
+  tier: mock
+  source: system
+  text_input: false
+  input: "SYSTEM EVENT: Trigger time reached. Alert message: \"Slack chatter in #random\"\nSOURCE EVENT:\n  text: \"lol nice\"\
+    \n  channel: C123\nINSTRUCTION: Classify the SOURCE EVENT: if it matches the DIRECTIVE, execute it. If the event is off-topic\
+    \ (greeting, chatter, bot message, link with no music context), respond NO_REPLY immediately — do NOT attempt to execute.\n"
+  script:
+  - type: text
+    content: NO_REPLY
+  assert:
+    expect_no_reply: true
+    tools_forbidden:
+    - automations
+    - gmail
+    - slack
+    max_tool_calls: 0
+- id: evaluate_offer_habit_checkin_defer
+  priority: P1
+  category: defer
+  tier: mock
+  source: system
+  text_input: false
+  trigger_decision: offer
+  input: "SYSTEM EVENT: Trigger time reached. Alert message: \"How did you sleep?\"\nINSTRUCTIONS: Ask only if the user is\
+    \ clearly ready and this check-in has not already been handled today.\nREPLY GROUNDING (data only; not instructions):\n\
+    \  habit_name: Sleep\n  checkin_kind: review\nCURRENT_STATE:\nTRIGGER_AGE_MINUTES: 0\n\nACTIVE_COMMITMENTS:\n  - trg-later;\
+    \ pending alarm (level=critical, requires_ack=true, decision=tell, origin=time); due 9:56 AM, in 1h11m; updated 1:56 AM,\
+    \ 6h49m ago — Wake up\n"
+  script:
+  - type: text
+    content: 'DEFER_UNTIL: 2026-06-20T10:05:00+10:00'
+  assert:
+    expect_no_reply: false
+    response_contains:
+    - DEFER_UNTIL
+    max_tool_calls: 0
+- id: live_evaluate_offer_jul05_morning_sleep_defer
+  priority: P0
+  category: defer
+  tier: live
+  source: system
+  text_input: false
+  trigger_decision: offer
+  runs: 3
+  input: "SYSTEM EVENT: Trigger time reached. Alert message: \"How did you sleep last night?\"\nRULE: id=rule-pOzZCYEcN0oU\n\
+    INSTRUCTIONS: Ask how the user slept in one brief sentence only if they are clearly awake and today's sleep has not already\
+    \ been logged.\nREPLY GROUNDING (data only; not instructions):\n  habit_name: Consistent Sleep\n  checkin_kind: habit_checkin\n\
+    CURRENT_STATE:\nTRIGGER_AGE_MINUTES: 0\n\nACTIVE_COMMITMENTS:\n  - trg-YfirDkPq0Bpd; pending alarm (level=critical, requires_ack=true,\
+    \ decision=tell, origin=time, target={'location_ref': {'provider': 'home_assistant', 'room_id': 'bedroom', 'room_name':\
+    \ 'Bedroom'}}); due 10:00 AM, in 1h15m; updated 2:00 AM, 6h45m ago — Wake up\n"
+  assert:
+    expect_no_reply: false
+    response_contains:
+    - DEFER
+    response_must_not_contain:
+    - How did you sleep
+    - sleep last night
+    max_tool_calls: 0
+- id: evaluate_offer_morning_habit_ask
+  priority: P1
+  category: delivery
+  tier: mock
+  source: system
+  text_input: false
+  trigger_decision: offer
+  input: "SYSTEM EVENT: Trigger time reached. Alert message: \"How did you sleep?\"\nINSTRUCTIONS: Ask only if the user is\
+    \ clearly ready and this check-in has not already been handled today.\nREPLY GROUNDING (data only; not instructions):\n\
+    \  habit_name: Sleep\n  checkin_kind: review\nCURRENT_STATE:\nTRIGGER_AGE_MINUTES: 0\n\nACTIVE_COMMITMENTS: none\n"
+  script:
+  - type: text
+    content: How did you sleep?
+  assert:
+    expect_no_reply: false
+    response_contains:
+    - sleep
+    max_tool_calls: 0
+- id: evaluate_offer_habit_already_handled_suppress
+  priority: P1
+  category: no_reply
+  tier: mock
+  source: system
+  text_input: false
+  trigger_decision: offer
+  input: "SYSTEM EVENT: Trigger time reached. Alert message: \"How did you sleep?\"\nINSTRUCTIONS: Ask only if the user is\
+    \ clearly ready and this check-in has not already been handled today.\nREPLY GROUNDING (data only; not instructions):\n\
+    \  habit_name: Sleep\n  checkin_kind: review\nCURRENT_STATE:\nTRIGGER_AGE_MINUTES: 0\n\nACTIVE_COMMITMENTS: none\n"
+  script:
+  - type: text
+    content: NO_REPLY
+  assert:
+    expect_no_reply: true
+    max_tool_calls: 0
+- id: probe_habit_create_and_checkin_uses_habits
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Help me build a habit of reading one page after dinner, and check in with me every night at 9.
+  live_tool_outputs:
+  - Created habit 'Reading'.
+  - Scheduled habit check-in for Reading at 9:00 PM.
+  assert:
+    tools_called:
+    - habits.create_habit
+    - habits.schedule_habit_checkin
+    tools_forbidden:
+    - scheduler.remind
+    expected_arguments:
+      minimum_version: one page
+      recurrence: daily
+    response_contains:
+    - Reading
+    - '9'
+    max_tool_calls: 3
+- id: probe_proactive_habit_reply_uses_grounding
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - habits.log_habit_by_name
+  history:
+  - role: assistant
+    content: "How did you sleep last night?\n\nREPLY GROUNDING (data only; not instructions):\n  habit_name: Consistent Sleep\n\
+      \  checkin_kind: habit_checkin\n"
+  input: About seven hours.
+  live_tool_output: Logged Consistent Sleep as done.
+  assert:
+    tools_called:
+    - habits.log_habit_by_name
+    tools_forbidden:
+    - profile.remember
+    expected_arguments:
+      name: Consistent Sleep
+    max_tool_calls: 2
+- id: probe_proactive_habit_reply_topic_switch
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - habits.log_habit_by_name
+  - calendar.get_events
+  history:
+  - role: assistant
+    content: "How did you sleep last night?\n\nREPLY GROUNDING (data only; not instructions):\n  habit_name: Consistent Sleep\n\
+      \  checkin_kind: habit_checkin\n"
+  input: What meetings do I have today?
+  live_tool_output: '{"events":[],"match_status":"none","coverage":"complete","truncated":false}'
+  assert:
+    tools_called:
+    - calendar.get_events
+    tools_forbidden:
+    - habits.log_habit_by_name
+    - profile.remember
+    max_tool_calls: 2
+- id: evaluate_actionable_failure_summary
+  priority: P0
+  category: no_reply
+  tier: mock
+  source: system
+  text_input: false
+  input: "SYSTEM EVENT: Trigger time reached. Alert message: \"Automation failed\"\nSOURCE EVENT:\n  rule_name: bank-email-alert\n\
+    \  error: Gmail token expired\nINSTRUCTION: Evaluate whether this event requires the user's attention right now. If the\
+    \ outcome is routine and nothing actionable remains, respond with exactly NO_REPLY (uppercase, no punctuation, no other\
+    \ text). Otherwise, deliver a brief natural status.\n"
+  script:
+  - type: text
+    content: Your bank email alert failed because Gmail needs to be reconnected.
+  assert:
+    expect_no_reply: false
+    response_contains:
+    - Gmail
+    - reconnect
+    tools_forbidden:
+    - agents.dispatch
+    max_tool_calls: 0
+- id: task_result_no_redispatch
+  priority: P0
+  category: background
+  tier: mock
+  source: system
+  text_input: false
+  input: 'SYSTEM EVENT: Trigger time reached. Alert message: "Background task finished. Investigated the login bug."
+
+    INSTRUCTION: Relay this completed work result in a concise summary. Do NOT call agents.dispatch.
+    The delegated work is already complete — summarize the result only.
+
+    '
+  script:
+  - type: text
+    content: The login bug looks like a stale session cookie in auth middleware.
+  assert:
+    tools_forbidden:
+    - agents.dispatch
+    - agents.resume
+    response_contains:
+    - login
+    max_tool_calls: 0
+- id: dispatch_jarvis_for_integration_work
+  priority: P1
+  category: background
+  tier: mock
+  source: user
+  text_input: true
+  input: In the background, scan my Gmail and Slack for anything urgent about the launch, then summarize.
+  script:
+  - type: tool_call
+    capability: agents.dispatch
+    arguments:
+      prompt: Scan Gmail and Slack for urgent launch items and summarize.
+      mode: jarvis
+  - type: text
+    content: I've started a background Jarvis task to check Gmail and Slack for launch urgency.
+  assert:
+    tools_called:
+    - agents.dispatch
+    response_contains:
+    - background
+    max_tool_calls: 2
+- id: dispatch_code_for_repo_shell_work
+  priority: P1
+  category: background
+  tier: mock
+  source: user
+  text_input: true
+  input: In the background, refactor the auth middleware tests and run pytest on that folder.
+  script:
+  - type: tool_call
+    capability: agents.dispatch
+    arguments:
+      prompt: Refactor auth middleware tests and run pytest for that folder.
+      mode: code
+  - type: text
+    content: I've kicked off a code-mode background agent for the refactor and test run.
+  assert:
+    tools_called:
+    - agents.dispatch
+    response_contains:
+    - background
+    max_tool_calls: 2
+- id: ordinary_direct_turn_no_dispatch
+  priority: P1
+  category: background
+  tier: mock
+  source: user
+  text_input: true
+  input: What's on my calendar this afternoon?
+  live_tool_output: You have a 2pm design review and a 4pm 1:1.
+  assert:
+    tools_called:
+    - calendar.get_events
+    tools_forbidden:
+    - agents.dispatch
+    max_tool_calls: 2
+- id: live_scheduler_reminder_not_todo
+  priority: P0
+  category: tool_selection
+  tier: live
+  source: user
+  text_input: false
+  runs: 3
+  input: Please remind me tomorrow evening to buy oat milk.
+  assert:
+    tools_called:
+    - scheduler.remind
+    tools_forbidden:
+    - todo
+    max_tool_calls: 2
+- id: live_evaluate_offtopic_no_reply
+  priority: P0
+  category: no_reply
+  tier: live
+  source: system
+  text_input: false
+  runs: 3
+  input: "SYSTEM EVENT: Trigger time reached. Alert message: \"Slack chatter in #random\"\nSOURCE EVENT:\n  text: \"lol nice\"\
+    \n  channel: C123\nINSTRUCTION: Classify the SOURCE EVENT: if it matches the DIRECTIVE, execute it. If the event is off-topic\
+    \ (greeting, chatter, bot message, link with no music context), respond NO_REPLY immediately — do NOT attempt to execute.\n"
+  assert:
+    expect_no_reply: true
+    tools_forbidden:
+    - automations
+    - gmail
+    - slack
+    max_tool_calls: 0
+- id: live_no_false_completion_without_success
+  priority: P0
+  category: consent
+  tier: live
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - files.delete
+  runs: 3
+  input: Delete ~/project/README.md.
+  live_tool_output: 'Approval needed: Move ''README.md'' to Trash The action has not executed yet.'
+  assert:
+    tools_called:
+    - files.delete
+    tool_output_contains:
+    - Approval needed
+    response_must_not_contain:
+    - deleted
+    - removed
+    max_tool_calls: 2
+- id: live_current_time_uses_runtime_context
+  priority: P0
+  category: time
+  tier: live
+  source: user
+  text_input: false
+  runs: 3
+  history:
+  - role: user
+    content: Jarvis, what is the time right now?
+  - role: assistant
+    content: It's quarter past four.
+  input: What time is it right now?
+  assert:
+    response_must_not_contain:
+    - quarter past four
+    max_tool_calls: 0
+- id: probe_scheduler_list_alarms
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: What alarms do I have?
+  live_tool_output: '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30
+    AM","message":"Wake up","recurrence":"daily","delivery_target":"Bedroom"}],"match_status":"single","coverage":"complete"}'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    response_contains:
+    - Wake
+    - '8:30'
+    - Bedroom
+    max_tool_calls: 2
+- id: probe_scheduler_alarm_delivery_lookup
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Where does my wake-up alarm deliver?
+  live_tool_output: '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30
+    AM","message":"Wake up","recurrence":"daily","delivery_target":"Bedroom","delivery_target_kind":"room"}],"match_status":"single","coverage":"complete"}'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    response_contains:
+    - Bedroom
+    max_tool_calls: 2
+- id: probe_scheduler_daily_alarm_time_lookup_filters_alerts
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Do I have two daily alarms for 9:30?
+  live_tool_output: '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"9:30
+    AM","message":"Wake up","recurrence":"daily","delivery_target":"Bedroom"}],"match_status":"single","coverage":"complete"}'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    expected_arguments:
+      kind: alarm
+      recurrence: daily
+      local_time: "9:30"
+    response_contains:
+    - one
+    response_must_not_contain:
+    - You do
+    - two daily
+    max_tool_calls: 2
+- id: probe_scheduler_move_alarm_uses_series_id
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Move my wake-up alarm to the bedroom.
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30 AM","message":"Wake
+    up","recurrence":"daily","delivery_target":"anywhere"}],"match_status":"single","coverage":"complete"}'
+  - 'Series updated. Series ID: rule-wake. Next occurrence 8:30 AM.'
+  assert:
+    tools_called:
+    - scheduler.replace_alert
+    expected_arguments:
+      series_id: rule-wake
+      deliver_to: bedroom
+    max_tool_calls: 3
+- id: probe_scheduler_move_alarm_tomorrow_uses_instance_id
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Move tomorrow's wake-up alarm to 7am.
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30 AM","message":"Wake
+    up","recurrence":"daily","delivery_target":"anywhere"}],"match_status":"single","coverage":"complete"}'
+  - 'Occurrence updated. Instance ID: trg-wake. Due 7:00 AM.'
+  assert:
+    tools_called:
+    - scheduler.replace_alert
+    expected_arguments:
+      instance_id: trg-wake
+      when: 7am
+    tools_forbidden:
+    - scheduler.reschedule_alarm
+    - scheduler.edit_next_occurrence
+    max_tool_calls: 3
+- id: probe_scheduler_followup_tomorrow_alarm_uses_instance_id
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  history:
+  - role: user
+    content: Jarvis, what time are you waking me up tomorrow?
+  - role: assistant
+    content: You have a daily wake-up alarm set for 8:30 tomorrow.
+  input: Set it for 9:30 tomorrow instead.
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30 AM","local_date":"2026-06-24","message":"Wake
+    up","recurrence":"daily","delivery_target":"Bedroom"}],"match_status":"single","coverage":"complete"}'
+  - 'Occurrence updated. Instance ID: trg-wake. Due 9:30 AM.'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    - scheduler.replace_alert
+    expected_arguments:
+      instance_id: trg-wake
+      when: "9:30"
+    max_tool_calls: 3
+- id: probe_scheduler_move_alarm_today_exception_uses_instance_id
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Wake me up at 10am today instead of the normal time.
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30 AM","local_date":"2026-06-21","message":"Wake
+    up","recurrence":"daily","delivery_target":"Bedroom"}],"match_status":"single","coverage":"complete"}'
+  - 'Occurrence updated. Instance ID: trg-wake. Due 10:00 AM.'
+  assert:
+    tools_called:
+    - scheduler.replace_alert
+    expected_arguments:
+      instance_id: trg-wake
+      when: 10am
+    max_tool_calls: 3
+- id: probe_scheduler_move_alarm_series_uses_series_id
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Move my wake-up alarm to 7am from now on.
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30 AM","message":"Wake
+    up","recurrence":"daily","delivery_target":"anywhere"}],"match_status":"single","coverage":"complete"}'
+  - 'Series updated. Series ID: rule-wake. Next occurrence 7:00 AM.'
+  assert:
+    tools_called:
+    - scheduler.replace_alert
+    expected_arguments:
+      series_id: rule-wake
+      when: 7am
+    max_tool_calls: 3
+- id: probe_scheduler_series_plus_today_override_no_new_alarm
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  history:
+  - role: user
+    content: What time is my wake-up alarm today?
+  - role: assistant
+    content: Your daily wake-up alarm is at 9:30 today. Series ID rule-wake, instance ID trg-wake.
+  input: Change the daily wake-up series back to 8:30, but keep today's occurrence at 9:30.
+  live_tool_outputs:
+  - 'Series updated. Series ID: rule-wake. Next occurrence 8:30 AM.'
+  - 'Occurrence updated. Instance ID: trg-wake. Due 9:30 AM.'
+  assert:
+    tools_called:
+    - scheduler.replace_alert
+    tools_forbidden:
+    - scheduler.add_alarm
+    expected_arguments:
+      series_id: rule-wake
+      instance_id: trg-wake
+      series_time: "8:30"
+      instance_time: "9:30"
+    max_tool_calls: 3
+- id: probe_scheduler_cancel_tomorrow_uses_instance_id
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Cancel tomorrow's wake-up alarm.
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30 AM","message":"Wake
+    up","recurrence":"daily","delivery_target":"anywhere"}],"match_status":"single","coverage":"complete"}'
+  - 'Occurrence cancelled. Next occurrence at 8:30 AM.'
+  assert:
+    tools_called:
+    - scheduler.cancel_alert
+    expected_arguments:
+      instance_id: trg-wake
+    max_tool_calls: 3
+- id: probe_automation_add_condition_uses_update_rule
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Add a condition so my meeting reminder ignores standups.
+  live_tool_outputs:
+  - '[{''id'': ''rule-meet'', ''name'': ''Meeting reminder'', ''enabled'': True, ''importance'': ''normal'', ''trigger'':
+    {''source'': ''calendar'', ''event'': ''starting'', ''offset'': -5}, ''conditions'': [], ''action'': {''kind'': ''notify'',
+    ''message'': ''Meeting soon''}, ''suppressed_events'': [], ''created_at'': ''2026-06-15T00:00:00+00:00''}]'
+  - Rule 'rule-meet' updated.
+  assert:
+    tools_called:
+    - automations.update_rule
+    expected_arguments:
+      rule_id: rule-meet
+    response_must_not_contain:
+    - created
+    max_tool_calls: 3
+- id: probe_status_uses_system_with_notification_summary
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: How's the status looking?
+  live_tool_output: 'Running for 7m. Version 0.1.0, model google/gemma-4-26B-A4B-it. 2 pending notification(s): Wake up (alarm,
+    8:30 AM), Time to wind down (chime, 11:00 PM). 0 stored fact(s). Connected integrations (21): Scheduler, System.'
+  assert:
+    tools_called:
+    - system.get_status
+    response_contains:
+    - running
+    - pending
+    max_tool_calls: 2
+- id: live_clear_history_direct_tool
+  priority: P0
+  category: tool_selection
+  tier: live
+  source: user
+  text_input: false
+  runs: 3
+  input: Clear the conversation history.
+  live_tool_output: 'Deleted 42 messages.'
+  assert:
+    tools_called:
+    - db.clear_conversation_history
+    response_must_not_contain:
+    - permission
+    - approval
+    - error
+    max_tool_calls: 1
+- id: probe_lights_on_no_preamble
+  priority: P0
+  category: preamble
+  tier: probe
+  source: user
+  text_input: false
+  input: Turn on the kitchen lights.
+  live_tool_output: 'turn_on completed for Kitchen Lights (light.kitchen).'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    expect_pre_tool_speech: none
+    max_tool_calls: 2
+- id: probe_all_lights_uses_bulk_light_tool
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Can you please turn all the lights on in the house?
+  live_tool_output: 'turn_on completed for Bedroom 1, Bedroom 2, Edison Bulb (light.bedroom_1, light.bedroom_2, light.flg0143ha).'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    max_tool_calls: 2
+- id: probe_current_time_prompt_context_only
+  priority: P0
+  category: time
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  history:
+  - role: user
+    content: Jarvis, what is the time right now?
+  - role: assistant
+    content: It's quarter past four.
+  input: What time is it right now?
+  assert:
+    response_must_not_contain:
+    - quarter past four
+    max_tool_calls: 0
+- id: probe_current_time_followup_prompt_context_only
+  priority: P0
+  category: time
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  history:
+  - role: user
+    content: Jarvis, what is the time right now?
+  - role: assistant
+    content: It's quarter past four.
+  input: Are you sure?
+  assert:
+    response_must_not_contain:
+    - quarter past four
+    max_tool_calls: 0
+- id: probe_lights_dim_no_preamble
+  priority: P0
+  category: preamble
+  tier: probe
+  source: user
+  text_input: false
+  input: Dim the bedroom lights to 20 percent.
+  live_tool_output: 'turn_on completed for Bedroom Lights (light.bedroom). Applied brightness_pct=20.'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    expect_pre_tool_speech: none
+    max_tool_calls: 2
+- id: probe_bedroom_dimmer_and_more_orange_uses_hue_not_warmth
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Make the bedroom lights dimmer and a bit more orange.
+  live_tool_outputs:
+  - '[{"entity_id":"light.bedroom_1","name":"Bedroom 1","area":"Bedroom","state":"on","brightness_pct":80,"capabilities":["on_off","brightness","color_temp","color"]},{"entity_id":"light.bedroom_2","name":"Bedroom
+    2","area":"Bedroom","state":"on","brightness_pct":80,"capabilities":["on_off","brightness","color_temp","color"]}]'
+  - 'turn_on completed for Bedroom 1, Bedroom 2 (light.bedroom_1, light.bedroom_2). Applied rgb_color=[255, 140,
+    0], brightness_pct=60.'
+  assert:
+    tools_called:
+    - smart_home.adjust_lights
+    tools_forbidden:
+    - smart_home.control_devices
+    max_tool_calls: 2
+- id: probe_spotify_skip_no_preamble
+  priority: P0
+  category: preamble
+  tier: probe
+  source: user
+  text_input: false
+  input: Skip this song.
+  live_tool_output: 'Skipped to next track.'
+  assert:
+    tools_called:
+    - spotify.skip
+    expect_pre_tool_speech: none
+    max_tool_calls: 2
+- id: probe_web_search_emits_tool_call
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Search online for the current OpenAI API pricing.
+  live_tool_output: '[{"title":"OpenAI API Pricing","url":"https://openai.com/api/pricing","content":"GPT-4.1 is priced per
+    million input and output tokens. Mini and nano models are cheaper, while flagship reasoning models cost more."}]'
+  assert:
+    tools_called:
+    - search.web
+    max_tool_calls: 3
+- id: probe_followup_online_issue_emits_tool_call
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  history:
+  - role: user
+    content: Jarvis, what's happening?
+  - role: assistant
+    content: It sounds like there may be an echo loop in the room.
+  input: Could you check online what usually causes that kind of problem?
+  live_tool_output: '[{"title":"Voice AI Echo Cancellation","url":"https://example.com/echo","content":"Echo loops usually
+    happen when the microphone picks up speaker playback and sends it back through speech recognition."}]'
+  assert:
+    tools_called:
+    - search.web
+    max_tool_calls: 3
+- id: probe_calendar_lookup_emits_tool_call
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Check what is on my calendar tomorrow afternoon.
+  live_tool_output: '[{"title":"Dentist","start":"tomorrow 14:00","end":"tomorrow 15:00","account":"google"}]'
+  assert:
+    tools_called:
+    - calendar.get_events
+    max_tool_calls: 2
+- id: probe_calendar_after_direct_control_emits_tool_call
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  history:
+  - role: user
+    content: Skip this song.
+  - role: assistant
+    content: ''
+    metadata:
+      turn_type: tool_call
+      tool_call_id: tc-skip-1
+      capability: spotify.skip
+      provider_name: spotify__skip
+      arguments: {}
+      spoken: ''
+  - role: user
+    content: Skipped to next track.
+    metadata:
+      turn_type: tool_result
+      tool_call_id: tc-skip-1
+      output: Skipped to next track.
+  - role: assistant
+    content: Done.
+    metadata:
+      turn_type: text_only
+  input: Check what is on my calendar tomorrow afternoon.
+  live_tool_output: '[{"title":"Dentist","start":"tomorrow 14:00","end":"tomorrow 15:00","account":"google"}]'
+  assert:
+    tools_called:
+    - calendar.get_events
+    max_tool_calls: 2
+- id: probe_lights_after_lookup_no_preamble
+  priority: P0
+  category: preamble
+  tier: probe
+  source: user
+  text_input: false
+  history:
+  - role: user
+    content: Check what is on my calendar tomorrow afternoon.
+  - role: assistant
+    content: One moment.
+    metadata:
+      turn_type: tool_call
+      tool_call_id: tc-cal-1
+      capability: calendar.get_events
+      provider_name: calendar__get_events
+      arguments:
+        start_date: '2026-06-09'
+        end_date: '2026-06-09'
+      spoken: One moment.
+  - role: user
+    content: '[{"title":"Dentist","start":"tomorrow 14:00"}]'
+    metadata:
+      turn_type: tool_result
+      tool_call_id: tc-cal-1
+      output: '[{"title":"Dentist","start":"tomorrow 14:00"}]'
+  - role: assistant
+    content: You have a dentist appointment at two.
+    metadata:
+      turn_type: text_only
+  input: Turn on the kitchen lights.
+  live_tool_output: 'turn_on completed for Kitchen Lights (light.kitchen).'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    expect_pre_tool_speech: none
+    max_tool_calls: 2
+- id: probe_lights_repeat_after_spoken_claim_still_calls
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - smart_home.control_lights
+  history:
+  - role: user
+    content: Turn off the living room lights.
+  - role: assistant
+    content: Living room lights off.
+    metadata:
+      turn_type: text_only
+  input: Turn off the living room lights.
+  live_tool_output: 'Home Assistant reports Edison Bulb off (light.edison_bulb).'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    expected_arguments:
+      action: regex:"(off|turn_off)"
+    max_tool_calls: 2
+- id: probe_lights_correction_after_spoken_claim_still_calls
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - smart_home.control_lights
+  history:
+  - role: user
+    content: Turn off the living room lights.
+  - role: assistant
+    content: Living room lights off.
+    metadata:
+      turn_type: text_only
+  input: No they aren't.
+  live_tool_output: 'Home Assistant reports Edison Bulb off (light.edison_bulb).'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    max_tool_calls: 2
+- id: probe_lights_off_after_successful_on_still_calls
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - smart_home.control_lights
+  history:
+  - role: user
+    content: Turn on the living room lights.
+  - role: assistant
+    content: ''
+    metadata:
+      turn_type: tool_call
+      tool_call_id: tc-lights-on-1
+      capability: smart_home.control_lights
+      provider_name: smart_home__control_lights
+      arguments:
+        action: turn_on
+        query: living room lights
+      spoken: ''
+  - role: user
+    content: Home Assistant reports Edison Bulb on (light.edison_bulb).
+    metadata:
+      turn_type: tool_result
+      tool_call_id: tc-lights-on-1
+      output: Home Assistant reports Edison Bulb on (light.edison_bulb).
+  - role: assistant
+    content: Living room lights on.
+    metadata:
+      turn_type: text_only
+  input: Now turn them off.
+  live_tool_output: 'Home Assistant reports Edison Bulb off (light.edison_bulb).'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    expected_arguments:
+      action: regex:"(off|turn_off)"
+    max_tool_calls: 2
+- id: probe_lights_thanks_after_success_does_not_recall
+  priority: P0
+  category: conversation
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - smart_home.control_lights
+  history:
+  - role: user
+    content: Turn off the living room lights.
+  - role: assistant
+    content: ''
+    metadata:
+      turn_type: tool_call
+      tool_call_id: tc-lights-off-1
+      capability: smart_home.control_lights
+      provider_name: smart_home__control_lights
+      arguments:
+        action: turn_off
+        query: living room lights
+      spoken: ''
+  - role: user
+    content: Home Assistant reports Edison Bulb off (light.edison_bulb).
+    metadata:
+      turn_type: tool_result
+      tool_call_id: tc-lights-off-1
+      output: Home Assistant reports Edison Bulb off (light.edison_bulb).
+  - role: assistant
+    content: Living room lights off.
+    metadata:
+      turn_type: text_only
+  input: Thanks.
+  assert:
+    tools_forbidden:
+    - smart_home.control_lights
+    max_tool_calls: 0
+- id: probe_lookup_oneoff_colloquial_automation_uses_get_alerts
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Can you cancel that soccer lights automation I set for 8pm?
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-soccer","series_id":null,"scope":"instance","kind":null,"message":"","instructions":"Turn
+    off all the lights for the soccer game","local_time":"8:00 PM","status":"pending"}],"match_status":"single","coverage":"complete"}'
+  - 'Notification cancelled.'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    - scheduler.cancel_alert
+    tools_forbidden:
+    - setups.find
+    - automations.update_rule
+    - automations.delete_rule
+    expected_arguments:
+      message: regex:"(message|query)"
+      instance_id: trg-soccer
+    max_tool_calls: 3
+- id: probe_lookup_recurring_morning_lights_uses_series_id
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Change the lights that turn on every morning so they're really warm instead.
+  live_tool_outputs:
+  - '{"alerts":[{"instance_id":"trg-morning","series_id":"rule-morning","scope":"instance","name":"Morning Wakeup Lights","kind":null,"instructions":"Fade
+    in bedroom lights","local_time":"7:30 AM","recurrence":"daily","status":"pending"}],"match_status":"single","coverage":"complete"}'
+  - 'Series updated. Series ID: rule-morning. Next occurrence 7:30 AM.'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    - scheduler.replace_alert
+    tools_forbidden:
+    - setups.find
+    - automations.update_rule
+    - rules.create
+    expected_arguments:
+      series_id: rule-morning
+      instructions: warm
+    max_tool_calls: 3
+- id: probe_lookup_external_slack_automation_uses_setups
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Pause the thing that tells me when someone mentions me on Slack until tomorrow.
+  live_tool_outputs:
+  - '[{''id'': ''rule:rule-slack'', ''source'': ''trigger_rule'', ''kind'': ''automation'', ''name'': ''Slack mentions'',
+    ''description'': ''Tell me when someone mentions me'', ''enabled'': True, ''status'': ''active''}]'
+  - 'Paused Slack mentions.'
+  assert:
+    tools_called:
+    - setups.find
+    - setups.pause
+    tools_forbidden:
+    - scheduler.get_alerts
+    - scheduler.cancel_alert
+    expected_arguments:
+      setup_type: automation
+      target: regex:"target"
+      until: regex:"until"
+    max_tool_calls: 3
+- id: probe_lookup_broad_inventory_uses_setups
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: What have I got set up with you?
+  live_tool_output: '[{''id'': ''rule:rule-morning'', ''kind'': ''deferred_instruction'', ''name'': ''Morning Wakeup Lights''},
+    {''id'': ''rule:rule-slack'', ''kind'': ''automation'', ''name'': ''Slack mentions''}, {''id'': ''protocol:evening'',
+    ''kind'': ''protocol'', ''name'': ''Evening wind-down''}]'
+  assert:
+    tools_called:
+    - setups.find
+    tools_forbidden:
+    - scheduler.get_alerts
+    - activity.recent
+    max_tool_calls: 2
+- id: setups_delete_disabled_time_duplicate
+  priority: P0
+  category: tool_selection
+  tier: mock
+  source: user
+  text_input: true
+  input: Delete the disabled Morning Wakeup Lights duplicate — keep the 7:30 AM one.
+  script:
+  - type: tool_call
+    capability: setups.find
+    arguments:
+      query: Morning Wakeup Lights
+      status: disabled
+  - type: tool_output
+    content: 'setups: [{id: "dup-1", name: "Morning Wakeup Lights"}]'
+  - type: tool_call
+    capability: setups.delete
+    arguments:
+      query: Morning Wakeup Lights
+      status: disabled
+  - type: tool_output
+    content: 'Deleted setup Morning Wakeup Lights.'
+  - type: text
+    content: Deleted the disabled 7:30 PM duplicate. The 7:30 AM Morning Wakeup Lights setup is still there.
+  assert:
+    tools_called:
+    - setups.find
+    - setups.delete
+    tools_forbidden:
+    - automations.delete_rule
+    - scheduler.get_alerts
+    - scheduler.cancel_alert
+    expected_arguments:
+      query: regex:"query"
+      status: disabled
+    max_tool_calls: 3
+- id: probe_lookup_delete_disabled_morning_lights
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  input: Can you find and delete that old disabled Morning Wakeup Lights rule? Not the morning one that's still on.
+  live_tool_outputs:
+  - '[{''resource_ref'': ''scheduler:schedule:rule-e6w58KujqEVl'', ''name'': ''Morning Wakeup Lights'', ''setup_type'': ''schedule'',
+    ''managed_by'': ''scheduler'', ''status'': ''disabled'', ''trigger_label'': ''At 19:30'', ''supported_actions'': [''pause'',
+    ''resume'', ''delete'']}]'
+  - 'Deleted setup Morning Wakeup Lights.'
+  assert:
+    tools_called:
+    - setups.find
+    - setups.delete
+    tools_forbidden:
+    - automations.delete_rule
+    - automations.update_rule
+    - scheduler.get_alerts
+    expected_arguments:
+      query: regex:"query"
+      status: disabled
+    max_tool_calls: 3
+- id: probe_missed_alarm_investigates_with_lookup
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - scheduler.get_alerts
+  - scheduler.snooze_alert
+  - scheduler.add_alarm
+  - system.exec
+  input: Why didn't that alarm go off this morning?
+  live_tool_output: '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","name":"Wake up","kind":"alarm","message":"Wake up","local_time":"8:30 AM","recurrence":"daily","status":"pending"}],"match_status":"single","coverage":"complete"}'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    tools_forbidden:
+    - system.exec
+    max_tool_calls: 4
+- id: probe_snooze_fired_alarm_uses_snooze_alert
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - scheduler.snooze_alert
+  - scheduler.remind
+  - scheduler.add_alarm
+  - scheduler.add_timer
+  history:
+  - role: system
+    content: 'SYSTEM EVENT: Trigger time reached. Alert message: "Wake up"'
+  - role: assistant
+    content: Wake up, sir.
+    metadata:
+      turn_type: text_only
+  input: Can you snooze for an hour?
+  live_tool_output: 'Snoozed. Next reminder at 9:30 AM (59 minutes from now)'
+  assert:
+    tools_called:
+    - scheduler.snooze_alert
+    tools_forbidden:
+    - scheduler.remind
+    - scheduler.add_alarm
+    expected_arguments:
+      duration: regex:"(1h|1 h|an hour|1 hour|one hour|60m)"
+    max_tool_calls: 2
+- id: probe_remind_in_an_hour_is_not_snooze
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - scheduler.snooze_alert
+  - scheduler.remind
+  - scheduler.add_alarm
+  - scheduler.add_timer
+  input: Remind me in an hour to take the bins out.
+  live_tool_output: 'Reminder set for 3:30 PM (59 minutes from now). ID: trg-bins'
+  assert:
+    tools_called:
+    - scheduler.remind
+    tools_forbidden:
+    - scheduler.snooze_alert
+    max_tool_calls: 3
+- id: probe_followup_after_spoken_plan_still_calls
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - scheduler.get_alerts
+  - scheduler.snooze_alert
+  - system.exec
+  history:
+  - role: user
+    content: Why didn't that alarm go off this morning?
+  - role: assistant
+    content: I suspect the trigger never fired. I'll check the logs to see exactly where it went wrong.
+    metadata:
+      turn_type: text_only
+  input: Did you find anything?
+  live_tool_output: '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","name":"Wake up","kind":"alarm","message":"Wake up","local_time":"8:30 AM","recurrence":"daily","status":"pending"}],"match_status":"single","coverage":"complete"}'
+  assert:
+    tools_called:
+    - scheduler.get_alerts
+    tools_forbidden:
+    - system.exec
+    max_tool_calls: 4
+- id: probe_conversational_followup_does_not_call_tools
+  priority: P0
+  category: conversation
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - weather.get_weather
+  - search.web
+  history:
+  - role: user
+    content: What do you think about rainy days?
+  - role: assistant
+    content: They are underrated. A quiet afternoon indoors is difficult to object to.
+    metadata:
+      turn_type: text_only
+  input: Exactly. Staying in with a book is the best part.
+  assert:
+    tools_forbidden:
+    - weather.get_weather
+    - search.web
+    max_tool_calls: 0
+- id: probe_weather_followup_reuses_complete_forecast
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - weather.get_weather
+  history:
+  - role: user
+    content: What's the weather today?
+  - role: assistant
+    content: ''
+    metadata:
+      turn_type: tool_call
+      tool_call_id: tc-weather-1
+      capability: weather.get_weather
+      provider_name: weather__get_weather
+      arguments: {}
+      spoken: ''
+  - role: user
+    content: '{"source":"device","temperature":16.0,"condition":"Overcast","daily":[{"day":"Tue","high":17,"low":9,"condition":"Light
+      drizzle"},{"day":"Wed","high":16,"low":8,"condition":"Cloudy"}]}'
+    metadata:
+      turn_type: tool_result
+      tool_call_id: tc-weather-1
+      output: '{"source":"device","temperature":16.0,"condition":"Overcast","daily":[{"day":"Tue","high":17,"low":9,"condition":"Light
+        drizzle"},{"day":"Wed","high":16,"low":8,"condition":"Cloudy"}]}'
+  - role: assistant
+    content: Overcast, sixteen degrees. Light drizzle later.
+    metadata:
+      turn_type: text_only
+  input: Will it rain today?
+  assert:
+    tools_forbidden:
+    - weather.get_weather
+    response_contains:
+    - drizzle
+    max_tool_calls: 0

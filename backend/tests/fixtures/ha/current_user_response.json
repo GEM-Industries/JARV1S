@@ -1,0 +1,7 @@
+{
+  "id": "fixture-user-id",
+  "name": "Fixture Owner",
+  "is_owner": true,
+  "is_admin": true,
+  "credentials": []
+}

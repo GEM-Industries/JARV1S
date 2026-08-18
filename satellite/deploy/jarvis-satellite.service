@@ -1,0 +1,17 @@
+[Unit]
+Description=JARV1S voice satellite
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.jarvis-satellite/app
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/bin/uv run python -m jarvis_satellite --config %h/.jarvis-satellite/config.toml
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.jarvis-satellite/satellite.log
+StandardError=append:%h/.jarvis-satellite/satellite.log
+
+[Install]
+WantedBy=default.target

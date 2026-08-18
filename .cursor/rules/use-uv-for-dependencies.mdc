@@ -1,0 +1,11 @@
+---
+alwaysApply: true
+---
+# Using uv for Dependency Management
+
+- Always add new dependencies using `uv add package-name`
+- Specify version constraints (e.g., `uv add "package-name>=1.2.3"`)
+- For development dependencies, use `uv add --dev package-name`
+- Sync the environment with `uv sync` after pulling changes
+- Keep the `uv.lock` file in version control
+- Do not use `pip install` directly; it will bypass the lockfile

@@ -1,0 +1,20 @@
+[
+  {
+    "entity_id": "light.grid_bulb_1",
+    "name": "Smart Bulb 1",
+    "device_id": "grid-bulb-1",
+    "area_id": null,
+    "platform": "tuya",
+    "config_entry_id": "tuya-entry-1",
+    "disabled_by": null
+  },
+  {
+    "entity_id": "light.grid_bulb_2",
+    "name": "Smart Bulb 2",
+    "device_id": "grid-bulb-2",
+    "area_id": null,
+    "platform": "tuya",
+    "config_entry_id": "tuya-entry-1",
+    "disabled_by": null
+  }
+]

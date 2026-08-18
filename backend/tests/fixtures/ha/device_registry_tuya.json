@@ -1,0 +1,24 @@
+[
+  {
+    "id": "grid-bulb-1",
+    "config_entries": ["tuya-entry-1"],
+    "connections": [],
+    "identifiers": [["tuya", "grid-bulb-1"]],
+    "manufacturer": "Grid Connect",
+    "model": "E27 RGB",
+    "name": "Smart Bulb 1",
+    "area_id": null,
+    "disabled_by": null
+  },
+  {
+    "id": "grid-bulb-2",
+    "config_entries": ["tuya-entry-1"],
+    "connections": [],
+    "identifiers": [["tuya", "grid-bulb-2"]],
+    "manufacturer": "Grid Connect",
+    "model": "E27 RGB",
+    "name": "Smart Bulb 2",
+    "area_id": null,
+    "disabled_by": null
+  }
+]

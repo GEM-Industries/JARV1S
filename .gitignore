@@ -1,0 +1,97 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+backend/.cache/utterances/
+backend/.cache/mcp_schemas/
+backend/.cache/fastembed/
+
+# Logs
+*.log
+logs/
+
+# MongoDB
+data/db/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Audio/Media
+*.wav
+*.mp3
+*.m4a
+recorded_audio/
+
+# Exceptions: committed audio assets
+!backend/voice/jarvis_reference.wav
+!frontend/public/sounds/*.wav
+
+# Models (if downloaded locally)
+training/wakeword/models/
+training/wakeword/*-model-*
+
+# Exception: Allow deployed wakeword model
+!backend/resources/models/wakeword/Jarvis.onnx
+!backend/resources/models/speaker/*.onnx
+!backend/resources/models/speaker/*.npy
+
+# Node.js
+node_modules/
+frontend/dist/
+apps/desktop/node_modules/
+apps/desktop/shell-dist/
+apps/desktop/resources/host/
+apps/desktop/resources/helpers/Ollama/
+apps/desktop/.build-cache/
+apps/desktop/.cache/
+apps/desktop/src-tauri/target/
+
+# Local runtime / bootstrap data (packaged Host uses ~/Library/Application Support/JARV1S)
+.data/
+
+# graphify — commit graphify-out/ for team context; keep local cost tracking out
+graphify-out/cost.json
+graphify-out/.rebuild.lock

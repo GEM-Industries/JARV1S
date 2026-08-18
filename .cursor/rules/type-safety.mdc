@@ -1,0 +1,16 @@
+---
+description: Maintain type safety throughout the codebase (Python & TypeScript).
+globs: **/*.py,**/*.ts,**/*.tsx
+---
+
+# Type Safety
+
+## Python
+- Use type hints for all function parameters and return values.
+- Use generic types (`List[str]`) and `Optional[T]`.
+- Use Pydantic models for data validation.
+
+## TypeScript
+- **No `any`**: Strictly forbidden. Use `unknown` if necessary.
+- **Interfaces**: Define explicit interfaces for all Props and API responses.
+- **Strict Mode**: Ensure `tsconfig.json` has `strict: true`.

@@ -1,0 +1,11 @@
+---
+description: Use environment-based configuration with Pydantic settings.
+globs: core/config.py, .env*
+---
+
+# Environment Configuration
+
+- Store configuration in environment variables.
+- Use .env files for local development.
+- Use Pydantic Settings for validation.
+- Keep it simple for the prototype phase (DEBUG, KEYS, PATHS).

@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Bundled startup shell capabilities",
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "allow-get-launch-state",
+    "allow-get-call-activity",
+    "allow-start-host",
+    "allow-restart-host",
+    "allow-open-logs"
+  ]
+}

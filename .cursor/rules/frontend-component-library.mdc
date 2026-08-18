@@ -1,0 +1,14 @@
+---
+description: Frontend component library conventions for reusable UI primitives
+globs: frontend/src/**/*.tsx
+alwaysApply: false
+---
+
+# Frontend Component Library
+
+- Prefer shared UI primitives in `frontend/src/components/ui` before adding local button, menu, modal, pill, or card styling in feature files.
+- If a shared component looks wrong in more than one place, fix or add a named variant on the shared component instead of patching each caller with ad hoc Tailwind classes.
+- Local `className` overrides should be layout-only by default: width, grid placement, spacing, or feature-specific alignment. Avoid local color, border, hover, focus, and active-state overrides unless the component API cannot express the needed state.
+- Add component variants with semantic names (`brand`, `neutral`, `subtle`, `danger`, `critical`) and keep their hover/focus/disabled states visually complete.
+- For reusable interactive primitives, default to `type="button"`, forward unknown props to the DOM element, preserve focus-visible styles, and expose `data-*` hooks for state/variant testing.
+- Do not extract feature compositions into `ui`; extract stable primitives only. Keep product-specific panels and menus in `features` or `layout`.

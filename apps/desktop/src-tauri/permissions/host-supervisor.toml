@@ -1,0 +1,64 @@
+[[permission]]
+identifier = "allow-get-launch-state"
+description = "Read host launch state"
+commands.allow = ["get_launch_state"]
+
+[[permission]]
+identifier = "allow-start-host"
+description = "Start JARV1S Host"
+commands.allow = ["start_host"]
+
+[[permission]]
+identifier = "allow-restart-host"
+description = "Restart JARV1S Host"
+commands.allow = ["restart_host"]
+
+[[permission]]
+identifier = "allow-stop-host"
+description = "Stop JARV1S Host"
+commands.allow = ["stop_host"]
+
+[[permission]]
+identifier = "allow-get-host-status"
+description = "Read host reachability and Tailscale status"
+commands.allow = ["get_host_status"]
+
+[[permission]]
+identifier = "allow-get-call-activity"
+description = "Read native conferencing audio activity"
+commands.allow = ["get_call_activity"]
+
+[[permission]]
+identifier = "allow-enable-host-serve"
+description = "Enable Tailscale Serve for private Host access"
+commands.allow = ["enable_host_serve_cmd"]
+
+[[permission]]
+identifier = "allow-enable-host-funnel"
+description = "Enable Tailscale Funnel for external triggers"
+commands.allow = ["enable_host_funnel_cmd"]
+
+[[permission]]
+identifier = "allow-disable-host-funnel"
+description = "Disable Tailscale Funnel for external triggers"
+commands.allow = ["disable_host_funnel_cmd"]
+
+[[permission]]
+identifier = "allow-get-host-prefs"
+description = "Read host preference flags"
+commands.allow = ["get_host_prefs"]
+
+[[permission]]
+identifier = "allow-set-host-prefs"
+description = "Update host preference flags"
+commands.allow = ["set_host_prefs"]
+
+[[permission]]
+identifier = "allow-set-managed-local-llm-enabled"
+description = "Start or stop the JARV1S-managed on-device LLM sidecar"
+commands.allow = ["set_managed_local_llm_enabled_cmd"]
+
+[[permission]]
+identifier = "allow-get-device-location"
+description = "Read the Host machine GPS fix via Core Location"
+commands.allow = ["get_device_location"]

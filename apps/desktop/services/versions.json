@@ -1,0 +1,9 @@
+{
+  "minimum_macos": "14.0",
+  "arch": "arm64",
+  "mongodb": {
+    "version": "8.2.3",
+    "download_url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.2.3.tgz",
+    "sha256": "a9455021ea2dd8d3b475dac45b98c496ee87572aa2c136d1d52e8a3362c9c15f"
+  }
+}

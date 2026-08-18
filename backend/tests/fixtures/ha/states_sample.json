@@ -1,0 +1,35 @@
+[
+  {
+    "entity_id": "light.living_room",
+    "state": "on",
+    "attributes": {
+      "friendly_name": "Living Room",
+      "supported_features": 0,
+      "supported_color_modes": ["brightness", "color_temp"],
+      "brightness": 51,
+      "color_temp_kelvin": 2700,
+      "min_color_temp_kelvin": 2000,
+      "max_color_temp_kelvin": 6500
+    },
+    "last_changed": "2026-06-04T10:00:00.000000+00:00",
+    "last_updated": "2026-06-04T10:00:00.000000+00:00"
+  },
+  {
+    "entity_id": "switch.office_fan",
+    "state": "on",
+    "attributes": {
+      "friendly_name": "Office Fan"
+    },
+    "last_changed": "2026-06-04T09:30:00.000000+00:00",
+    "last_updated": "2026-06-04T09:30:00.000000+00:00"
+  },
+  {
+    "entity_id": "lock.front_door",
+    "state": "locked",
+    "attributes": {
+      "friendly_name": "Front Door"
+    },
+    "last_changed": "2026-06-04T08:00:00.000000+00:00",
+    "last_updated": "2026-06-04T08:00:00.000000+00:00"
+  }
+]

@@ -1,0 +1,18 @@
+services:
+  mongodb:
+    image: mongo:8.2@sha256:a706cb4e493bcd0262f345b3b0c78732ca0e54301f0d7bbe2b66f26313ce7ccb
+    container_name: jarvis-mongodb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MONGODB_PORT:-27018}:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mongodb_data:

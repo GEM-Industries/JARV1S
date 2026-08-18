@@ -1,0 +1,18 @@
+[
+  {
+    "entity_id": "light.living_room",
+    "name": "Living Room",
+    "device_id": "abc123device",
+    "area_id": "living_room",
+    "platform": "hue",
+    "disabled_by": null
+  },
+  {
+    "entity_id": "switch.office_fan",
+    "name": "Office Fan",
+    "device_id": null,
+    "area_id": "office",
+    "platform": "template",
+    "disabled_by": null
+  }
+]

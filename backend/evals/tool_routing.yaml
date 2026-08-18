@@ -1,0 +1,888 @@
+- id: compound_maps_calendar_scheduler
+  source: synthetic_control
+  category: compound
+  turns:
+    - user: "Find the drive time to the dentist, check my calendar, and remind me when to leave."
+      required_plugins: ["google_maps", "calendar", "scheduler"]
+      optional_plugins: ["time"]
+      hard_negative_plugins: []
+  notes: "Google Maps is connected; drive-time/distance must route google_maps."
+
+- id: compound_maps_weather_calendar
+  source: synthetic_control
+  category: compound
+  turns:
+    - user: "Check whether it will rain around my dentist appointment and how long the drive is."
+      required_plugins: ["calendar", "weather", "google_maps"]
+      optional_plugins: ["time"]
+      hard_negative_plugins: []
+
+- id: compound_calendar_slack
+  source: synthetic_control
+  category: compound
+  turns:
+    - user: "Check my calendar and send a Slack message to the team if I'm going to be late."
+      required_plugins: ["calendar", "slack"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: compound_gmail_calendar
+  source: synthetic_control
+  category: compound
+  turns:
+    - user: "Check my email for the flight confirmation and add the departure time to my calendar."
+      required_plugins: ["gmail", "calendar"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: compound_zoom_calendar
+  source: synthetic_control
+  category: compound
+  turns:
+    - user: "Create a Zoom meeting for tomorrow afternoon and add it to my calendar."
+      required_plugins: ["zoom", "calendar"]
+      optional_plugins: ["scheduler"]
+      hard_negative_plugins: []
+
+- id: compound_search_todo
+  source: synthetic_control
+  category: compound
+  turns:
+    - user: "Look up the latest Cursor release notes and add a task to review them later."
+      required_plugins: ["search", "todo"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: compound_github_agents
+  source: synthetic_control
+  category: compound
+  turns:
+    - user: "Create a GitHub issue for the login bug and ask a background agent to investigate it."
+      required_plugins: ["github", "agents"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_google_maps_route
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "How long is the drive to Sydney Airport?"
+      required_plugins: ["google_maps"]
+      optional_plugins: ["time"]
+      hard_negative_plugins: []
+
+- id: single_smart_home_all_lights_on
+  source: field_regression
+  category: single_tool
+  turns:
+    - user: "Can you please turn all the lights on in the house?"
+      required_plugins: ["smart_home"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_google_maps_place_search
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Find a cafe near me that's open now."
+      required_plugins: ["google_maps"]
+      optional_plugins: ["time"]
+      hard_negative_plugins: []
+
+- id: single_slack_send
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Send a Slack message to Alex saying I'm running five minutes late."
+      required_plugins: ["slack"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_slack_search
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Search Slack for the deployment thread."
+      required_plugins: ["slack"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_github_issue
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Create a GitHub issue for the broken login form."
+      required_plugins: ["github"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_github_pull_requests
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "List my open pull requests on GitHub."
+      required_plugins: ["github"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_zoom_create_meeting
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Schedule a Zoom call with Maya tomorrow at 3."
+      required_plugins: ["zoom"]
+      optional_plugins: ["calendar", "scheduler"]
+      hard_negative_plugins: []
+
+- id: single_weather_today
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "What's the weather like today?"
+      required_plugins: ["weather"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_weather_there_not_maps
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Is there rain tomorrow?"
+      required_plugins: ["weather"]
+      optional_plugins: []
+      hard_negative_plugins: ["google_maps"]
+
+- id: single_calendar_today
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "What's on my calendar today?"
+      required_plugins: ["calendar"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_scheduler_reminder
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Remind me to take the bins out tonight."
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_scheduler_live_briefing
+  source: regression_20260507_scheduling_intent
+  category: single_tool
+  turns:
+    - user: "Tomorrow morning at 10, brief me on the live information I need for the day."
+      required_plugins: ["scheduler"]
+      optional_plugins: ["protocol"]
+      hard_negative_plugins: ["automations"]
+
+- id: compound_scheduler_protocol_later
+  source: regression_20260507_scheduling_intent
+  category: compound
+  turns:
+    - user: "Run my saved briefing protocol tomorrow at 10."
+      required_plugins: ["scheduler", "protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["automations"]
+
+- id: single_gmail_unread
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Do I have any new emails?"
+      required_plugins: ["gmail"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_spotify_play
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Play some focus music."
+      required_plugins: ["spotify"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_search_web
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Search the web for current OpenAI API pricing."
+      required_plugins: ["search"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_todo_task
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Add buy oat milk to my task list."
+      required_plugins: ["todo"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_system_volume
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Turn the volume down a bit."
+      required_plugins: ["system"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_profile_memory
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Remember that I prefer morning workouts."
+      required_plugins: ["profile"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_automation_rule
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Set up an automation to warn me before meetings with more than five attendees."
+      required_plugins: ["automations"]
+      optional_plugins: ["calendar"]
+      hard_negative_plugins: []
+
+- id: single_protocol_run
+  source: synthetic_control
+  category: single_tool
+  turns:
+    - user: "Run my morning briefing protocol."
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: followup_google_maps_access_then_route
+  source: synthetic_control
+  category: multi_turn_capability_then_action
+  turns:
+    - user: "Do you have access to Google Maps?"
+      required_plugins: ["google_maps"]
+      optional_plugins: ["system"]
+      hard_negative_plugins: []
+    - user: "Great, use it to find the drive time to the dentist."
+      required_plugins: ["google_maps"]
+      optional_plugins: []
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_slack_access_then_send
+  source: synthetic_control
+  category: multi_turn_capability_then_action
+  turns:
+    - user: "Can you use Slack?"
+      required_plugins: ["slack"]
+      optional_plugins: ["system"]
+      hard_negative_plugins: []
+    - user: "Cool, message Alex that I'm running five minutes late."
+      required_plugins: ["slack"]
+      optional_plugins: []
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_github_access_then_issue
+  source: synthetic_control
+  category: multi_turn_capability_then_action
+  turns:
+    - user: "Do you have access to GitHub?"
+      required_plugins: ["github"]
+      optional_plugins: ["system"]
+      hard_negative_plugins: []
+    - user: "Please create an issue for the flaky login test."
+      required_plugins: ["github"]
+      optional_plugins: []
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_zoom_access_then_meeting
+  source: synthetic_control
+  category: multi_turn_capability_then_action
+  turns:
+    - user: "Are my Zoom tools connected?"
+      required_plugins: ["zoom"]
+      optional_plugins: ["system"]
+      hard_negative_plugins: []
+    - user: "Please set up a call with Maya tomorrow afternoon."
+      required_plugins: ["zoom"]
+      optional_plugins: ["calendar", "scheduler"]
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_calendar_scheduler_do_it
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "I need to book a reminder for tomorrow after I check my calendar."
+      required_plugins: ["calendar", "scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Okay, do it now."
+      required_plugins: ["calendar", "scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_maps_place_then_drive
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "Find the nearest Bunnings on Google Maps."
+      required_plugins: ["google_maps"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "How long would it take to drive there?"
+      required_plugins: ["google_maps"]
+      optional_plugins: ["time"]
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_gmail_send_it
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "Draft a reply to Sarah saying Friday works for me."
+      required_plugins: ["gmail"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Yes, send it."
+      required_plugins: ["gmail"]
+      optional_plugins: []
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_spotify_queue_it
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "Find some chilled jazz for dinner."
+      required_plugins: ["spotify"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Add it to the queue."
+      required_plugins: ["spotify"]
+      optional_plugins: []
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: focus_scheduler_get_rid_of_that
+  source: field_regression
+  category: multi_turn_focus
+  turns:
+    - user: "What alerts and reminders do I have for today?"
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Can you please get rid of that?"
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: ["calendar"]
+      depends_on_previous_turn: true
+
+- id: focus_calendar_delete_it
+  source: synthetic_control
+  category: multi_turn_focus
+  turns:
+    - user: "What's my next calendar event?"
+      required_plugins: ["calendar"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Delete it."
+      required_plugins: ["calendar"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler"]
+      depends_on_previous_turn: true
+
+- id: focus_todo_mark_that_done
+  source: synthetic_control
+  category: multi_turn_focus
+  turns:
+    - user: "Show me my open tasks."
+      required_plugins: ["todo"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Mark that done."
+      required_plugins: ["todo"]
+      optional_plugins: []
+      hard_negative_plugins: ["calendar", "scheduler"]
+      depends_on_previous_turn: true
+
+- id: focus_no_action_ignore_that
+  source: synthetic_control
+  category: multi_turn_focus
+  turns:
+    - user: "What background tasks are running?"
+      required_plugins: ["agents"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Ignore that for now."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["agents"]
+      depends_on_previous_turn: true
+
+- id: focus_topic_switch_email_it
+  source: synthetic_control
+  category: multi_turn_focus
+  turns:
+    - user: "What alerts and reminders do I have for today?"
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Actually email it to Sarah instead."
+      required_plugins: ["gmail"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler"]
+      depends_on_previous_turn: true
+
+- id: delayed_protocol_list_then_cancel_that
+  source: synthetic_control
+  category: multi_turn_delayed_reference
+  turns:
+    - user: "Do I have any protocols active?"
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["profile"]
+    - user: "Thanks, that's helpful."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Can you please cancel that?"
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler", "todo"]
+      depends_on_previous_turn: true
+
+- id: delayed_protocol_steps_then_delete_it
+  source: synthetic_control
+  category: multi_turn_delayed_reference
+  turns:
+    - user: "What steps are in my travel prep protocol?"
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Actually never mind."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Delete it."
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["files", "todo"]
+      depends_on_previous_turn: true
+
+- id: delayed_profile_memory_then_forget_that
+  source: synthetic_control
+  category: multi_turn_delayed_reference
+  turns:
+    - user: "Remember that I prefer decaf after noon."
+      required_plugins: ["profile"]
+      optional_plugins: []
+      hard_negative_plugins: ["protocol"]
+    - user: "Actually, one more thing."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Forget that."
+      required_plugins: ["profile"]
+      optional_plugins: []
+      hard_negative_plugins: ["protocol"]
+      depends_on_previous_turn: true
+
+- id: delayed_maps_place_then_there
+  source: synthetic_control
+  category: multi_turn_delayed_reference
+  turns:
+    - user: "Find the nearest pharmacy that's open now."
+      required_plugins: ["google_maps"]
+      optional_plugins: []
+      hard_negative_plugins: ["search"]
+    - user: "Okay, hold on a second."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "How long would it take to get there?"
+      required_plugins: ["google_maps"]
+      optional_plugins: ["time"]
+      hard_negative_plugins: ["search"]
+      depends_on_previous_turn: true
+
+- id: followup_protocol_access_then_show_active
+  source: synthetic_control
+  category: multi_turn_capability_then_action
+  turns:
+    - user: "Can you manage my protocols?"
+      required_plugins: ["protocol"]
+      optional_plugins: ["system"]
+      hard_negative_plugins: ["profile"]
+    - user: "Show me the active ones."
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["profile"]
+      depends_on_previous_turn: true
+
+- id: followup_calendar_then_move_that
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "What's my next calendar event?"
+      required_plugins: ["calendar"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Move that to tomorrow morning."
+      required_plugins: ["calendar"]
+      optional_plugins: ["scheduler"]
+      hard_negative_plugins: ["todo"]
+      depends_on_previous_turn: true
+
+- id: followup_todo_then_mark_that_done
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "Add renew passport to my task list."
+      required_plugins: ["todo"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler"]
+    - user: "Actually mark that as done."
+      required_plugins: ["todo"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler"]
+      depends_on_previous_turn: true
+
+- id: followup_calendar_ordinal_reference
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "What's on after my standup today?"
+      required_plugins: ["calendar"]
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Push the second one back by half an hour."
+      required_plugins: ["calendar"]
+      optional_plugins: ["scheduler"]
+      hard_negative_plugins: ["todo"]
+      depends_on_previous_turn: true
+
+- id: followup_scheduler_time_correction
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "Remind me to call Mum at six tonight."
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: ["todo"]
+    - user: "Actually make that seven instead."
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: ["calendar", "todo"]
+      depends_on_previous_turn: true
+
+- id: followup_slack_then_email_instead
+  source: synthetic_control
+  category: multi_turn_correction
+  turns:
+    - user: "Send Maya a Slack saying the draft is ready."
+      required_plugins: ["slack"]
+      optional_plugins: []
+      hard_negative_plugins: ["gmail"]
+    - user: "Actually email it to her instead."
+      required_plugins: ["gmail"]
+      optional_plugins: ["slack"]
+      hard_negative_plugins: []
+      depends_on_previous_turn: true
+
+- id: followup_slack_then_queue_music_instead
+  source: synthetic_control
+  category: multi_turn_correction
+  turns:
+    - user: "Send Maya a Slack saying the draft is ready."
+      required_plugins: ["slack"]
+      optional_plugins: []
+      hard_negative_plugins: ["spotify"]
+    - user: "Actually queue it instead."
+      required_plugins: ["spotify"]
+      optional_plugins: ["slack"]
+      hard_negative_plugins: ["gmail"]
+      depends_on_previous_turn: true
+
+- id: followup_protocol_evening_then_drop_one
+  source: synthetic_control
+  category: multi_turn_carryover
+  turns:
+    - user: "Which routines do I have for evenings?"
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["profile"]
+    - user: "Drop the wind-down one."
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["todo", "scheduler"]
+      depends_on_previous_turn: true
+
+- id: delayed_agents_status_then_resume_second
+  source: synthetic_control
+  category: multi_turn_delayed_reference
+  turns:
+    - user: "What background tasks are running?"
+      required_plugins: ["agents"]
+      optional_plugins: []
+      hard_negative_plugins: ["system"]
+    - user: "Okay, leave them for a moment."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+    - user: "Resume the second one."
+      required_plugins: ["agents"]
+      optional_plugins: []
+      hard_negative_plugins: ["protocol"]
+      depends_on_previous_turn: true
+
+- id: no_tool_greeting
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Hey Jarvis, how are you?"
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: no_tool_thanks
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Thanks, that helps."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: no_tool_chat
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "That sounds good."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: no_tool_cancel_that_no_context
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Can you cancel that?"
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["protocol", "scheduler", "todo"]
+
+- id: no_tool_go_ahead_no_context
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Go ahead and do it."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["agents", "system", "scheduler"]
+
+- id: no_tool_delete_it_no_context
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Delete it."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["files", "protocol", "todo"]
+
+- id: no_tool_take_care_of_that_no_context
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Can you take care of that for me?"
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["agents", "scheduler", "todo"]
+
+- id: no_tool_use_second_one_no_context
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Let's use the second one."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["calendar", "files", "agents"]
+
+- id: no_tool_move_first_one_no_context
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Move the first one to tomorrow."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["calendar", "scheduler", "todo"]
+
+- id: no_tool_make_that_happen_no_context
+  source: synthetic_control
+  category: no_tool
+  turns:
+    - user: "Yeah, make that happen."
+      required_plugins: []
+      optional_plugins: []
+      hard_negative_plugins: ["agents", "scheduler", "system"]
+
+- id: confuser_profile_not_protocol_morning_routine
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Remember that my morning routine includes stretching."
+      required_plugins: ["profile"]
+      optional_plugins: []
+      hard_negative_plugins: ["protocol"]
+
+- id: confuser_protocol_not_profile_preference
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Create a protocol for my preferred morning workout."
+      required_plugins: ["protocol"]
+      optional_plugins: []
+      hard_negative_plugins: ["profile"]
+
+- id: confuser_profile_note_not_todo
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Make a note that I prefer quiet mornings."
+      required_plugins: ["profile"]
+      optional_plugins: []
+      hard_negative_plugins: ["todo"]
+
+- id: confuser_scheduler_not_calendar_move
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Move my medication reminder to tomorrow morning."
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: ["calendar"]
+
+- id: confuser_calendar_not_scheduler_next_meeting
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "When is my next meeting reminder supposed to be?"
+      required_plugins: ["calendar"]
+      optional_plugins: ["scheduler"]
+      hard_negative_plugins: []
+
+- id: confuser_search_not_files_public_docs
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Find the public Stripe docs about webhook retries."
+      required_plugins: ["search"]
+      optional_plugins: []
+      hard_negative_plugins: ["files"]
+
+- id: confuser_maps_not_search
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Look up Italian restaurants near me."
+      required_plugins: ["google_maps"]
+      optional_plugins: []
+      hard_negative_plugins: ["search"]
+
+- id: confuser_search_not_maps
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Search the web for Google Maps API pricing."
+      required_plugins: ["search"]
+      optional_plugins: []
+      hard_negative_plugins: ["google_maps"]
+
+- id: confuser_search_not_maps_look_online
+  source: snapshot_20260503_083155
+  category: negative_confuser
+  turns:
+    - user: "Have a little look online for me about lean burn calorie tracking."
+      required_plugins: ["search"]
+      optional_plugins: []
+      hard_negative_plugins: ["google_maps"]
+
+- id: confuser_slack_not_gmail
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Message Sam in the team channel."
+      required_plugins: ["slack"]
+      optional_plugins: []
+      hard_negative_plugins: ["gmail"]
+
+- id: confuser_gmail_not_slack
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Email Sam the meeting notes."
+      required_plugins: ["gmail"]
+      optional_plugins: []
+      hard_negative_plugins: ["slack"]
+
+- id: confuser_todo_not_scheduler
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Add buy oat milk to my task list."
+      required_plugins: ["todo"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler"]
+
+- id: confuser_scheduler_not_todo
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Remind me at 8pm to buy oat milk."
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: ["todo"]
+
+- id: confuser_automation_not_scheduler
+  source: synthetic_control
+  category: negative_confuser
+  turns:
+    - user: "Whenever I get an email from the bank, alert me immediately."
+      required_plugins: ["automations"]
+      optional_plugins: ["gmail"]
+      hard_negative_plugins: ["scheduler"]
+
+- id: setups_find_morning_lights
+  source: regression_20260715_setup_control_plane
+  category: single_tool
+  turns:
+    - user: "Find the morning lights thing I set up."
+      required_plugins: ["setups"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler", "smart_home", "automations"]
+
+- id: setups_inventory_not_scheduler
+  source: regression_20260715_setup_control_plane
+  category: negative_confuser
+  turns:
+    - user: "What did I set up with you?"
+      required_plugins: ["setups"]
+      optional_plugins: []
+      hard_negative_plugins: ["scheduler", "activity"]
+
+- id: scheduler_upcoming_not_setups
+  source: regression_20260715_setup_control_plane
+  category: negative_confuser
+  turns:
+    - user: "What alerts and reminders do I have for today?"
+      required_plugins: ["scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: ["setups"]

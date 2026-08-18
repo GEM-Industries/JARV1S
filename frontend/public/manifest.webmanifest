@@ -1,0 +1,25 @@
+{
+  "name": "JARV1S Companion",
+  "short_name": "JARV1S",
+  "description": "Private voice access to your JARV1S Mac.",
+  "id": "/?jarvis_surface=phone",
+  "start_url": "/?jarvis_surface=phone",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#10151d",
+  "theme_color": "#10151d",
+  "icons": [
+    {
+      "src": "/jarvis-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/jarvis-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

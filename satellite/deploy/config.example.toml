@@ -1,0 +1,42 @@
+# LAN/dev: ws://<brain-hostname>.local:8000/api/v1/ws  (run `task be:dev:lan` on the brain)
+# Tailnet:   wss://<machine>.<tailnet>.ts.net/api/v1/ws
+# Public:    wss://<domain>/api/v1/ws
+backend_url = "ws://jarvis-brain.local:8000/api/v1/ws"
+device_token = "jarvis_dev_dev-xxxxxxxx_your-token-from-task-devices-satellite-token"
+timezone = "Australia/Sydney"
+node_id = "jarvis-satellite-1"
+node_label = "Bedroom Satellite"
+capabilities = ["mic", "speaker"]
+
+# Optional manual room metadata.
+room_id = "bedroom"
+room_name = "Bedroom"
+
+# Optional Home Assistant area refs. Prefer setting these after bind_node_area.
+# ha_area_id = "area-bedroom"
+
+# Integer device index or case-insensitive name fragment from --list-devices.
+audio_backend = "alsa"
+input_device = "plughw:Array,0"
+output_device = "plughw:Array,0"
+# XVF3800 USB firmware exposes processed stereo at 16 kHz:
+# channel 0 = conference, channel 1 = ASR-optimized.
+input_channels = 2
+input_channel_index = 1
+# XVF3800 AEC uses playback channel 0 as the far-end reference.
+playback_channels = 2
+tts_end_timeout_s = 2.0
+# Local safety override only; the normal Tool cues toggle is owner-wide on the host.
+tool_cues_enabled = true
+
+# On-device PASSIVE wake (Phase 10.7). Requires: uv sync --extra wakeword
+# and Jarvis.onnx under ~/.jarvis-satellite/models/ (deploy copies it).
+# edge_wakeword = true
+# wakeword_model_path = "~/.jarvis-satellite/models/Jarvis.onnx"
+# wake_preroll_seconds = 3.0
+
+# ReSpeaker XVF3800 status LED sync (uses direct USB control).
+# led_enabled = true
+# led_brightness = 80
+
+log_level = "INFO"

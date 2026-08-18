@@ -1,0 +1,3 @@
+*.onnx
+*.bin
+!manifest.json

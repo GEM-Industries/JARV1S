@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "JARV1S",
+  "version": "0.4.0",
+  "identifier": "dev.jarv1s.host",
+  "build": {
+    "frontendDist": "../shell-dist",
+    "beforeDevCommand": "npm run build:shell",
+    "beforeBuildCommand": "npm run build:release-assets"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "JARV1S",
+        "width": 1280,
+        "height": 840,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "targets": [
+      "app"
+    ],
+    "resources": {
+      "../resources/host": "host",
+      "../resources/helpers/Ollama": "ollama-runtime"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "entitlements": "./Entitlements.plist",
+      "infoPlist": "./Info.plist",
+      "minimumSystemVersion": "14.0",
+      "hardenedRuntime": true,
+      "files": {
+        "Helpers/JARV1SSpeechHelper.app": "../resources/helpers/JARV1SSpeechHelper.app"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCMTEzMzMyOTc2QzEwMDQKUldRRUVHeVhNak1ScXpiTHhVMVozc0pnV2tENW1ON2I0ZXNjaUFVRHRyZGlOaWF2Q2k5R0llSUgK",
+      "endpoints": [
+        "https://github.com/GTS-html77/JARV1S/releases/download/internal/latest.json"
+      ]
+    }
+  }
+}

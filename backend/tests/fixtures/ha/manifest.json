@@ -1,0 +1,17 @@
+{
+  "ha_image": "ghcr.io/home-assistant/home-assistant:2026.8.1",
+  "bootstrap_url": "http://127.0.0.1:8123",
+  "indieauth_client_id": "http://127.0.0.1:8123/",
+  "required_fixtures": [
+    "api_ping.json",
+    "auth_token_response.json",
+    "current_user_response.json",
+    "onboarding_users_response.json",
+    "onboarding_status_pending.json",
+    "onboarding_status_complete.json",
+    "area_registry_list.json",
+    "device_registry_list.json",
+    "entity_registry_list.json",
+    "states_sample.json"
+  ]
+}

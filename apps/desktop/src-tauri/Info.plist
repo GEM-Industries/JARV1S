@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>JARV1S listens through the microphone only while you use voice, so it can turn your speech into text on this Mac.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>JARV1S uses on-device speech recognition to turn your microphone audio into text.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>JARV1S uses your location for weather and nearby places while you use the app.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>JARV1S uses your location for weather and nearby places while you use the app.</string>
+</dict>
+</plist>

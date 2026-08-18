@@ -1,0 +1,13 @@
+[
+  {
+    "id": "abc123device",
+    "config_entries": ["entry1"],
+    "connections": [],
+    "identifiers": [["hue", "bridge-1"]],
+    "manufacturer": "Signify",
+    "model": "Hue Bridge",
+    "name": "Hue Bridge",
+    "area_id": "living_room",
+    "disabled_by": null
+  }
+]

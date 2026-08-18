@@ -1,0 +1,281 @@
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('./assets/fonts/SpaceGrotesk.woff2') format('woff2');
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./assets/fonts/JetBrainsMono.woff2') format('woff2');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Camber';
+  src: url('./assets/fonts/CamberTRIAL-Th.otf') format('opentype');
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Camber';
+  src: url('./assets/fonts/CamberTRIAL-Lt.otf') format('opentype');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Camber';
+  src: url('./assets/fonts/CamberTRIAL-Rg.otf') format('opentype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Camber';
+  src: url('./assets/fonts/CamberTRIAL-Md.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Camber';
+  src: url('./assets/fonts/CamberTRIAL-SmBd.otf') format('opentype');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Camber';
+  src: url('./assets/fonts/CamberTRIAL-Bd.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Palette primitives — immutable channels; do not use in components */
+    --palette-rich-black-deep: 0.1417 0.0164 248.93;
+    --palette-rich-black-medium: 0.2036 0.0304 247.65;
+    --palette-indigo-dye-base: 0.294 0.0466 234.01;
+    --palette-indigo-dye-medium: 0.3568 0.0598 234.91;
+    --palette-indigo-dye-light: 0.4649 0.0821 235.87;
+    --palette-blue-green: 0.6373 0.1122 224.66;
+    --palette-blue-green-fg: 0.66 0.09 224.66;
+    --palette-celadon: 0.8686 0.1066 150.22;
+    --palette-persian-red: 0.5519 0.1972 23.06;
+    --palette-persian-red-fg: 0.70 0.14 23.06;
+    --palette-carrot: 0.8179 0.1705 77.95;
+    --palette-white: 1 0 0;
+    --palette-white-sky: 0.9203 0.011 234.83;
+    --palette-white-tertiary: 0.7176 0.0123 235.01;
+    --palette-disabled-grey: 0.5226 0.0126 235.01;
+    --palette-hologram-error: 0.42 0.1972 23.06;
+    --palette-hologram-error-inner: 0.26 0.1972 23.06;
+    --palette-hologram-inactive: 0.42 0.0126 235.01;
+    --palette-hologram-inactive-inner: 0.26 0.0126 235.01;
+
+    /* Semantic aliases — remappable for themes; component-facing */
+    --color-canvas: var(--palette-rich-black-medium);
+    --color-canvas-sunken: var(--palette-rich-black-deep);
+    --color-surface: var(--palette-indigo-dye-base);
+    --color-surface-raised: var(--palette-indigo-dye-medium);
+    --color-surface-sunken: var(--palette-rich-black-deep);
+    --color-surface-highlight: var(--palette-indigo-dye-light);
+    --color-outline: var(--palette-indigo-dye-medium);
+    --color-outline-strong: var(--palette-indigo-dye-light);
+    --color-outline-subtle: var(--palette-indigo-dye-medium);
+    --color-foreground: var(--palette-white);
+    --color-foreground-muted: var(--palette-white-sky);
+    --color-foreground-subtle: var(--palette-white-tertiary);
+    --color-foreground-disabled: var(--palette-disabled-grey);
+    --color-brand: var(--palette-blue-green);
+    --color-brand-fg: var(--palette-blue-green-fg);
+    --color-brand-output: var(--palette-celadon);
+    --color-status-success: var(--palette-celadon);
+    --color-status-warning: var(--palette-carrot);
+    --color-status-danger: var(--palette-persian-red);
+    --color-status-danger-fg: var(--palette-persian-red-fg);
+    --color-hologram-error: var(--palette-hologram-error);
+    --color-hologram-error-inner: var(--palette-hologram-error-inner);
+    --color-hologram-inactive: var(--palette-hologram-inactive);
+    --color-hologram-inactive-inner: var(--palette-hologram-inactive-inner);
+
+    /* Layout + radius */
+    --safe-area-top: 96px;
+    --safe-area-bottom: 96px;
+    /* Shared StatusBar geometry keeps attached menus and workspace sheets aligned. */
+    --status-bar-inset: 1.5rem;
+    --status-nav-height: 3rem;
+    --shell-overlay-gap: 0.75rem;
+    --shell-overlay-top: calc(var(--status-bar-inset) + var(--status-nav-height) + var(--shell-overlay-gap));
+    --radius-control: 0.75rem;
+    --radius-panel: 1rem;
+    --radius-shell: 2rem;
+    --hologram-radius: var(--radius-shell);
+  }
+
+  body {
+    @apply bg-canvas text-foreground font-body antialiased overflow-hidden h-screen w-screen;
+    height: 100dvh;
+  }
+
+  /*
+   * Focus: beat UA outline (!important), keep hologram shadows (no box-shadow:none),
+   * zero Tailwind ring vars, custom outline only under html[data-keyboard-nav].
+   */
+  :focus {
+    outline: none !important;
+    outline-offset: 0 !important;
+    --tw-ring-offset-shadow: 0 0 #0000 !important;
+    --tw-ring-shadow: 0 0 #0000 !important;
+  }
+
+  html[data-keyboard-nav] :focus-visible {
+    outline: 2px solid oklch(var(--color-brand) / 0.55) !important;
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .stage-background {
+    /* Shared ambient stage — keep in sync with apps/desktop/shell-src/styles.css */
+    background-color: oklch(var(--color-canvas));
+    background-image:
+      radial-gradient(
+        ellipse 110% 95% at 50% 42%,
+        oklch(var(--color-surface) / 0.16) 0%,
+        oklch(var(--color-surface) / 0.07) 45%,
+        transparent 76%
+      ),
+      radial-gradient(
+        ellipse 155% 140% at 50% 40%,
+        transparent 64%,
+        oklch(var(--color-canvas-sunken) / 0.58) 100%
+      ),
+      linear-gradient(
+        180deg,
+        oklch(var(--color-canvas-sunken) / 0.18) 0%,
+        transparent 34%,
+        transparent 68%,
+        oklch(var(--color-canvas-sunken) / 0.4) 100%
+      );
+  }
+
+  /* Complete semantic type roles: family + size + line height + weight. */
+  .type-display {
+    @apply font-display text-display font-medium;
+  }
+  .type-title {
+    @apply font-display text-title font-medium;
+  }
+  .type-section {
+    @apply font-display text-section font-medium;
+  }
+  .type-heading {
+    @apply font-display text-heading font-medium;
+  }
+  .type-body {
+    @apply font-body text-body font-normal;
+  }
+  .type-body-reading {
+    @apply font-body text-body-reading font-normal;
+  }
+  .type-label {
+    @apply font-body text-label font-medium;
+  }
+  .type-label-small {
+    @apply font-body text-label-small font-medium;
+  }
+  .type-meta {
+    @apply font-body text-meta font-normal;
+  }
+  .type-fui {
+    @apply font-mono text-fui font-medium uppercase tracking-widest;
+  }
+
+  /* Selected-surface recipe — border, not ring: :focus zeroes --tw-ring-* vars. */
+  .ui-surface-selectable {
+    @apply border border-transparent hover:bg-surface/15 focus:outline-none;
+  }
+  .ui-surface-selected {
+    @apply border-brand/40 bg-brand/10;
+  }
+
+  /* Grouped list tile — clips row fills to the panel radius / squircle */
+  .ui-surface-group {
+    @apply divide-y divide-outline/15 overflow-hidden rounded-panel bg-surface/20;
+  }
+}
+
+@layer utilities {
+  /* Continuous corners for semantic surfaces; capsules and circles stay geometrically round. */
+  .rounded-control,
+  .rounded-panel,
+  .rounded-shell,
+  .corner-squircle {
+    corner-shape: squircle;
+  }
+  .rounded-full,
+  .corner-round {
+    corner-shape: round;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: oklch(var(--color-outline) / 0.8) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: oklch(var(--color-outline) / 0.8);
+    border-radius: 9999px;
+  }
+}
+
+/* Custom scrollbar for terminal aesthetic */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-canvas;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-outline rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-surface-highlight;
+}

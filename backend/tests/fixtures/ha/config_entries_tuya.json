@@ -1,0 +1,13 @@
+[
+  {
+    "entry_id": "tuya-entry-1",
+    "domain": "tuya",
+    "title": "Smart Life",
+    "source": "user",
+    "state": "loaded",
+    "supports_options": false,
+    "supports_remove_device": true,
+    "supports_unload": true,
+    "disabled_by": null
+  }
+]

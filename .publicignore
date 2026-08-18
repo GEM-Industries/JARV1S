@@ -1,0 +1,18 @@
+# Paths that must not appear in GEM-Industries/JARV1S.
+# rsync exclude patterns (see scripts/publish-public.sh).
+
+training/
+graphify-out/
+backend/graphify-out/
+backend/.grimp_cache/
+.cursor/plans/
+backend/.cache/
+frontend/src/assets/fonts/CamberTRIAL*
+tmp/
+node_modules/
+.venv/
+.data/
+*.pem
+*.p12
+id_rsa
+id_rsa.pub

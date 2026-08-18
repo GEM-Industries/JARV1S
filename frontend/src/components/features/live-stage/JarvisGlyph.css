@@ -1,0 +1,221 @@
+.jarvis-glyph {
+  /* Rest scale ≈ base/active outer radius so the grown outline expands from the idle trace. */
+  --jarvis-glyph-rest-scale: 0.94;
+  --jarvis-glyph-ease: cubic-bezier(0.16, 1, 0.3, 1); /* hologram / critically damped */
+  --jarvis-glyph-duration: 300ms;
+  --jarvis-glyph-duration-fast: 200ms;
+
+  width: clamp(7rem, 14vw, 9rem);
+  opacity: 0.82;
+  transform: scale(0.88);
+  transition:
+    color var(--jarvis-glyph-duration) var(--jarvis-glyph-ease),
+    opacity var(--jarvis-glyph-duration) var(--jarvis-glyph-ease),
+    transform var(--jarvis-glyph-duration) var(--jarvis-glyph-ease);
+}
+
+.jarvis-glyph svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+.jarvis-glyph__base,
+.jarvis-glyph__glow,
+.jarvis-glyph__outline,
+.jarvis-glyph__scan {
+  fill: none;
+  stroke: currentColor;
+  stroke-linejoin: round;
+  transform-box: view-box;
+  transform-origin: center;
+}
+
+.jarvis-glyph__base {
+  stroke-width: 1.87879;
+  opacity: 0.72;
+  transition: opacity var(--jarvis-glyph-duration) var(--jarvis-glyph-ease);
+}
+
+.jarvis-glyph__glow {
+  stroke-width: 4;
+  opacity: 0;
+  filter: blur(3px);
+  transition: opacity var(--jarvis-glyph-duration) var(--jarvis-glyph-ease);
+}
+
+.jarvis-glyph__fill {
+  opacity: 0;
+  transition: opacity 360ms var(--jarvis-glyph-ease);
+}
+
+/*
+ * Idle→detected grow: opacity leads so the expanding edge is visible early;
+ * transform settles on the foundation transition timing (compositor-only).
+ * Transitions reverse cleanly when collapsing back to idle.
+ */
+.jarvis-glyph__outline {
+  stroke-width: 2;
+  opacity: 0;
+  transform: scale(var(--jarvis-glyph-rest-scale));
+  transition:
+    opacity var(--jarvis-glyph-duration-fast) var(--jarvis-glyph-ease),
+    transform var(--jarvis-glyph-duration) var(--jarvis-glyph-ease);
+}
+
+.jarvis-glyph__scan {
+  stroke: oklch(var(--color-brand-fg));
+  stroke-width: 2.25;
+  stroke-linecap: round;
+  stroke-dasharray: 14 86;
+  stroke-dashoffset: 0;
+  opacity: 0;
+}
+
+.jarvis-glyph__grad-foot,
+.jarvis-glyph__grad-head {
+  transition: stop-opacity 360ms var(--jarvis-glyph-ease);
+}
+
+.jarvis-glyph[data-phase='idle'] {
+  opacity: 0.24;
+}
+
+.jarvis-glyph[data-outline-expanded] .jarvis-glyph__base {
+  opacity: 0.22;
+}
+
+.jarvis-glyph[data-outline-expanded] .jarvis-glyph__outline {
+  opacity: 0.95;
+  transform: scale(1);
+}
+
+.jarvis-glyph[data-fill-active] {
+  opacity: 0.95;
+}
+
+.jarvis-glyph[data-fill-active] .jarvis-glyph__base {
+  opacity: 0.16;
+}
+
+.jarvis-glyph[data-fill-active] .jarvis-glyph__fill {
+  opacity: 0.85;
+}
+
+.jarvis-glyph[data-fill-active] .jarvis-glyph__outline {
+  opacity: 1;
+}
+
+.jarvis-glyph[data-phase='listening'] .jarvis-glyph__glow {
+  opacity: 0.14;
+}
+
+.jarvis-glyph[data-phase='speaking'] .jarvis-glyph__glow {
+  opacity: 0.1;
+  animation: jarvis-speak-glow-settle 480ms 80ms var(--jarvis-glyph-ease) both;
+}
+
+/* The brighter top of the gradient resolves first, then its quieter tail. */
+.jarvis-glyph[data-phase='speaking'] .jarvis-glyph__grad-head {
+  animation: jarvis-speak-grad-head 360ms 80ms var(--jarvis-glyph-ease) both;
+}
+
+.jarvis-glyph[data-phase='speaking'] .jarvis-glyph__grad-foot {
+  animation: jarvis-speak-grad-foot 420ms 150ms var(--jarvis-glyph-ease) both;
+}
+
+.jarvis-glyph[data-phase='transcribing'] .jarvis-glyph__scan,
+.jarvis-glyph[data-phase='thinking'] .jarvis-glyph__scan,
+.jarvis-glyph[data-phase='executing'] .jarvis-glyph__scan {
+  opacity: 1;
+  animation:
+    jarvis-tracer-materialize 300ms var(--jarvis-glyph-ease) both,
+    jarvis-scan 1.8s linear infinite;
+}
+
+.jarvis-glyph[data-phase='transcribing'] .jarvis-glyph__base,
+.jarvis-glyph[data-phase='thinking'] .jarvis-glyph__base,
+.jarvis-glyph[data-phase='executing'] .jarvis-glyph__base {
+  opacity: 0.34;
+}
+
+.jarvis-glyph[data-phase='transcribing'] .jarvis-glyph__scan {
+  stroke-dasharray: 9 91;
+  animation-duration: 300ms, 1.3s;
+}
+
+.jarvis-glyph[data-phase='executing'] .jarvis-glyph__scan {
+  stroke-dasharray: 5 20;
+  animation-duration: 300ms, 1.1s;
+}
+
+/* Brief bloom, then settle to a quiet steady glow — no loop. */
+@keyframes jarvis-speak-glow-settle {
+  from {
+    opacity: 0.04;
+  }
+  40% {
+    opacity: 0.16;
+  }
+  to {
+    opacity: 0.1;
+  }
+}
+
+/* Top-led intensity reveal; the path itself never moves. */
+@keyframes jarvis-speak-grad-foot {
+  from {
+    stop-opacity: 0.04;
+  }
+  to {
+    stop-opacity: 0.1;
+  }
+}
+
+@keyframes jarvis-speak-grad-head {
+  from {
+    stop-opacity: 0.28;
+  }
+  to {
+    stop-opacity: 0.7;
+  }
+}
+
+@keyframes jarvis-tracer-materialize {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes jarvis-scan {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-glyph,
+  .jarvis-glyph * {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .jarvis-glyph[data-outline-expanded] .jarvis-glyph__outline {
+    opacity: 0.95;
+    transform: scale(1);
+  }
+
+  .jarvis-glyph[data-fill-active] .jarvis-glyph__fill {
+    opacity: 0.85;
+  }
+
+  .jarvis-glyph[data-phase='speaking'] .jarvis-glyph__glow {
+    opacity: 0.1;
+  }
+
+  .jarvis-glyph[data-phase='transcribing'] .jarvis-glyph__scan,
+  .jarvis-glyph[data-phase='thinking'] .jarvis-glyph__scan,
+  .jarvis-glyph[data-phase='executing'] .jarvis-glyph__scan {
+    opacity: 0.45;
+  }
+}

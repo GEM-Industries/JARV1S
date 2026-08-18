@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "allow-export-diagnostics"
+description = "Export diagnostics bundle"
+commands.allow = ["export_diagnostics_bundle"]
+
+[[permission]]
+identifier = "allow-open-logs"
+description = "Open logs folder"
+commands.allow = ["open_logs_folder"]
+
+[[permission]]
+identifier = "allow-open-external-url"
+description = "Open http(s)/mailto/tel URLs in the default system app"
+commands.allow = ["open_external_url"]

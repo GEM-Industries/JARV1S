@@ -1,0 +1,44 @@
+---
+description: Keep tests proportional, behavior-focused, and cheap to maintain
+alwaysApply: true
+---
+
+# Test Strategy
+
+Tests buy confidence; they are not a required byproduct of every code change.
+Default to no new test unless it protects a meaningful risk.
+
+Add or change a test when at least one is true:
+- reproduces an observed regression;
+- protects a stable public contract, safety boundary, or state invariant;
+- covers non-obvious pure logic or a consequential edge case;
+- verifies an external integration shape we do not control.
+
+Choose the smallest stable boundary that proves the behavior:
+- pure unit tests for parsing, policy, calculations, and state transitions;
+- contract tests at database, provider, serialization, and API boundaries;
+- integration tests for critical workflows across owned components;
+- LLM evals only for prompt, routing, or tool-selection behavior;
+- live/E2E checks only for a few critical paths that lower layers cannot prove.
+
+Avoid tests that:
+- assert private helpers, internal call order, mock choreography, or incidental fields;
+- duplicate the same behavior at several layers without a distinct failure mode;
+- snapshot whole objects when only one outcome is contractual;
+- mirror implementation logic in elaborate fakes;
+- preserve obsolete behavior solely because a test already exists.
+
+In unit tests, fake external boundaries such as networks, clocks, processes,
+devices, and durable stores; cover their real shapes separately with focused
+contract tests. Prefer real owned code and shared lightweight fakes over mocking
+internal collaboration.
+
+For each change, ask:
+1. What real failure would this test catch?
+2. Would it survive a behavior-preserving refactor?
+3. Is that behavior already covered?
+4. Can one table-driven or workflow test replace several narrow tests?
+
+When behavior changes, delete or rewrite obsolete tests in the same change.
+If a test breaks while observable behavior is unchanged, simplify or remove the
+test rather than contorting production code around it.
