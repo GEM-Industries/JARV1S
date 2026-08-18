@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   release-macos-arm64:
+    if: github.repository == 'GTS-html77/JARV1S'
     runs-on: macos-latest
     env:
       HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
@@ -122,4 +123,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           JARVIS_RELEASE_CHANNEL: ${{ vars.JARVIS_RELEASE_CHANNEL || 'internal' }}
+          JARVIS_PUBLIC_RELEASE_REPO: ""
         run: bash apps/desktop/scripts/publish-github-release.sh

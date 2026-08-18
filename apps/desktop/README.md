@@ -2,7 +2,7 @@
 
 Signed technical beta shell for the JARV1S Host. The desktop app supervises bundled `mongod` and the bundled FastAPI backend in packaged mode, shows startup progress, then opens the existing React UI from the backend origin.
 
-Invite-only macOS builds: [latest private-repo release](https://github.com/GTS-html77/JARV1S/releases/latest). Public clones should use `task desktop:dogfood` or `task desktop:dev` instead.
+macOS Apple Silicon installer: [latest release](https://github.com/GEM-Industries/JARV1S/releases/latest). Contributors building from source can use `task desktop:dogfood` or `task desktop:dev`.
 
 **Spec:** [`docs/proposals/JARVIS_HOST_APP.md`](../../docs/proposals/JARVIS_HOST_APP.md)
 

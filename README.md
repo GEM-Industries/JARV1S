@@ -1,7 +1,9 @@
 # JARV1S
 
 A locally-grounded AI home assistant: low-latency voice, plugins, and a
-packaged macOS Host. Source is AGPL; packaged beta builds are invite-only.
+packaged macOS Host. Source is AGPL-3.0-or-later.
+
+macOS Apple Silicon: [download the latest release](https://github.com/GEM-Industries/JARV1S/releases/latest).
 
 Copyright GEM Industries. Licensed under the [GNU Affero General Public
 License v3.0 or later](LICENSE). Contributions require the [CLA](CLA.md).
@@ -27,8 +29,7 @@ Docker MongoDB and `repo/.data` are disposable development infrastructure; they
 do not share personal app data. The packaged macOS app owns the personal
 database under `~/Library/Application Support/JARV1S`.
 
-See [`apps/desktop/README.md`](apps/desktop/README.md) for the desktop shell
-and private beta installer.
+See [`apps/desktop/README.md`](apps/desktop/README.md) for the desktop shell.
 
 ## Documentation
 

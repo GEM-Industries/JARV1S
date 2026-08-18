@@ -417,7 +417,7 @@ tasks:
     cmd: bash apps/desktop/scripts/release-local.sh {{.CLI_ARGS}}
 
   desktop:release:publish:
-    desc: Publish the latest local release bundle to GitHub Releases
+    desc: Publish the local release DMG to private and public GitHub Releases
     cmd: bash apps/desktop/scripts/publish-github-release.sh
 
   desktop:validate-artifact:

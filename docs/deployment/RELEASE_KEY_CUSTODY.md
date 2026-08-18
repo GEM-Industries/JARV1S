@@ -22,8 +22,9 @@ Private beta distribution depends on two long-lived secrets.
 2. `node apps/desktop/scripts/sync-app-version.mjs`
 3. Tag `vX.Y.Z` matching that version
 4. Confirm `JARVIS_UPDATE_BASE_URL` points at the channel release download URL
-5. Confirm CI published both the versioned GitHub Release and the rolling channel tag (`internal` / `beta`)
-6. Dogfood `N-1` → `N` with `JARVIS_ENABLE_AUTO_UPDATE=1` before inviting more testers
+5. Confirm the private repo published the versioned GitHub Release and rolling channel tag (`internal` / `beta`)
+6. `task desktop:release:publish` also attaches the DMG to `GEM-Industries/JARV1S` (Apple secrets stay on the private repo)
+7. Dogfood `N-1` → `N` with `JARVIS_ENABLE_AUTO_UPDATE=1` before inviting more testers
 
 ## GitHub release configuration
 
