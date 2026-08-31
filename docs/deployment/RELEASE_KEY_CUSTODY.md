@@ -24,13 +24,18 @@ Private beta distribution depends on Apple signing, updater signing, and the off
 
 ## Release checklist
 
-1. Bump `backend/pyproject.toml`
-2. `node apps/desktop/scripts/sync-app-version.mjs`
-3. Tag `vX.Y.Z` matching that version
-4. Confirm `JARVIS_UPDATE_BASE_URL` points at the channel release download URL
-5. Confirm the private repo published the versioned GitHub Release and rolling channel tag (`internal` / `beta`)
-6. `task desktop:release:publish` also attaches the DMG to `GEM-Industries/JARV1S` (Apple secrets stay on the private repo)
+Private origin (`GTS-html77/JARV1S`) is the beta/control plane: invited testers, versioned DMG, rolling updater channel (`internal` / `beta`). `GEM-Industries/JARV1S` is public GA: sanitized source plus only versions you explicitly promote. Same signed bytes; no second notarization.
+
+1. Freeze [`CHANGELOG.md`](../../CHANGELOG.md) for this version (move `[Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD`). Publish fails without that section.
+2. Bump `backend/pyproject.toml`
+3. `node apps/desktop/scripts/sync-app-version.mjs`
+4. `task desktop:release:local` (sign, notarize, staple)
+5. Confirm `JARVIS_UPDATE_BASE_URL` points at the **private** channel download URL
+6. `task desktop:release:publish` — private prerelease DMG + updater channel. Does not touch the public repo.
 7. Dogfood `N-1` → `N` with `JARVIS_ENABLE_AUTO_UPDATE=1` before inviting more testers
+8. When that version should be public: `task desktop:release:promote` (source snapshot, then the same DMG on GEM-Industries). No updater channel on public, so beta auto-updates cannot leak.
+
+Pushing `vX.Y.Z` still starts release CI. If the private GitHub Release already has the DMG, CI skips the Mac rebuild. Use workflow_dispatch with **force** only to replace a broken artifact. Apple secrets stay on the private repo.
 
 ## GitHub release configuration
 

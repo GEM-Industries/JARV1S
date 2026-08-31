@@ -1211,26 +1211,23 @@ cases:
     - scheduler.replace_alert
     expected_arguments:
       instance_id: trg-wake
-      when: 10am
+      when: regex:(10am|10:00 AM)
     max_tool_calls: 3
-- id: probe_scheduler_move_alarm_series_uses_series_id
+- id: probe_scheduler_move_alarm_series_uses_series_scope
   priority: P1
   category: tool_selection
   tier: probe
   source: user
   text_input: false
   input: Move my wake-up alarm to 7am from now on.
-  live_tool_outputs:
-  - '{"alerts":[{"instance_id":"trg-wake","series_id":"rule-wake","scope":"instance","kind":"alarm","local_time":"8:30 AM","message":"Wake
-    up","recurrence":"daily","delivery_target":"anywhere"}],"match_status":"single","coverage":"complete"}'
-  - 'Series updated. Series ID: rule-wake. Next occurrence 7:00 AM.'
+  live_tool_output: 'Series updated. Series ID: rule-wake. Next occurrence 7:00 AM.'
   assert:
     tools_called:
     - scheduler.replace_alert
     expected_arguments:
-      series_id: rule-wake
-      when: 7am
-    max_tool_calls: 3
+      scope: series
+      when: regex:(7am|07:00)
+    max_tool_calls: 1
 - id: probe_scheduler_series_plus_today_override_no_new_alarm
   priority: P1
   category: tool_selection
@@ -2251,6 +2248,49 @@ cases:
     tools_forbidden:
     - scheduler.remind
     max_tool_calls: 2
+- id: probe_wake_me_up_known_alarm_replaces
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - scheduler.add_alarm
+  - scheduler.replace_alert
+  history:
+  - role: user
+    content: What time is my alarm tomorrow?
+  - role: assistant
+    content: Your wake-up alarm is set for 8:30 tomorrow.
+  input: Wake me up at 9:30 tomorrow.
+  live_tool_output: 'Occurrence updated. Instance ID: trg-wake. Due 9:30 AM.'
+  assert:
+    tools_called:
+    - scheduler.replace_alert
+    tools_forbidden:
+    - scheduler.add_alarm
+    expected_arguments:
+      when: regex:(9:30|09:30)
+    max_tool_calls: 1
+- id: probe_another_alarm_is_explicitly_additive
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - scheduler.add_alarm
+  - scheduler.replace_alert
+  input: Set another alarm for 3pm as well.
+  live_tool_output: 'Alarm set for 3:00 PM. ID: trg-afternoon'
+  assert:
+    tools_called:
+    - scheduler.add_alarm
+    tools_forbidden:
+    - scheduler.replace_alert
+    max_tool_calls: 1
 - id: probe_remind_in_an_hour_is_not_snooze
   priority: P0
   category: tool_selection

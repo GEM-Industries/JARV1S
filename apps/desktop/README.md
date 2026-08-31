@@ -35,6 +35,8 @@ From the repository root:
 task desktop:dogfood              # build, install to /Applications, open packaged app
 task desktop:doctor               # check desktop Rust + bundled services smoke
 task desktop:release:local        # local signed/notarized release
+task desktop:release:publish      # private beta GitHub Release (DMG + updater)
+task desktop:release:promote      # public GA: source snapshot + same DMG
 task desktop:release              # arm64 signed/notarized release (requires credentials)
 task desktop:data:backup          # save keys+config → JARV1S Backups/daily (quit app first)
 task desktop:data:restore         # restore that slot
@@ -81,11 +83,18 @@ Use `task desktop:release:local` for local releases. The first run asks for the 
 
 `task desktop:release` is the non-interactive CI entry point. It builds the runtime once, then signs, notarizes, staples, and emits updater metadata.
 
-After a local build finishes, publish to GitHub with `task desktop:release:publish`.
+After a local build finishes:
+
+```bash
+task desktop:release:publish    # private beta: DMG + updater channel
+task desktop:release:promote    # public GA: sanitized source + the same DMG
+```
+
+`publish` does not mirror to GEM-Industries. `promote` does not rebuild or copy the updater channel (beta auto-updates stay on the private repo).
 
 Lower-level tasks (`desktop:bootstrap`, `desktop:build-runtime`, `desktop:build`, `desktop:push`) remain available for CI and debugging, but most day-to-day work should use the commands above.
 
-CI: push a `v*` tag (for example `v0.2.0`) to run [`.github/workflows/desktop-release.yml`](../../.github/workflows/desktop-release.yml) (arm64 macOS).
+CI: push a `v*` tag (for example `v0.2.0`) to run [`.github/workflows/desktop-release.yml`](../../.github/workflows/desktop-release.yml) only when that tag has no DMG yet. Local `desktop:release:publish` is the usual builder; the tag workflow skips the Mac job once the private DMG exists. `workflow_dispatch` with **force** rebuilds.
 
 ## Release secrets
 

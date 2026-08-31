@@ -46,8 +46,12 @@ the tool description. The system prompt carries only global behavior and
 per-turn runtime facts — it does not repeat tool signatures, docstrings, or
 return schemas.
 
-This means: **the docstring is the tool description**. Keep it concise; offered
-tools compete with history for attention.
+This means: **the first docstring line is currently the model-facing summary**
+in both the provider `tools=` schema and `system.search_tools` results. Make it
+a complete, concise selection boundary. `Args:` text may enrich a detailed
+search result, but later prose is retained documentation rather than reliable
+offered-tool policy. Do not widen every tool description to its full docstring;
+offered tools compete with history for attention.
 
 ### Capability Contract Conformance
 
@@ -87,8 +91,8 @@ or mutation-receipt framework from one plugin.
 Docstrings teach the LLM how to use the tool. Keep them concise and inline — no labeled sections unless critical.
 
 **Pattern:**
-- Line 1: What the tool does
-- Line 2+: Behavioral rules, voice guidance, guardrails — all inline
+- Line 1: Complete model-facing summary — what it does and its main selection boundary
+- Line 2+: Supporting documentation; correctness must not depend on the model seeing it
 - `Args:` section only when parameter names aren't self-explanatory
 - Use concrete examples over abstract rules
 
@@ -122,6 +126,18 @@ async def web(self, query: str) -> List[SearchResult]:
 
 When the model repeatedly chooses valid-looking but wrong calls, treat it as an API-shape smell before adding prompt text. Make the common operation easier to express in one correct call.
 
+- Test state assumptions explicitly: no known state, state already present in
+  history, and state discovered only after a mutation. The model cannot act on
+  mutable state it has not observed.
+- Distinguish additive intent ("another", "also", "as well") from set/change
+  intent, but do not invent uniqueness from nearby state. Guard creation only
+  when the domain has a stable identity, singleton rule, or real collision
+  invariant; otherwise coexistence is valid and explicit edit language belongs
+  on the edit tool.
+- Let edit/cancel tools resolve a unique user-shaped query themselves. When a
+  match can represent both one occurrence and a durable series, pair the query
+  with an explicit, default-safe scope rather than inferring destructive scope
+  from nullable identifiers.
 - Prefer focused query parameters over broad list-and-filter outputs. A list tool that returns mixed records should accept ordinary user filters such as `kind`, `status`, `local_time`, `message`, or `recurrence` when those are common decision boundaries.
 - Do not require users to know internal storage taxonomy. If colloquial terms like "automation" can mean a durable rule or one-off deferred action, provide an umbrella lookup or make the tool error point to the exact alternate lookup.
 - If users can inspect disabled durable definitions, keep them discoverable through the agent's definitions inventory. Soft-off (`enabled=false`) is not delete, and pending-only inventories should not be stretched to represent disabled definitions.

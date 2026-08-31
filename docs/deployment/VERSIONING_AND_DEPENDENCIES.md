@@ -25,12 +25,14 @@ Packaged desktop releases add shell-owned metadata during build (`apps/desktop/r
 
 The desktop release script builds the app-owned runtime once from lockfiles, signs/notarizes the macOS artifacts, and writes signed updater metadata (`latest.json` or `latest-<channel>.json`) for the configured channel. Version sync also pins the embedded updater endpoint to that channel. Launch-time update checks are opt-in with `JARVIS_ENABLE_AUTO_UPDATE=1`.
 
-Release CI (`.github/workflows/desktop-release.yml`) requires:
+Release CI (`.github/workflows/desktop-release.yml`) is the backup builder when a `vX.Y.Z` tag has no DMG yet. Local publish is the usual path. CI requires:
 
-1. Tag `vX.Y.Z` matching `backend/pyproject.toml`
+1. Tag `vX.Y.Z` matching `backend/pyproject.toml` (skipped on `workflow_dispatch`)
 2. Backend/frontend/desktop smoke gates before signing
-3. Absolute `JARVIS_UPDATE_BASE_URL`
-4. Publishing both a versioned GitHub Release and rolling channel artifacts
+3. Absolute `JARVIS_UPDATE_BASE_URL` (private updater origin)
+4. Publishing a **private** versioned GitHub Release and rolling channel artifacts
+
+Promote a baked version to the public repo with `task desktop:release:promote` — same DMG, no rebuild. See [`RELEASE_KEY_CUSTODY.md`](./RELEASE_KEY_CUSTODY.md).
 
 See [`RELEASE_KEY_CUSTODY.md`](./RELEASE_KEY_CUSTODY.md) for Apple/Tauri signing key custody.
 

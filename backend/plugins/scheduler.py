@@ -221,10 +221,36 @@ def _alert_matches_filters(
 
 def _one_scope_required_error(tool_name: str) -> CapabilityErrorDetail:
     return _fail(
-        f"Provide exactly one of series_id or instance_id from get_alerts(). "
-        f"For {tool_name}, use instance_id for date-specific or one-off changes to a pending occurrence; "
-        "use series_id only for permanent/all-future recurring series changes."
+        f"Name the target with query= (a name or clock time), or provide exactly one of "
+        f"series_id or instance_id from get_alerts(). "
+        f"For {tool_name}, query= or instance_id changes one pending occurrence; "
+        "series_id is only for permanent/all-future recurring series changes."
     )
+
+
+def _ambiguous_alerts_error(rows: list[AlertSummary]) -> CapabilityErrorDetail:
+    labels = []
+    for row in rows[:6]:
+        label = row.name or row.kind or "item"
+        when = row.local_time or row.scheduled_local_time or ""
+        ident = row.instance_id or row.series_id or ""
+        labels.append(f"{label} {when} ({ident})".strip())
+    return _fail(
+        "Multiple matches: "
+        + "; ".join(labels)
+        + ". Pass a more specific query, or instance_id/series_id."
+    )
+
+
+def _ids_from_resolved(
+    resolved: AlertSummary, *, scope: Literal["occurrence", "series"] = "occurrence"
+) -> tuple[str | None, str | None]:
+    """Return (series_id, instance_id). Default to the pending occurrence."""
+    if scope == "series":
+        return resolved.series_id, None
+    if resolved.instance_id:
+        return None, resolved.instance_id
+    return resolved.series_id, None
 
 
 def _scheduler_manage_error(resource: str) -> CapabilityErrorDetail:
@@ -583,12 +609,12 @@ class SchedulerPlugin(JarvisPlugin):
         confirmed: bool = False,
     ) -> ToolResult | CapabilityErrorDetail:
         """
-        Schedule a message or task reminder at a future time.
+        Create a new message or task reminder. Does not change an existing reminder.
         Duration and wall-clock times both set a due time; they do not change this into a timer.
         Use add_timer only when the user asks for a countdown timer, and add_alarm for new wake alarms.
         Use defer for silent "do this later" side effects; reminders tell the user.
         Do NOT use automations.create_rule for time-based requests.
-        To edit, reschedule, snooze, or retarget an existing item, call get_alerts first; use snooze_alert to extend a fired alert, replace_alert(instance_id=...) for today/tomorrow/next/one-off occurrence edits, or replace_alert(series_id=...) only for permanent/all-future series edits.
+        To change an existing reminder, use replace_alert; do not create a second one and cancel.
         message is static text to repeat at fire time. For live future work, set a short message plus instructions with what to do at fire time.
         protocol runs an existing named protocol; call setups.find(setup_type="protocol") first if unsure it exists.
         Do not use protocol to attach a reminder to a habit, task, device, or other domain object; use that domain plugin, then cancel the old generic reminder if needed.
@@ -928,9 +954,9 @@ class SchedulerPlugin(JarvisPlugin):
         deliver_to: str = "anywhere",
     ) -> str | CapabilityErrorDetail:
         """
-        Set a snoozable alarm. Critical attention, alarm sound, explicit acknowledgement.
-        Wake-me-up requests use this tool; remind is a notification, not a snoozable alarm.
-        Use snooze_alert to extend a fired alarm; replace_alert(series_id=... or instance_id=...) to edit, reschedule, or retarget an existing alarm.
+        Create a new snoozable alarm; use replace_alert when the user refers to changing an existing one.
+        Critical attention, alarm sound, explicit acknowledgement. remind is a notification, not a snoozable alarm.
+        Use replace_alert to change an existing alarm's time, room, or message. Use snooze_alert to extend a fired alarm.
         Accepts wall-clock times and relative durations such as "30m" or "in 2 hours".
         Args:
             time_str: "30m", "in 2 hours", "17:00", "5pm", "5 o'clock",
@@ -1183,6 +1209,9 @@ class SchedulerPlugin(JarvisPlugin):
         self,
         series_id: str | None = None,
         instance_id: str | None = None,
+        query: str | None = None,
+        kind: Literal["timer", "alarm", "reminder"] | None = None,
+        scope: Literal["occurrence", "series"] = "occurrence",
         when: str | None = None,
         message: str | None = None,
         recurrence: str | None = None,
@@ -1192,20 +1221,32 @@ class SchedulerPlugin(JarvisPlugin):
         deliver_to: str | None = None,
     ) -> str | CapabilityErrorDetail:
         """
-        Edit, reschedule, or retarget a one-shot notification, one pending occurrence, or an entire recurring series.
-        Use series_id for permanent series changes ("from now on", "every day at 7am").
-        Use instance_id for one pending occurrence only ("today", "tomorrow's alarm", "next alarm", "just this once").
-        Do not pass recurrence when only changing the time; pass recurrence only when the repeat pattern itself changes.
-        Do not cancel and recreate for edits. To clear/stop/cancel, use cancel_alert — editing message is not cancel.
+        Change an existing alarm, reminder, or timer. query= names it; scope=series means all future occurrences.
+        Use series_id for permanent series changes ("from now on"). Use instance_id for one pending occurrence ("today", "tomorrow", "just this once").
+        Do not pass recurrence when only changing the time. Do not cancel and recreate. To clear/stop, use cancel_alert.
         deliver_to: "anywhere", "here", or a bound room name.
 
         Args:
+            query: Current name or clock time of the existing item, such as "wake" or "8:30". Not the new time.
+            scope: "occurrence" (default) changes one pending item; "series" changes all future occurrences.
             series_id: series_id from get_alerts(). Changes the durable recurring schedule.
             instance_id: instance_id from get_alerts(). Changes only that pending occurrence.
         """
         owner_id = get_owner_id()
-        if bool(series_id) == bool(instance_id):
+        if series_id and instance_id:
             return _one_scope_required_error("replace_alert")
+        if (series_id or instance_id) and query:
+            return _fail("Pass query= or an id, not both.")
+
+        if not series_id and not instance_id:
+            if not query and not kind and when is None and message is None and deliver_to is None:
+                return _one_scope_required_error("replace_alert")
+            resolved = await self._resolve_alert_target(query=query, kind=kind)
+            if isinstance(resolved, CapabilityErrorDetail):
+                return resolved
+            series_id, instance_id = _ids_from_resolved(resolved, scope=scope)
+            if not series_id and not instance_id:
+                return _fail(f"Matched item has no {scope} identifier.")
 
         if protocol:
             from plugins.protocol import protocol_exists
@@ -1239,6 +1280,22 @@ class SchedulerPlugin(JarvisPlugin):
             deliver_to=deliver_to,
             owner_id=owner_id,
         )
+
+    async def _resolve_alert_target(
+        self,
+        *,
+        query: str | None,
+        kind: Literal["timer", "alarm", "reminder"] | None = None,
+    ) -> AlertSummary | CapabilityErrorDetail:
+        result = await self.get_alerts(kind=kind, query=query)
+        if result.match_status == MatchStatus.NONE:
+            return _fail(
+                "No matching pending alarm, reminder, or timer. "
+                "Use add_alarm, remind, or add_timer to create one."
+            )
+        if result.match_status == MatchStatus.MULTIPLE:
+            return _ambiguous_alerts_error(result.alerts)
+        return result.alerts[0]
 
     async def _replace_series(
         self,
@@ -1418,16 +1475,29 @@ class SchedulerPlugin(JarvisPlugin):
         self,
         series_id: str | None = None,
         instance_id: str | None = None,
+        query: str | None = None,
+        kind: Literal["timer", "alarm", "reminder"] | None = None,
+        scope: Literal["occurrence", "series"] = "occurrence",
     ) -> str | CapabilityErrorDetail:
         """
-        Cancel one pending occurrence or an entire recurring series.
-        Use for clear/stop/cancel of timers, reminders, alarms, and deferred work.
-        Use instance_id from get_alerts or defer(); use series_id for all-future recurring cancel.
+        Cancel an existing alarm, reminder, or timer. query= names it; scope=series cancels all future occurrences.
+        Use instance_id for one pending occurrence; series_id for all-future recurring cancel.
         """
         owner_id = get_owner_id()
         now = datetime.now(timezone.utc)
-        if bool(series_id) == bool(instance_id):
+        if series_id and instance_id:
             return _one_scope_required_error("cancel_alert")
+        if (series_id or instance_id) and query:
+            return _fail("Pass query= or an id, not both.")
+        if not series_id and not instance_id:
+            if not query and not kind:
+                return _one_scope_required_error("cancel_alert")
+            resolved = await self._resolve_alert_target(query=query, kind=kind)
+            if isinstance(resolved, CapabilityErrorDetail):
+                return resolved
+            series_id, instance_id = _ids_from_resolved(resolved, scope=scope)
+            if not series_id and not instance_id:
+                return _fail(f"Matched item has no {scope} identifier.")
 
         if series_id:
             rule = await _require_scheduler_rule(owner_id, series_id)

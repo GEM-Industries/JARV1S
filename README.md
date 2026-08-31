@@ -3,7 +3,7 @@
 A locally-grounded AI home assistant: low-latency voice, plugins, and a
 packaged macOS Host. Source is AGPL-3.0-or-later.
 
-macOS Apple Silicon: [download the latest release](https://github.com/GEM-Industries/JARV1S/releases/latest).
+macOS Apple Silicon: [download the latest release](https://github.com/GEM-Industries/JARV1S/releases/latest). What changed: [changelog](CHANGELOG.md).
 
 Copyright GEM Industries. Licensed under the [GNU Affero General Public
 License v3.0 or later](LICENSE). Contributions require the [CLA](CLA.md).

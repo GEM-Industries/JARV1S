@@ -14,7 +14,8 @@ from core.triggers.models import (
     ManagementOwnership,
 )
 from core.triggers.scheduler import TriggerScheduler
-from plugins.scheduler import SchedulerPlugin
+from core.plugins.read_evidence import MatchStatus, ReadCoverage
+from plugins.scheduler import AlertQueryResult, AlertSummary, SchedulerPlugin
 
 
 def _text(result) -> str:
@@ -1074,11 +1075,97 @@ async def test_replace_alert_both_ids_guides_to_date_specific_instance(monkeypat
         when="10am",
     )
 
-    assert _text(result).startswith("Provide exactly one of series_id or instance_id")
-    assert "date-specific or one-off changes" in _text(result)
+    assert "exactly one of series_id or instance_id" in _text(result)
+    assert "query=" in _text(result)
     assert "permanent/all-future recurring series changes" in _text(result)
     trigger_instances.update_one.assert_not_awaited()
     trigger_rules.update_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replace_alert_query_resolves_unique_instance(monkeypatch) -> None:
+    plugin = SchedulerPlugin()
+    plugin.get_alerts = AsyncMock(
+        return_value=AlertQueryResult(
+            alerts=[
+                AlertSummary(
+                    instance_id="trg-wake",
+                    series_id="rule-wake",
+                    scope="instance",
+                    name="Wake up",
+                    kind="alarm",
+                    status="pending",
+                )
+            ],
+            match_status=MatchStatus.SINGLE,
+            coverage=ReadCoverage.COMPLETE,
+        )
+    )
+    plugin._replace_instance = AsyncMock(return_value="Occurrence updated.")
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+
+    result = await plugin.replace_alert(query="wake", when="9:30")
+
+    assert _text(result).startswith("Occurrence updated.")
+    plugin.get_alerts.assert_awaited_once()
+    assert plugin._replace_instance.await_args.kwargs["instance_id"] == "trg-wake"
+
+
+@pytest.mark.asyncio
+async def test_replace_alert_query_ambiguous_does_not_write(monkeypatch) -> None:
+    plugin = SchedulerPlugin()
+    plugin.get_alerts = AsyncMock(
+        return_value=AlertQueryResult(
+            alerts=[
+                AlertSummary(
+                    instance_id="trg-wake",
+                    series_id="rule-wake",
+                    scope="instance",
+                    name="Wake up",
+                    kind="alarm",
+                    status="pending",
+                    local_time="8:30 AM",
+                ),
+                AlertSummary(
+                    instance_id="trg-bins",
+                    series_id=None,
+                    scope="instance",
+                    name="",
+                    kind="reminder",
+                    status="pending",
+                    local_time="4:00 PM",
+                ),
+            ],
+            match_status=MatchStatus.MULTIPLE,
+            coverage=ReadCoverage.COMPLETE,
+        )
+    )
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+
+    result = await plugin.replace_alert(when="9:30")
+
+    assert "Multiple matches" in _text(result)
+    plugin.get_alerts.return_value = AlertQueryResult(
+        alerts=[
+            AlertSummary(
+                instance_id="trg-bins",
+                scope="instance",
+                kind="reminder",
+                status="pending",
+            )
+        ],
+        match_status=MatchStatus.SINGLE,
+        coverage=ReadCoverage.COMPLETE,
+    )
+    result = await plugin.replace_alert(query="bins", scope="series", when="9:30")
+    assert "no series identifier" in _text(result)
+
+
+@pytest.mark.asyncio
+async def test_cancel_alert_empty_requires_target(monkeypatch) -> None:
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+    result = await SchedulerPlugin().cancel_alert()
+    assert "query=" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -1266,9 +1353,27 @@ async def test_replace_alert_retargets_series_in_place(monkeypatch) -> None:
             trigger_instances=trigger_instances,
         )),
     )
+    plugin = SchedulerPlugin()
+    plugin.get_alerts = AsyncMock(
+        return_value=AlertQueryResult(
+            alerts=[
+                AlertSummary(
+                    instance_id="trg-wake",
+                    series_id="rule-wake",
+                    scope="instance",
+                    name="Wake up",
+                    kind="alarm",
+                    status="pending",
+                )
+            ],
+            match_status=MatchStatus.SINGLE,
+            coverage=ReadCoverage.COMPLETE,
+        )
+    )
 
-    result = await SchedulerPlugin().replace_alert(
-        series_id="rule-wake",
+    result = await plugin.replace_alert(
+        query="wake",
+        scope="series",
         deliver_to="bedroom",
     )
 
@@ -1410,7 +1515,6 @@ async def test_add_alarm_deliver_to_bound_room_sets_location_ref(monkeypatch) ->
         "plugins.scheduler.trigger_service",
         SimpleNamespace(create_instance=create_instance),
     )
-
     result = await SchedulerPlugin().add_alarm("7am", message="Wake up", deliver_to="bedroom")
 
     assert "set for" in _text(result) or "scheduled" in _text(result)
@@ -1435,7 +1539,6 @@ async def test_add_alarm_unknown_room_returns_recoverable_error(monkeypatch) -> 
         "plugins.scheduler.trigger_service",
         SimpleNamespace(create_instance=create_instance),
     )
-
     result = await SchedulerPlugin().add_alarm("7am", message="Wake up", deliver_to="greenhouse")
 
     assert "No bound room matched" in _text(result)
@@ -1676,7 +1779,6 @@ async def test_add_alarm_duration_uses_alarm_preset(monkeypatch) -> None:
         "plugins.scheduler.trigger_service",
         SimpleNamespace(create_instance=create_instance),
     )
-
     result = await SchedulerPlugin().add_alarm("30 minutes from now")
 
     assert "set for" in _text(result) or "scheduled" in _text(result)

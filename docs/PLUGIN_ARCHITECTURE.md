@@ -90,6 +90,12 @@ themselves; do not add a second `render_*` decision for the same data.
 Every public first-party tool is an `@tool` method with a typed visible
 signature. Dynamic adapters such as MCP must expose equivalent capability
 metadata even when their callables are generated rather than decorated.
+`CapabilityDefinition` keeps the full documentation but exposes a concise
+model-facing description. Today that summary is derived from the first
+docstring line for both provider `tools=` and `system.search_tools`, which keeps
+the offered manifest bounded. Do not solve local tool confusion by sending
+every full docstring: keep the summary complete, make common calls intuitive,
+and enforce correctness in the typed contract and implementation.
 
 The mounted callable, provider `tools=` schema, dispatcher validation, and
 trace identity must derive from one capability definition. An advertised tool
@@ -157,6 +163,16 @@ Mutations treat model-generated arguments as untrusted input:
    raise an unexpected failure.
 6. Return the resulting stable identifier and relevant state when a follow-up
    may need them.
+
+The model only knows mutable domain state that the current prompt, history, or a
+tool result exposed. Design for all three cases instead of assuming it remembers
+the store. A unique user-shaped edit/cancel target may be resolved inside the
+mutation, with an explicit safe scope when occurrence and series are both
+possible. A create path that would produce a consequential duplicate should
+return the existing target and separate edit versus explicit-add recovery
+paths; it must not silently replace a non-singleton resource. Coexistence alone
+does not establish a duplicate when the domain legitimately supports many
+objects.
 
 UI is a side channel, not evidence that an operation succeeded. Detailed return
 shapes, docstring style, normalization, persistence, and consent recipes belong

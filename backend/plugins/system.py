@@ -332,7 +332,7 @@ async def _ensure_tool_index() -> None:
         if fqn == "system.search_tools":
             continue
         doc = definition.documentation or ""
-        first_line = (doc.split("\n", 1)[0]).strip() if doc else ""
+        description = definition.description
         sig_str = definition.visible_signature_str
         param_names = _visible_param_names_from_sig(definition.visible_signature)
         required_param_names = _visible_required_param_names_from_sig(
@@ -343,13 +343,13 @@ async def _ensure_tool_index() -> None:
         text = " ".join(
             part for part in (
                 f"{fqn}{sig_str}",
-                first_line,
+                description,
                 param_text,
             ) if part
         )
         index[fqn] = _ToolIndexEntry(
             plugin=definition.plugin,
-            description=first_line,
+            description=description,
             signature=sig_str,
             parameter_names=param_names,
             required_parameter_names=required_param_names,

@@ -425,8 +425,14 @@ tasks:
     cmd: bash apps/desktop/scripts/release-local.sh {{.CLI_ARGS}}
 
   desktop:release:publish:
-    desc: Publish the local release DMG to private and public GitHub Releases
-    cmd: bash apps/desktop/scripts/publish-github-release.sh
+    desc: Publish the signed DMG + updater to the private beta repo
+    cmd: bash apps/desktop/scripts/publish-github-release.sh --private
+
+  desktop:release:promote:
+    desc: Promote this version to GEM-Industries (sanitized source + public DMG, no rebuild)
+    cmds:
+      - bash scripts/publish-public.sh --push
+      - bash apps/desktop/scripts/publish-github-release.sh --public
 
   desktop:validate-artifact:
     desc: Verify signed/notarized app, DMG, and updater manifest (set BUNDLE=...)

@@ -8,8 +8,22 @@ PYTHON_VERSION="${JARVIS_PYTHON_VERSION:-3.12}"
 ARCH="$(uname -m)"
 
 echo "Building Host runtime into $DEST"
-rm -rf "$DEST"
 mkdir -p "$DEST/backend" "$DEST/frontend-dist" "$DEST/runtime"
+
+RUNTIME_STAMP="$(
+  cat "$ROOT/backend/uv.lock" "$ROOT/.python-version" "$ROOT/apps/desktop/services/versions.json" \
+    | shasum -a 256 | awk '{print $1}'
+)"
+STAMP_FILE="$DEST/.runtime-stamp"
+PYTHON_BIN="$DEST/runtime/python/bin/python3"
+REUSE_PYTHON=0
+if [[ -x "$PYTHON_BIN" && -f "$STAMP_FILE" && "$(cat "$STAMP_FILE")" == "$RUNTIME_STAMP" ]]; then
+  REUSE_PYTHON=1
+  echo "Reusing bundled Python (uv.lock / Python / Mongo pin unchanged)"
+else
+  rm -rf "$DEST/runtime"
+  mkdir -p "$DEST/runtime"
+fi
 
 echo "Building bundled MongoDB service binary..."
 bash "$(dirname "$0")/build-service-binaries.sh"
@@ -18,9 +32,13 @@ if [[ ! -f "$ROOT/frontend/dist/index.html" ]]; then
   echo "Building frontend..."
   (cd "$ROOT/frontend" && npm ci && npm run build)
 fi
+rm -rf "$DEST/frontend-dist"
+mkdir -p "$DEST/frontend-dist"
 cp -R "$ROOT/frontend/dist/." "$DEST/frontend-dist/"
 
 echo "Copying backend source..."
+rm -rf "$DEST/backend"
+mkdir -p "$DEST/backend"
 rsync -a \
   --exclude '.venv' \
   --exclude '__pycache__' \
@@ -41,10 +59,13 @@ rsync -a \
 
 cp "$ROOT/docker-compose.yml" "$DEST/docker-compose.yml"
 
+if [[ "$REUSE_PYTHON" == "1" ]]; then
+  PYTHON_BIN_DIR="$DEST/runtime/python/bin"
+else
 echo "Installing relocatable Python baseline..."
 PYTHON_STAGE="$(mktemp -d)"
 trap 'rm -rf "$PYTHON_STAGE"' EXIT
-uv python install "$PYTHON_VERSION" --install-dir "$PYTHON_STAGE" --force --no-cache
+uv python install "$PYTHON_VERSION" --install-dir "$PYTHON_STAGE"
 
 # uv lays out cpython-<ver>-<platform>/ under the install dir, plus metadata
 # (.temp, .lock) and an absolute-path symlink. Ship only the distribution tree.
@@ -97,6 +118,13 @@ for entry in "$PYTHON_BIN_DIR"/*; do
 done
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "python3 missing after bin prune" >&2
+  exit 1
+fi
+echo "$RUNTIME_STAMP" > "$STAMP_FILE"
+fi
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Bundled python3 missing at $PYTHON_BIN" >&2
   exit 1
 fi
 

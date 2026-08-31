@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild and replace even if this tag already has a DMG
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,8 +19,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release-macos-arm64:
+  already-published:
     if: github.repository == 'GTS-html77/JARV1S'
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event.inputs.force || false }}
+        run: |
+          if [[ "$FORCE" == "true" ]]; then
+            echo "Forced rebuild requested."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if bash apps/desktop/scripts/release-already-published.sh "${GITHUB_REF_NAME}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  release-macos-arm64:
+    needs: already-published
+    if: github.repository == 'GTS-html77/JARV1S' && needs.already-published.outputs.skip != 'true'
     runs-on: macos-latest
     env:
       HAS_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
@@ -48,6 +79,7 @@ jobs:
         run: brew install portaudio create-dmg
 
       - name: Verify release tag matches backend version
+        if: github.ref_type == 'tag'
         run: node apps/desktop/scripts/verify-release-tag.mjs "${GITHUB_REF_NAME}"
 
       - name: Backend tests
@@ -119,9 +151,8 @@ jobs:
       - name: Validate signed beta artifacts
         run: bash apps/desktop/scripts/validate-beta-artifact.sh apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle
 
-      - name: Publish GitHub Release
+      - name: Publish private GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           JARVIS_RELEASE_CHANNEL: ${{ vars.JARVIS_RELEASE_CHANNEL || 'internal' }}
-          JARVIS_PUBLIC_RELEASE_REPO: ""
-        run: bash apps/desktop/scripts/publish-github-release.sh
+        run: bash apps/desktop/scripts/publish-github-release.sh --private
