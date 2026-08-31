@@ -2,13 +2,13 @@
 Composio-backed integration lifecycle: reconcile, list, connect-link,
 disconnect, plus identity-tool discovery and caching.
 
-YAML (mcp_servers.yaml) is treated as an optional override layer:
+Packaged mcp_servers.json is treated as an optional override layer:
   - utterances  — override auto-generated utterances
   - tools       — allowlist for large toolkits
   - triggers    — auto-register Composio triggers on connect
 
 Any valid Composio toolkit slug can be connected regardless of whether it
-has a YAML entry. The YAML gate has been removed.
+has a packaged entry. The config gate has been removed.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from core.integrations.lifecycle._shared import (
 )
 from core.integrations.lifecycle.bespoke import teardown_local_integration
 from core.integrations.mcp.cache import load_cached_schema
-from core.integrations.mcp.config import MCPServerConfig, load_mcp_config
+from core.integrations.mcp.config import MCPConfigError, MCPServerConfig, load_mcp_config
 from core.plugins.registry import registry
 from services.database.mongodb import mongodb
 
@@ -167,18 +167,16 @@ async def _clear_identity(app_name: str) -> None:
 
 
 def get_declared_composio_configs() -> list[MCPServerConfig]:
-    """Return Composio-backed integrations declared in mcp_servers.yaml."""
-    if not settings.MCP_SERVERS_CONFIG or not settings.MCP_SERVERS_CONFIG.exists():
+    """Return Composio-backed integrations declared in mcp_servers.json."""
+    try:
+        configs = load_mcp_config(settings.MCP_SERVERS_CONFIG)
+    except MCPConfigError:
         return []
-    return [
-        config
-        for config in load_mcp_config(settings.MCP_SERVERS_CONFIG)
-        if config.type == "composio"
-    ]
+    return [config for config in configs if config.type == "composio"]
 
 
 def _get_config_overrides(name: str) -> Optional[MCPServerConfig]:
-    """Return the mcp_servers.yaml entry for a toolkit, or None if absent.
+    """Return the mcp_servers.json entry for a toolkit, or None if absent.
 
     Used to apply optional overrides (utterances, tools allowlist, triggers)
     when connecting or reconciling a toolkit. Absence is not an error.
@@ -204,13 +202,13 @@ async def list_integrations() -> list[IntegrationView]:
     Returns:
     - Built-in plugins from the registry (excluding hidden infrastructure
       and MCP-bridged plugins already shown in the composio section).
-    - YAML-declared Composio apps (available → connected).
-    - Dynamically connected Composio apps with no YAML entry.
+    - Packaged Composio apps (available → connected).
+    - Dynamically connected Composio apps with no packaged entry.
 
     Sorted: built-in first (alphabetical), then connected Composio, then available.
     """
-    yaml_configs = get_declared_composio_configs()
-    yaml_names = {c.name for c in yaml_configs}
+    declared_configs = get_declared_composio_configs()
+    declared_names = {c.name for c in declared_configs}
 
     connected_apps: set[str] = set()
     connection_error: str | None = None
@@ -227,7 +225,7 @@ async def list_integrations() -> list[IntegrationView]:
 
     # Bespoke plugins always show as built-in — strip any name collision with
     # Composio so a same-named external app doesn't shadow them.
-    composio_names = (yaml_names | connected_apps) - registry.bespoke_names
+    composio_names = (declared_names | connected_apps) - registry.bespoke_names
 
     # --- Built-in plugins ---
     from core.integrations.manager import integrations as integrations_mgr
@@ -248,6 +246,7 @@ async def list_integrations() -> list[IntegrationView]:
         last_error: str | None = None
         auth_type: str | None = None
         auth_providers: list[str] = []
+        connected_providers: list[str] = []
 
         if composio_app:
             auth_type = "composio"
@@ -255,26 +254,44 @@ async def list_integrations() -> list[IntegrationView]:
                 last_error = "Auth disconnected"
         else:
             auth_providers = integrations_mgr.resolve_oauth_providers(name)
-            provider = auth_providers[0] if auth_providers else None
             built_in_connected, built_in_error = await built_in_connection_status(name)
             if not built_in_connected:
                 auth_missing = True
                 last_error = built_in_error
-            elif auth_providers:
-                connected_provider: str | None = None
-                for candidate in auth_providers:
-                    try:
-                        await auth_manager.get_token(candidate)
-                        connected_provider = candidate
-                        break
-                    except Exception:
-                        continue
+            elif auth_providers or name == "calendar":
+                if name == "calendar":
+                    from plugins.calendar.providers.eventkit import (
+                        CALENDAR_ACCESS_REQUIRED,
+                        macos_calendar_message,
+                        macos_connection_state,
+                    )
 
-                auth_type = connected_provider or provider
-                if not connected_provider:
+                    host_on, macos_status = await macos_connection_state()
+                    if host_on:
+                        auth_providers = ["macos", *auth_providers]
+                    if macos_status == "authorized":
+                        connected_providers.append("macos")
+
+                for candidate in auth_providers:
+                    if candidate == "macos":
+                        continue
+                    if await auth_manager.peek_grant(candidate):
+                        connected_providers.append(candidate)
+
+                if connected_providers:
+                    auth_type = connected_providers[0]
+                else:
                     auth_missing = True
-                    provider_names = " or ".join(p.title() for p in auth_providers)
-                    last_error = f"{provider_names} auth required"
+                    oauth_names = [p for p in auth_providers if p != "macos"]
+                    if "macos" in auth_providers:
+                        last_error = (
+                            macos_calendar_message(macos_status)
+                            if macos_status
+                            else CALENDAR_ACCESS_REQUIRED
+                        )
+                    elif oauth_names:
+                        last_error = f"{' or '.join(p.title() for p in oauth_names)} auth required"
+                    auth_type = auth_providers[0] if auth_providers else None
 
         built_in_items.append(
             IntegrationView(
@@ -289,6 +306,7 @@ async def list_integrations() -> list[IntegrationView]:
                 enabled=registry.is_enabled(name),
                 auth_type=auth_type,
                 auth_providers=auth_providers,
+                connected_providers=connected_providers,
                 description=plugin.metadata.description,
                 connection=(
                     "unknown"
@@ -312,7 +330,7 @@ async def list_integrations() -> list[IntegrationView]:
 
     items: list[IntegrationView] = []
 
-    for config in yaml_configs:
+    for config in declared_configs:
         if registry.is_bespoke(config.name):
             continue
         loaded, tool_count = local_state(config.name)
@@ -363,7 +381,7 @@ async def list_integrations() -> list[IntegrationView]:
             )
         )
 
-    for slug in connected_apps - yaml_names:
+    for slug in connected_apps - declared_names:
         loaded, tool_count = local_state(slug)
         items.append(
             IntegrationView(
@@ -593,8 +611,8 @@ async def reconcile_integration(name: str) -> ReconcileResult:
 async def reconcile_composio_startup() -> list[ReconcileResult]:
     """Reconcile ALL connected Composio apps with the local plugin registry.
 
-    Discovers connected apps from the Composio API (not just YAML-declared),
-    so apps connected in a previous session are loaded even without a YAML entry.
+    Discovers connected apps from the Composio API (not just packaged entries),
+    so apps connected in a previous session are loaded even without a config entry.
     Reconciles concurrently for speed.
     """
     gateway = get_composio_gateway()

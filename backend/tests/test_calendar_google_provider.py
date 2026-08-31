@@ -50,7 +50,7 @@ async def test_update_event_start_only_preserves_existing_duration():
 
 @pytest.mark.asyncio
 async def test_create_event_yearly_recurrence_payload_and_confirmation():
-    provider = GoogleProvider(client=object(), account="personal")
+    provider = GoogleProvider(client=object())
     provider._request = AsyncMock(return_value=_GoogleResponse({
         "id": "series-1",
         "summary": "Annual review",
@@ -74,7 +74,7 @@ async def test_create_event_yearly_recurrence_payload_and_confirmation():
 
 @pytest.mark.asyncio
 async def test_update_event_yearly_recurrence_payload():
-    provider = GoogleProvider(client=object(), account="personal")
+    provider = GoogleProvider(client=object())
     provider._request = AsyncMock(side_effect=[
         _GoogleResponse({
             "start": {"date": "2026-03-20"},

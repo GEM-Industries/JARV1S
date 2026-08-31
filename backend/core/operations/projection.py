@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from core.operations.definitions import SetupKind, SetupStatus, SetupSummary, list_setups
 from core.scheduling import coerce_datetime_or_none
-from core.triggers.lifecycle import is_scheduler_managed_instance
+from core.triggers.lifecycle import display_paused_until, is_scheduler_managed_instance
 from services.database.mongodb import mongodb
 
 SetupScope = Literal["definition", "occurrence"]
@@ -67,7 +67,7 @@ def _summary_fields(row: SetupSummary) -> dict:
         "next_due_at": row.next_due_at,
         "last_run_at": row.last_run_at,
         "last_outcome": row.last_outcome,
-        "paused_until": row.paused_until,
+        "paused_until": display_paused_until(row.paused_until),
         "source_label": row.source_label,
         "trigger_label": row.trigger_label,
         "cadence_label": row.cadence_label,
@@ -139,7 +139,7 @@ async def _habit_checkin_rows(owner_id: str) -> list[ManagedSetup]:
                 action_label="Check in",
                 source_label="Habit",
                 series_id=plan.rule_id,
-                paused_until=plan.paused_until,
+                paused_until=display_paused_until(plan.paused_until),
             )
         )
     return rows
@@ -212,11 +212,28 @@ async def _scheduler_occurrence_rows(owner_id: str) -> list[ManagedSetup]:
     return rows
 
 
+_QUERY_TYPE_STOPWORDS = {
+    "all",
+    "automation",
+    "automations",
+    "my",
+    "routine",
+    "routines",
+    "schedule",
+    "schedules",
+    "setup",
+    "setups",
+    "the",
+}
+
+
 def _matches_query(row: ManagedSetup, query: str | None) -> bool:
     if not query:
         return True
-    needle = query.casefold().strip()
-    if not needle:
+    tokens = [token for token in query.casefold().split() if token]
+    content = [token for token in tokens if token not in _QUERY_TYPE_STOPWORDS]
+    tokens = content or tokens
+    if not tokens:
         return True
     haystack = " ".join(
         str(value or "")
@@ -229,7 +246,7 @@ def _matches_query(row: ManagedSetup, query: str | None) -> bool:
             row.setup_type,
         )
     ).casefold()
-    return needle in haystack
+    return all(token in haystack for token in tokens)
 
 
 async def find_managed_setups(
@@ -263,11 +280,14 @@ async def find_managed_setups(
 async def resolve_managed_setup(
     owner_id: str,
     target: str,
+    *,
+    setup_type: SetupType | None = None,
 ) -> ManagedSetup | list[ManagedSetup] | None:
+    """Resolve a user-shaped target to one setup. setup_type scopes the search to one domain."""
     needle = target.strip()
     if not needle:
         return None
-    all_rows = await find_managed_setups(owner_id)
+    all_rows = await find_managed_setups(owner_id, setup_type=setup_type)
     exact = [
         row
         for row in all_rows

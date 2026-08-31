@@ -31,9 +31,9 @@ class MyPlugin(JarvisPlugin):
 
 ### Plugin Visibility & Toggling
 
-Every plugin in the registry is shown in the Tools UI unless `hidden=True` is set on its `PluginMetadata` (e.g. `db`, `profile`, `composio`).
+Every plugin in the registry is shown in Apps unless `hidden=True` is set on its `PluginMetadata` (e.g. `db`, `profile`, `composio`).
 
-Users can enable/disable any non-hidden plugin at runtime via the Tools panel. The `PATCH /integrations/{name}/toggle` endpoint calls `registry.set_plugin_enabled()`, which:
+Users can enable/disable any non-hidden plugin at runtime via Apps. The `PATCH /integrations/{name}/toggle` endpoint calls `registry.set_plugin_enabled()`, which:
 - Persists state to `system_config` MongoDB collection
 - Rebuilds the capability catalog so the next turn's `tools=` set reflects the change
 - Is respected by ToolRouter and the per-turn `tools=` set on the next turn
@@ -46,8 +46,8 @@ the tool description. The system prompt carries only global behavior and
 per-turn runtime facts — it does not repeat tool signatures, docstrings, or
 return schemas.
 
-This means: **the docstring is the tool description**. Keep it concise; every
-token still costs schema budget when the tool is offered.
+This means: **the docstring is the tool description**. Keep it concise; offered
+tools compete with history for attention.
 
 ### Capability Contract Conformance
 
@@ -155,7 +155,7 @@ For hidden/core utilities that the model must reliably invoke from natural langu
 
 Destructive or persistent state-changing tools must not rely on the LLM to keep opaque provider IDs straight after a lookup.
 
-- Resolve or fetch the concrete target before calling `require_consent()`.
+- Resolve or fetch the concrete target before calling `require_consent()`. Domain tools that own the mutation resolve unique names through `resolve_managed_setup`; do not bounce the model to `setups.find` just to recover an id.
 - Use human-readable approval descriptions, not raw IDs alone.
 - Put stable target details in approval `detail`: ID, account/source, title/name, time/path/recipient.
 - Return unambiguous confirmed or failed outcomes (see Tool Returns). Avoid bare phrases like "not found" that can be misread as success.

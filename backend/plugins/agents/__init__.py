@@ -3,11 +3,13 @@ Agents Plugin — JARV1S delegated background work.
 
 Exposes the following tools to the LLM:
   dispatch     — delegate long-running work (returns immediately)
-  resume       — resume a completed task with new feedback
-  get_status   — status/progress for a single task or all active tasks
+  resume       — continue named work with new feedback
+        Inspect      — open the worker session so the user can read it
+  get_status   — status for a title/id, or the recency roster
   get_result   — retrieve the full result for completed delegated work
-  list_tasks   — list tasks filtered by status
-  cancel_task  — cancel a running task
+  list_tasks   — list open work, or filter runs by status
+  cancel_task  — cancel a running run (does not close the work)
+  close        — forget a work lineage (optional; not required when a run finishes)
 """
 
 import asyncio
@@ -15,8 +17,10 @@ import contextvars
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess as _sp
+import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -25,9 +29,9 @@ from core.id import generate_id
 from core.agent.agent import AgentEventType, JarvisAgent
 from core.agent.sdk import _ACTIVE_SDK
 from core.config import settings
-from core.credentials.store import credential_store
 from core.decorators import tool
 from core.plugins.types import JarvisPlugin, PluginMetadata
+from core.prompts.background import build_background_context
 from core.prompts.builder import PromptBuilder as _PromptBuilder
 from core.turns.reasoning_effort import resolve_reasoning_effort
 from plugins.agents.client import (
@@ -41,6 +45,7 @@ from plugins.agents.client import (
     _publish_approval_needed_trigger,
     _complete_task,
     _fail_task,
+    _cancel_task,
 )
 from plugins.agents.task_review import (
     activity_from_tool_output,
@@ -50,6 +55,37 @@ from plugins.agents.task_review import (
     new_span_id,
     task_trace_item,
     written_artifacts_from_output,
+)
+from plugins.agents.work import (
+    WorkResolve,
+    compact_task,
+    display_cwd,
+    format_candidates,
+    format_cwd_help,
+    format_status,
+    infer_title,
+    inspect_ide_argv,
+    inspect_launch_argv,
+    inspect_macos_open_argv,
+    inspect_resume_command,
+    path_under_cwd,
+    list_open_work,
+    list_project_dirs,
+    load_open_roster,
+    load_owner_docs,
+    match_open_work,
+    resolve_folder,
+    resolve_from_docs,
+    resolve_steer,
+    resolve_target,
+    ttl_at,
+)
+from plugins.agents.workers import (
+    default_worker_kind,
+    lineage_worker_kind,
+    missing_credential_message,
+    worker_for_kind,
+    worker_ready,
 )
 from core.plugins.capabilities import (
     CapabilityErrorDetail,
@@ -87,15 +123,10 @@ _IN_BACKGROUND = contextvars.ContextVar("_in_background_dispatch", default=False
 _child_pids: set[int] = set()
 
 
-def _default_agent_cwd() -> str:
-    """Default delegated work to the JARV1S project root until a user sandbox exists."""
-    return str(settings.BASE_DIR.parent)
-
-
-def _normalize_agent_cwd(cwd: str | None) -> str:
-    if not cwd:
-        return _default_agent_cwd()
-    return os.path.abspath(os.path.expanduser(cwd))
+def _normalize_agent_cwd(cwd: str | None) -> str | None:
+    if not cwd or not str(cwd).strip():
+        return None
+    return os.path.abspath(os.path.expanduser(str(cwd).strip()))
 
 
 def _dispatch_result(
@@ -103,6 +134,7 @@ def _dispatch_result(
     ok: bool,
     message: str,
     task_id: str | None = None,
+    work_id: str | None = None,
     mode: str | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
@@ -111,6 +143,7 @@ def _dispatch_result(
         {
             "ok": ok,
             "task_id": task_id,
+            "work_id": work_id,
             "mode": mode,
             "error_code": error_code,
             "error_message": error_message,
@@ -191,20 +224,24 @@ class AgentsPlugin(JarvisPlugin):
         """Fail task rows that belonged to a prior backend process."""
         now = datetime.now(timezone.utc)
         col = mongodb.get_collection("background_tasks")
-        result = await col.update_many(
-            {"status": "running"},
-            {
-                "$set": {
-                    "status": "failed",
-                    "result": RESTART_INTERRUPTED_RESULT,
-                    "progress_summary": "Interrupted by backend restart.",
-                    "completed_at": now,
-                    "expires_at": now + timedelta(days=30),
-                    "interrupted_reason": "backend_restart",
-                }
-            },
+        shared = {
+            "status": "failed",
+            "result": RESTART_INTERRUPTED_RESULT,
+            "progress_summary": "Interrupted by backend restart.",
+            "completed_at": now,
+            "interrupted_reason": "backend_restart",
+        }
+        open_result = await col.update_many(
+            {"status": "running", "open": True},
+            {"$set": shared},
         )
-        recovered = int(getattr(result, "modified_count", 0) or 0)
+        legacy_result = await col.update_many(
+            {"status": "running", "open": {"$ne": True}},
+            {"$set": {**shared, "expires_at": now + timedelta(days=30)}},
+        )
+        recovered = int(getattr(open_result, "modified_count", 0) or 0) + int(
+            getattr(legacy_result, "modified_count", 0) or 0
+        )
         if recovered:
             logger.warning("Marked %d interrupted background task(s) failed after restart", recovered)
         return recovered
@@ -242,56 +279,27 @@ class AgentsPlugin(JarvisPlugin):
         self,
         prompt: str,
         cwd: str | None = None,
+        title: str | None = None,
+        ref: str | None = None,
         mode: str = "code",
         max_turns: int = 40,
         max_budget_usd: float = 1.0,
     ) -> str:
         """
         Delegate long-running work and return immediately.
-        Returns a JSON string: {"ok": bool, "task_id": str | null, "mode": str | null,
-        "error_code": str | null, "error_message": str | null, "message": str}.
+        Returns JSON: ok, task_id, work_id, mode, error_code, error_message, message.
         If ok=false, no task was started.
 
         Use when work is broad or slow enough to continue while the user moves on:
-        inbox triage, calendar/Slack investigations, multi-source research, long file edits,
-        git operations, shell pipelines, or tasks likely to need many tool calls or 30+ seconds.
-        Do not use for quick lookups, direct controls, simple calculations, or single-call
-        operations. Never dispatch just to read a file or check status — do it inline.
-        Do NOT dispatch when you are already handling delegated work; use available tools directly.
+        repo investigation, PR review, file/git/shell work, inbox triage, or 30+ second jobs.
+        Pass cwd as the project folder or its nickname. Title is optional.
+        If that folder or title is already open, this continues it (same as resume).
+        Do not files.find, files.read, or system.exec the repo in this Home turn.
+        Never search from the JARV1S tree. Do not use for quick lookups or direct controls.
+        Never dispatch just to read status. Do NOT dispatch when already handling delegated work.
 
-        After dispatch, move on. Tell the user naturally that you'll handle it and report back
-        when there is a result or you need them. Do not poll get_status() immediately.
-        If the user later asks what a completed task found or asks you to repeat it, call
-        get_result(task_id) or get_result() for the latest result. Do not dispatch the same
-        work again unless the user explicitly asks you to rerun it.
-
-        One dispatch call starts at most one task. For batches, call dispatch once per task
-        and inspect each JSON result before starting the next task. Use resume(task_id, feedback)
-        instead of dispatch when continuing a previous code-mode task.
-
-        The delegated agent has no memory of this conversation. Write a focused prompt:
-        include relevant context, absolute paths, expected output, where to save artifacts,
-        whether files already exist, constraints, and what "done" means. Avoid vague goals.
-
-        TWO RUNTIMES, BY DESIGN — see docs/BACKGROUND_AGENTS.md for the rationale.
-        mode="code" — Claude Agent SDK subprocess. Powerful coding model with Bash + file
-            editing only; no jarvis.* bridge. SDK-isolated; does not use jarvis consent.
-            Best fit for: repository work, docs/code review, file creation/editing,
-            Git operations, shell tasks, or writing artifacts in the repo — even
-            when the subject is JARV1S itself.
-        mode="jarvis" — in-process capability-call loop. Shares live integrations with the voice
-            loop (Slack, Gmail, GitHub, Calendar, Memory, Smart Home, etc.), zero IPC overhead,
-            destructive actions can pause on PendingInputWidget approval.
-            Best fit for: slow assistant-world work involving live integrations,
-            API tools, JARV1S plugins, user context, widgets, automations, or
-            cross-service evidence.
-        Choose "code" for repo/docs/code analysis, file/git/shell work, or artifacts
-        that have no live JARV1S plugin dependency. Choose "jarvis" when the task
-        needs live JARV1S runtime integrations. Do quick single integration lookups
-        inline; dispatch broad scans or synthesis in mode="jarvis".
-
-        max_turns: cap on agent iterations (default 40). Reduce for simple focused tasks.
-        max_budget_usd: spending cap in USD (default $1.00).
+        mode="code" — local coding worker (Cursor if connected, otherwise Claude) for file/git/shell work.
+        mode="jarvis" — in-process plugins (Slack, Gmail, calendar). Fire-and-forget; no resume.
         """
         if _IN_BACKGROUND.get(False):
             return _dispatch_result(
@@ -304,12 +312,13 @@ class AgentsPlugin(JarvisPlugin):
                 message="Task not started: already handling delegated work.",
             )
 
-        # Normalize paths: ~ cannot be reliably resolved inside the agent subprocess.
         home = os.path.expanduser("~")
         prompt = prompt.replace("~/", f"{home}/")
-        cwd = _normalize_agent_cwd(cwd)
+        named_title = (title or "").strip()
+        named_ref = (ref or "").strip() or None
 
         if mode == "jarvis":
+            cwd = _normalize_agent_cwd(cwd)
             if await self._get_background_agent() is None:
                 logger.warning("dispatch mode='jarvis' requested but jarvis runtime is unavailable")
                 return _dispatch_result(
@@ -318,70 +327,157 @@ class AgentsPlugin(JarvisPlugin):
                     error_message="Jarvis-mode dispatch is unavailable; integration tasks cannot start.",
                     message="Task not started: jarvis-mode dispatch is unavailable.",
                 )
-            else:
-                return await self._dispatch_inprocess(
-                    prompt=prompt, cwd=cwd, max_budget_usd=max_budget_usd
-                )
-        if not credential_store.get_stored_secret("ANTHROPIC_API_KEY"):
+            return await self._dispatch_inprocess(
+                prompt=prompt,
+                cwd=cwd or home,
+                max_budget_usd=max_budget_usd,
+            )
+
+        try:
+            open_docs = await list_open_work(settings.DEFAULT_USER_ID)
+        except Exception:
+            logger.debug("Open work unavailable for dispatch match", exc_info=True)
+            open_docs = []
+        known = list_project_dirs([str(doc.get("cwd") or "") for doc in open_docs])
+        existing = match_open_work(
+            open_docs, title=named_title or None, cwd=cwd, prompt=prompt
+        )
+        if existing.status == "ambiguous":
+            return _fail(format_candidates(existing.candidates), "ambiguous_work")
+        if existing.status == "single" and existing.doc:
+            return await self.resume(
+                str(existing.doc.get("work_id") or existing.doc.get("task_id")),
+                prompt,
+            )
+
+        folder = resolve_folder(cwd, known)
+        if folder.status != "single":
+            folder = resolve_folder(prompt, known)
+        if folder.status == "ambiguous":
+            listed = ", ".join(display_cwd(path) for path in folder.candidates)
+            return _dispatch_result(
+                ok=False,
+                error_code="cwd_required",
+                error_message=f"Which folder? {listed}",
+                message="Task not started: cwd is ambiguous.",
+            )
+        if folder.status != "single" or not folder.path:
+            return _dispatch_result(
+                ok=False,
+                error_code="cwd_required",
+                error_message=format_cwd_help(known),
+                message="Task not started: cwd is required for code-mode work.",
+            )
+        cwd = folder.path
+        named_title = infer_title(named_title, cwd, prompt)
+        worker_kind = default_worker_kind()
+        if worker_kind is None:
             return _dispatch_result(
                 ok=False,
                 error_code="background_credentials_unavailable",
-                error_message="Add an Anthropic API key in Settings to enable background agents.",
+                error_message=missing_credential_message(),
                 message="Task not started: background-agent credentials are unavailable.",
             )
-        return await self._dispatch(prompt=prompt, cwd=cwd, max_turns=max_turns, max_budget_usd=max_budget_usd)
+        return await self._dispatch(
+            prompt=prompt,
+            cwd=cwd,
+            title=named_title,
+            ref=named_ref,
+            max_turns=max_turns,
+            max_budget_usd=max_budget_usd,
+            worker_kind=worker_kind,
+        )
+
+    async def _lookup_work(self, target: str | None) -> dict[str, Any] | CapabilityErrorDetail:
+        return self._resolved_doc(await resolve_target(settings.DEFAULT_USER_ID, target))
+
+    def _resolved_doc(self, resolved: WorkResolve) -> dict[str, Any] | CapabilityErrorDetail:
+        if resolved.status == "ambiguous":
+            return _fail(format_candidates(resolved.candidates), "ambiguous_work")
+        if resolved.status != "single" or not resolved.doc:
+            return _fail(
+                "No matching open work. Call get_status() with no target to list titles.",
+                "work_not_found",
+            )
+        return resolved.doc
 
     @tool
-    async def resume(self, task_id: str, feedback: str) -> str:
+    async def resume(self, target: str, feedback: str = "") -> str:
         """
-        Continue a previous code-mode task with new instructions.
-        Uses the saved SDK session_id when available, preserving prior file reads,
-        edits, and decisions. If the session file is missing, the SDK may start fresh.
-
-        Use when the user wants to modify, extend, or fix what a previous code-mode
-        agent produced. Do not use for unrelated work or for jarvis-mode tasks that
-        depended on live JARV1S plugin state; dispatch a fresh mode="jarvis" task instead.
-
-        task_id: the ID returned by the original dispatch().
-        feedback: the new instructions for the agent.
+        Continue named code-mode work with new instructions.
+        target is a title, ref, work_id, or task_id. Prefer the title the user said.
+        If the user only gave a constraint and there is one open item, pass that constraint as target.
+        Uses the saved worker session. Do not dispatch a new task for the same work.
+        Feedback is only the new constraint, not a full re-brief.
+        Refuses while a run is still running. Does not close the work.
         """
         if self._semaphore is None:
             return _fail("AgentsPlugin not initialized.")
 
-        col = mongodb.get_collection("background_tasks")
-        doc = await col.find_one({"task_id": task_id})
-        if not doc:
-            return _fail(f"Task {task_id} not found.")
+        instruction = (feedback or "").strip()
+        docs = await load_owner_docs(settings.DEFAULT_USER_ID)
+        resolved = resolve_from_docs(docs, target)
+        if resolved.status == "none" and not instruction:
+            instruction = str(target or "").strip()
+            resolved = resolve_steer(docs)
+        doc = self._resolved_doc(resolved)
+        if isinstance(doc, CapabilityErrorDetail):
+            return doc
+        if not instruction:
+            return _fail("Say what to change next on this work.", "feedback_required")
+        if doc.get("mode") == "jarvis":
+            return _fail(
+                "Jarvis-mode work cannot be resumed. Dispatch a fresh mode=jarvis task if needed.",
+                "resume_unsupported",
+            )
         if doc["status"] == "running":
-            return _fail(f"Task {task_id} is still running. Use cancel_task first if you want to redirect it.")
-        if not credential_store.get_stored_secret("ANTHROPIC_API_KEY"):
+            title = doc.get("title") or doc.get("task_id")
+            return _fail(
+                f"{title} is still running. Use cancel_task if you need to stop this run.",
+                "work_still_running",
+            )
+        worker_kind = lineage_worker_kind(doc)
+        if not worker_ready(worker_kind):
             return _dispatch_result(
                 ok=False,
                 error_code="background_credentials_unavailable",
-                error_message="Add an Anthropic API key in Settings to resume background agents.",
+                error_message=missing_credential_message(worker_kind),
                 message="Resume not started: background-agent credentials are unavailable.",
             )
 
-        cwd = doc.get("cwd", str(settings.BASE_DIR.parent))
+        cwd = _normalize_agent_cwd(doc.get("cwd"))
+        if not cwd:
+            return _fail("This work has no project folder to resume in.", "cwd_required")
         max_turns = doc.get("max_turns", 40)
         max_budget_usd = doc.get("max_budget_usd", 1.0)
         resume_session_id = doc.get("session_id")
+        work_id = str(doc.get("work_id") or generate_id())
+        title = str(doc.get("title") or "").strip() or "Untitled"
 
         _pb = _PromptBuilder()
-        connected_apps, conv_context = await asyncio.gather(
-            _get_connected_composio_apps(),
-            _PromptBuilder.build_conversation_context(settings.DEFAULT_USER_ID),
-        )
+        connected_apps = await _get_connected_composio_apps()
         mcp_servers, system_prompt = await asyncio.gather(
             _resolve_tools_for_dispatch(connected_apps),
-            _pb.build_subprocess_prompt(settings.DEFAULT_USER_ID, cwd, conv_context),
+            _pb.build_subprocess_prompt(settings.DEFAULT_USER_ID, cwd, ""),
         )
 
+        extra_doc = {
+            "mcp_servers": mcp_servers,
+            "progress_summary": "Resuming…",
+            "work_id": work_id,
+            "title": title,
+            "open": True,
+            "session_id": resume_session_id,
+            "worker_kind": worker_kind,
+        }
+        if doc.get("ref"):
+            extra_doc["ref"] = doc.get("ref")
+
         result = await self._prepare_task(
-            prompt=feedback, cwd=cwd, mode="code", max_turns=max_turns,
+            prompt=instruction, cwd=cwd, mode="code", max_turns=max_turns,
             max_budget_usd=max_budget_usd, source="resume",
             trigger_ref=doc.get("trigger_ref"), depth=0,
-            extra_doc={"mcp_servers": mcp_servers, "progress_summary": "Resuming…"},
+            extra_doc=extra_doc,
         )
         if isinstance(result, dict):
             return _dispatch_result(
@@ -391,7 +487,6 @@ class AgentsPlugin(JarvisPlugin):
                 message=f"Resume not started: {result['error_message']}",
             )
         new_task_id, _ = result
-
         owner_id = settings.DEFAULT_USER_ID
 
         async def _run():
@@ -399,99 +494,197 @@ class AgentsPlugin(JarvisPlugin):
                 await _run_agent(
                     task_id=new_task_id,
                     owner_id=owner_id,
-                    prompt=feedback,
+                    prompt=instruction,
                     cwd=cwd,
                     max_turns=max_turns,
                     mcp_servers=mcp_servers,
                     system_prompt=system_prompt,
                     resume_session_id=resume_session_id,
                     max_budget_usd=max_budget_usd,
+                    worker_kind=worker_kind,
+                    title=title,
                 )
 
         self._spawn_task(new_task_id, _run(), "resume")
-        return f"Resuming task. new_task_id={new_task_id}"
+        return _dispatch_result(
+            ok=True,
+            task_id=new_task_id,
+            work_id=work_id,
+            mode="code",
+            message=f"Continuing {title}.",
+        )
 
     @tool
-    async def get_status(self, task_id: str | None = None) -> str:
+    async def inspect(self, target: str, path: str | None = None) -> str:
         """
-        Get status and progress for delegated work, or list everything currently running.
-        task_id: omit to see all running tasks.
-        For completed or failed tasks, the status is terminal; do not poll again.
-        Call get_result(task_id) to retrieve the full result.
+        Open named code-mode work in the editor so the user can review files.
+        target is a title, ref, work_id, or task_id. Pass path to open one file in the project.
+        Does not load the transcript into this turn.
         """
-        col = mongodb.get_collection("background_tasks")
-        if task_id:
-            doc = await col.find_one({"task_id": task_id}, {"events": 0})
-            if not doc:
-                return _fail(f"Task {task_id} not found.")
-            status = doc["status"]
-            if status in {"completed", "failed"}:
-                return (
-                    f"Task {task_id}: status={status} (terminal). "
-                    f"Do not poll status again; call "
-                    f"jarvis.agents.get_result(task_id=\"{task_id}\") for the full result."
-                )
-            return (
-                f"Task {task_id}: status={status}, "
-                f"progress={doc.get('progress_summary', '')}"
+        doc = await self._lookup_work(target)
+        if isinstance(doc, CapabilityErrorDetail):
+            return doc
+        title = str(doc.get("title") or doc.get("task_id") or "Untitled")
+        if doc.get("mode") == "jarvis":
+            return _fail(
+                f"{title} is jarvis-mode work and has no coding session to open.",
+                "inspect_unsupported",
             )
+        cwd = _normalize_agent_cwd(doc.get("cwd"))
+        if not cwd:
+            return _fail(f"{title} has no project folder to open.", "session_missing")
+        worker = worker_for_kind(lineage_worker_kind(doc))
+        via = getattr(worker, "inspect_via", "terminal")
+        file_path = str(path or "").strip()
+        if file_path:
+            resolved = path_under_cwd(file_path, cwd)
+            if not resolved:
+                return _fail("That file is outside this project.", "inspect_path_denied")
+            targets = [resolved]
+            opened = os.path.basename(resolved)
+        else:
+            targets = [cwd]
+            opened = title
 
-        cursor = col.find(
-            {"owner_id": settings.DEFAULT_USER_ID, "status": "running"},
-            {"task_id": 1, "progress_summary": 1, "source": 1},
-        ).limit(10)
-        docs = await cursor.to_list(length=10)
-        if not docs:
-            return "Nothing is currently in progress."
-        lines = [
-            f"- {d['task_id']}: {d.get('progress_summary', '')} ({d.get('source', '')})"
-            for d in docs
-        ]
-        return "Active tasks:\n" + "\n".join(lines)
+        if file_path or via == "ide":
+            if via == "ide":
+                return await self._open_in_editor(worker, targets, opened)
+            if sys.platform == "darwin":
+                return await self._launch_inspect(
+                    ["open", *targets],
+                    fail_detail=f"Could not open {opened}.",
+                    success=f"Opened {opened}.",
+                )
+            return _fail(f"Open {opened} from the project folder.", "inspect_unsupported")
+
+        if doc.get("status") == "running":
+            return _fail(
+                f"{title} is still running. Inspect after it finishes.",
+                "work_still_running",
+            )
+        session_id = str(doc.get("session_id") or "").strip()
+        if not session_id:
+            return _fail(f"{title} has no session to open.", "session_missing")
+        binary = next((name for name in worker.inspect_binaries if shutil.which(name)), None)
+        command = inspect_resume_command(cwd, session_id, binary or worker.inspect_binaries[0])
+        if binary is None:
+            return _fail(
+                f"Install the {worker.inspect_label} CLI to inspect this work. Then run: {command}",
+                "inspect_cli_missing",
+            )
+        if sys.platform != "darwin":
+            return _fail(f"Open a terminal and run: {command}", "inspect_unsupported")
+        return await self._launch_inspect(
+            inspect_launch_argv(cwd, session_id, binary=binary),
+            fail_detail=f"Could not open Terminal. Run: {command}",
+            success=f"Opened {title} in {worker.inspect_label}.",
+        )
+
+    async def _open_in_editor(self, worker: Any, targets: list[str], opened: str) -> str:
+        binary = next((name for name in worker.inspect_binaries if shutil.which(name)), None)
+        if binary:
+            argv = inspect_ide_argv(binary, targets)
+        elif sys.platform == "darwin":
+            argv = inspect_macos_open_argv(getattr(worker, "inspect_app", worker.inspect_label), targets)
+        else:
+            return _fail(
+                f"Install {worker.inspect_label} to open this work.",
+                "inspect_cli_missing",
+            )
+        return await self._launch_inspect(
+            argv,
+            fail_detail=f"Could not open {opened} in {worker.inspect_label}.",
+            success=f"Opened {opened} in {worker.inspect_label}.",
+        )
+
+    async def _launch_inspect(self, argv: list[str], *, fail_detail: str, success: str) -> str:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            detail = (stderr or b"").decode("utf-8", errors="replace").strip()
+            return _fail(detail or fail_detail, "inspect_failed")
+        return success
 
     @tool
-    async def get_result(self, task_id: str | None = None) -> str:
+    async def get_status(self, target: str | None = None) -> str:
         """
-        Retrieve the full stored result for completed or failed delegated work.
-        Use this when the user asks what a background task found, asks you to repeat
-        a result, or refers to a just-finished task whose spoken delivery was interrupted.
-        If task_id is omitted, returns the most recent completed or failed task.
-        Do not call dispatch() to recover a result unless the user explicitly asks to rerun work.
-        If artifacts is non-empty and the user refers to "that file" or "the output",
-        use artifacts[0].path as the exact target path for follow-up file tools.
-        Returns a JSON string: {"ok": bool, "task_id": str | null, "status": str | null,
-        "result": str | null, "artifacts": list, "error_code": str | null,
-        "error_message": str | null, "message": str}.
+        Status for named work, or the recency roster when target is omitted.
+        target is a title, ref, work_id, or task_id. Do not use recall() to find this.
+        Completed open work is still open — resume to continue or inspect to read it.
+        """
+        if not target:
+            text = await load_open_roster(settings.DEFAULT_USER_ID)
+            return text or "No open work."
+
+        doc = await self._lookup_work(target)
+        if isinstance(doc, CapabilityErrorDetail):
+            return doc
+        return format_status(doc)
+
+    @tool
+    async def get_result(self, target: str | None = None) -> str:
+        """
+        Retrieve the stored result for the last run of named work.
+        target is a title, ref, work_id, or task_id. Omit for the latest completed open work.
+        Do not dispatch again to recover a result. If they want more done, resume.
+        If they want to read the job, inspect — do not narrate the transcript.
         """
         col = mongodb.get_collection("background_tasks")
         projection = {
             "_id": 0,
             "task_id": 1,
+            "work_id": 1,
+            "title": 1,
             "status": 1,
             "result": 1,
             "progress_summary": 1,
             "artifacts": 1,
+            "open": 1,
         }
-        if task_id:
-            doc = await col.find_one(
-                {"task_id": task_id, "owner_id": settings.DEFAULT_USER_ID},
+        if target:
+            doc = await self._lookup_work(target)
+            if isinstance(doc, CapabilityErrorDetail):
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "task_id": None,
+                        "work_id": None,
+                        "status": None,
+                        "result": None,
+                        "artifacts": [],
+                        "error_code": doc.code,
+                        "error_message": doc.message,
+                        "message": doc.message,
+                    }
+                )
+            full = await col.find_one(
+                {"task_id": doc["task_id"], "owner_id": settings.DEFAULT_USER_ID},
                 projection,
             )
+            doc = full or doc
         else:
-            doc = await col.find_one(
-                {
-                    "owner_id": settings.DEFAULT_USER_ID,
-                    "status": {"$in": ["completed", "failed"]},
-                },
-                projection,
-                sort=[("completed_at", -1), ("created_at", -1)],
+            open_docs = await list_open_work(settings.DEFAULT_USER_ID)
+            doc = next(
+                (item for item in open_docs if item.get("status") in {"completed", "failed"}),
+                None,
             )
+            if doc:
+                full = await col.find_one(
+                    {"task_id": doc["task_id"], "owner_id": settings.DEFAULT_USER_ID},
+                    projection,
+                )
+                doc = full or doc
 
         if not doc:
             return json.dumps(
                 {
                     "ok": False,
-                    "task_id": task_id,
+                    "task_id": None,
+                    "work_id": None,
                     "status": None,
                     "result": None,
                     "artifacts": [],
@@ -507,6 +700,7 @@ class AgentsPlugin(JarvisPlugin):
                 {
                     "ok": False,
                     "task_id": doc.get("task_id"),
+                    "work_id": doc.get("work_id"),
                     "status": status,
                     "result": None,
                     "artifacts": [],
@@ -517,45 +711,85 @@ class AgentsPlugin(JarvisPlugin):
             )
 
         result = doc.get("result") or doc.get("progress_summary") or ""
+        still_open = doc.get("open") is True
         return json.dumps(
             {
                 "ok": True,
                 "task_id": doc.get("task_id"),
+                "work_id": doc.get("work_id"),
+                "title": doc.get("title"),
+                "open": still_open,
                 "status": status,
                 "result": result,
                 "artifacts": doc.get("artifacts") or [],
                 "error_code": None,
                 "error_message": None,
-                "message": "Task result found.",
+                "message": (
+                    "Last run result. Still open — resume to continue."
+                    if still_open
+                    else "Task result found."
+                ),
             }
         )
 
     @tool
     async def list_tasks(self, status: str | None = None) -> list[dict]:
         """
-        List delegated work, optionally filtered by status: "running", "completed", or "failed".
+        List open named work by default. Pass status to list runs: running, completed, failed, or cancelled.
         """
-        col = mongodb.get_collection("background_tasks")
-        filt: dict[str, Any] = {"owner_id": settings.DEFAULT_USER_ID}
-        if status:
-            filt["status"] = status
+        if not status:
+            return [compact_task(doc) for doc in await list_open_work(settings.DEFAULT_USER_ID)]
 
-        cursor = col.find(filt, {"events": 0, "_id": 0}).sort("created_at", -1).limit(20)
-        return await cursor.to_list(length=20)
+        col = mongodb.get_collection("background_tasks")
+        cursor = col.find(
+            {"owner_id": settings.DEFAULT_USER_ID, "status": status},
+            {"events": 0, "trace": 0, "mcp_servers": 0, "_id": 0},
+        ).sort("created_at", -1).limit(20)
+        docs = await cursor.to_list(length=20)
+        return [compact_task(doc) for doc in docs]
 
     @tool
-    async def cancel_task(self, task_id: str) -> str:
-        """Cancel a running delegated work item."""
+    async def cancel_task(self, target: str) -> str:
+        """Cancel a running run. Does not close the named work."""
+        doc = await self._lookup_work(target)
+        if isinstance(doc, CapabilityErrorDetail):
+            return doc
+        task_id = str(doc.get("task_id") or "")
         task = self._running_tasks.get(task_id)
         if not task:
-            col = mongodb.get_collection("background_tasks")
-            doc = await col.find_one({"task_id": task_id}, {"status": 1})
-            if not doc:
-                return _fail(f"Task {task_id} not found.")
-            return _fail(f"Task {task_id} is not running (status={doc['status']}).")
-
+            if doc.get("status") != "running":
+                return _fail(
+                    f"{doc.get('title') or task_id} is not running (status={doc.get('status')}).",
+                    "work_not_running",
+                )
+            return _fail(f"Task {task_id} is not running in this process.", "work_not_running")
         task.cancel()
-        return f"Cancellation requested for task {task_id}."
+        return f"Cancellation requested for {doc.get('title') or task_id}."
+
+    @tool
+    async def close(self, target: str) -> str:
+        """
+        Forget named work so it leaves the recency roster. Optional — finishing a run does not require this.
+        Use when the user is done or says not to bring it up. Does not cancel a running run.
+        """
+        doc = await self._lookup_work(target)
+        if isinstance(doc, CapabilityErrorDetail):
+            return doc
+        work_id = doc.get("work_id")
+        col = mongodb.get_collection("background_tasks")
+        now = datetime.now(timezone.utc)
+        filt: dict[str, Any] = {"owner_id": settings.DEFAULT_USER_ID}
+        if work_id:
+            filt["work_id"] = work_id
+        else:
+            filt["task_id"] = doc.get("task_id")
+        result = await col.update_many(
+            filt,
+            {"$set": {"open": False, "expires_at": ttl_at(now)}},
+        )
+        title = doc.get("title") or doc.get("task_id")
+        count = int(getattr(result, "modified_count", 0) or 0)
+        return f"Closed {title} ({count} run(s))."
 
     # ------------------------------------------------------------------
     # Internal
@@ -643,13 +877,25 @@ class AgentsPlugin(JarvisPlugin):
         self,
         prompt: str,
         cwd: str,
-        max_turns: int,
-        max_budget_usd: float,
+        title: str,
+        ref: str | None = None,
+        max_turns: int = 40,
+        max_budget_usd: float = 1.0,
         source: str = "voice",
         trigger_ref: str | None = None,
         depth: int = 0,
+        worker_kind: str | None = None,
     ) -> str:
         """Shared implementation for dispatch() and automation-triggered calls."""
+        work_id = generate_id()
+        resolved_kind = worker_kind or default_worker_kind()
+        if resolved_kind is None:
+            return _dispatch_result(
+                ok=False,
+                error_code="background_credentials_unavailable",
+                error_message=missing_credential_message(),
+                message="Task not started: background-agent credentials are unavailable.",
+            )
         _pb = _PromptBuilder()
         connected_apps, conv_context = await asyncio.gather(
             _get_connected_composio_apps(),
@@ -660,10 +906,20 @@ class AgentsPlugin(JarvisPlugin):
             _pb.build_subprocess_prompt(settings.DEFAULT_USER_ID, cwd, conv_context),
         )
 
+        extra_doc: dict[str, Any] = {
+            "mcp_servers": mcp_servers,
+            "work_id": work_id,
+            "title": title,
+            "open": True,
+            "worker_kind": resolved_kind,
+        }
+        if ref:
+            extra_doc["ref"] = ref
+
         result = await self._prepare_task(
             prompt=prompt, cwd=cwd, mode="code", max_turns=max_turns,
             max_budget_usd=max_budget_usd, source=source, trigger_ref=trigger_ref,
-            depth=depth, extra_doc={"mcp_servers": mcp_servers},
+            depth=depth, extra_doc=extra_doc,
         )
         if isinstance(result, dict):
             return _dispatch_result(
@@ -687,15 +943,18 @@ class AgentsPlugin(JarvisPlugin):
                     mcp_servers=mcp_servers,
                     system_prompt=system_prompt,
                     max_budget_usd=max_budget_usd,
+                    worker_kind=resolved_kind,
+                    title=title,
                 )
 
         self._spawn_task(task_id, _run(), source)
-        logger.info("Dispatched agent task %s (source=%s, depth=%d)", task_id, source, depth)
+        logger.info("Dispatched agent task %s work_id=%s (source=%s, depth=%d)", task_id, work_id, source, depth)
         return _dispatch_result(
             ok=True,
             task_id=task_id,
+            work_id=work_id,
             mode="code",
-            message="Task started.",
+            message=f"I'll take {title} and let you know when it's done.",
         )
 
     def _spawn_task(
@@ -761,10 +1020,9 @@ class AgentsPlugin(JarvisPlugin):
             task_token = set_capability_task_id(task_id)
             async with self._semaphore:
                 try:
-                    from core.prompts.builder import PromptMode
                     from core.tool_router import tool_router
 
-                    bg_context = await _PromptBuilder.build_background_context(owner_id, cwd)
+                    bg_context = await build_background_context(owner_id, cwd)
 
                     # Route the dispatch prompt so this background run's tools=
                     # set matches the task instead of carrying an empty match set.
@@ -910,7 +1168,6 @@ class AgentsPlugin(JarvisPlugin):
                         owner_id,
                         context=bg_context,
                         max_iterations=settings.AGENT_INPROCESS_MAX_TURNS,
-                        prompt_mode=PromptMode.BACKGROUND,
                         reasoning_effort=resolve_reasoning_effort(
                             audio_bound=False,
                             text_input=False,
@@ -1095,7 +1352,7 @@ class AgentsPlugin(JarvisPlugin):
                     )
 
                 except asyncio.CancelledError:
-                    await _fail_task(task_id, owner_id, "Task was cancelled.")
+                    await _cancel_task(task_id, owner_id)
                     raise
                 except Exception as e:
                     logger.error("In-process agent task %s failed: %s", task_id, e, exc_info=True)

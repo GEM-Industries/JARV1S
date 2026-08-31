@@ -10,5 +10,9 @@
   <string>JARV1S uses your location for weather and nearby places while you use the app.</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>JARV1S uses your location for weather and nearby places while you use the app.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>JARV1S reads the calendars already on this Mac so it can tell you what is next without sending your events to a third-party connector.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>JARV1S reads the calendars already on this Mac so it can tell you what is next without sending your events to a third-party connector.</string>
 </dict>
 </plist>

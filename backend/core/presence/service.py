@@ -143,6 +143,7 @@ async def build_presence_view(
                 last_seen_at=last_seen,
                 active=node_id == active_node_id,
                 device_id=device_id,
+                disconnected=cred.disconnected_at is not None if cred else False,
             )
         )
 
@@ -182,6 +183,26 @@ async def assign_node_room(
     return await build_presence_view(owner_id, manager=manager)
 
 
+async def _force_disconnect_node_sessions(
+    manager: ConnectionManager,
+    *,
+    owner_id: str,
+    node_id: str,
+    code: int,
+    reason: str,
+) -> bool:
+    dropped = False
+    for session in manager.list_owner_sessions(owner_id):
+        if session.presence.node_id == node_id:
+            dropped = True
+            await manager.disconnect(
+                session.connection_id,
+                code=code,
+                reason=reason,
+            )
+    return dropped
+
+
 async def revoke_presence_device(
     device_id: str,
     *,
@@ -206,16 +227,74 @@ async def revoke_presence_device(
         revoked = True
 
     if revoked:
-        disconnected = False
-        for session in manager.list_owner_sessions(owner_id):
-            if session.presence.node_id == target.node_id:
-                disconnected = True
-                await manager.disconnect(
-                    session.connection_id,
-                    code=DEVICE_REVOKED_CLOSE_CODE,
-                    reason="device_revoked",
-                )
-        if not disconnected:
+        dropped = await _force_disconnect_node_sessions(
+            manager,
+            owner_id=owner_id,
+            node_id=target.node_id,
+            code=DEVICE_REVOKED_CLOSE_CODE,
+            reason="device_revoked",
+        )
+        if not dropped:
             await manager.broadcast_presence_changed(owner_id)
 
     return revoked
+
+
+async def disconnect_presence_device(
+    device_id: str,
+    *,
+    owner_id: str,
+    manager: ConnectionManager | None = None,
+) -> bool:
+    """Park a paired device without revoking it, and drop any live session."""
+    if manager is None:
+        from api.websockets.connection import (
+            DEVICE_DISCONNECTED_CLOSE_CODE,
+            manager as default_manager,
+        )
+
+        manager = default_manager
+    else:
+        from api.websockets.connection import DEVICE_DISCONNECTED_CLOSE_CODE
+
+    devices = await device_auth_service.list_devices(owner_id=owner_id)
+    target = next((d for d in devices if d.device_id == device_id), None)
+    if target is None or target.revoked_at is not None:
+        return False
+
+    if not await device_auth_service.disconnect_device(device_id):
+        return False
+
+    dropped = await _force_disconnect_node_sessions(
+        manager,
+        owner_id=owner_id,
+        node_id=target.node_id,
+        code=DEVICE_DISCONNECTED_CLOSE_CODE,
+        reason="device_disconnected",
+    )
+    if not dropped:
+        await manager.broadcast_presence_changed(owner_id)
+    return True
+
+
+async def resume_presence_device(
+    device_id: str,
+    *,
+    owner_id: str,
+    manager: ConnectionManager | None = None,
+) -> bool:
+    """Clear a disconnect hold so the paired device can reconnect on its next ticket."""
+    if manager is None:
+        from api.websockets.connection import manager as default_manager
+
+        manager = default_manager
+
+    devices = await device_auth_service.list_devices(owner_id=owner_id)
+    if not any(d.device_id == device_id for d in devices):
+        return False
+
+    if not await device_auth_service.resume_device(device_id):
+        return False
+
+    await manager.broadcast_presence_changed(owner_id)
+    return True

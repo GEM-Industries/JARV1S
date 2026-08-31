@@ -26,7 +26,8 @@ class CalendarEvent(BaseModel):
     attendee_count: int = 0
     duration_minutes: Optional[int] = None
     meet_link: Optional[str] = None
-    account: Optional[str] = None  # "personal" | "work" — origin label for write routing
+    account: Optional[str] = None  # connection: "google" | "microsoft" | "macos"
+    calendar: Optional[str] = None  # human calendar title, e.g. "Work"
     scope: Literal["event", "occurrence", "series"] = "event"
     series_id: Optional[str] = None
     recurrence: Optional[CalendarRecurrence] = None
@@ -47,6 +48,8 @@ class CalendarEvent(BaseModel):
             parts.append("all-day")
         if self.recurrence:
             parts.append(self.recurrence)
+        if self.calendar:
+            parts.append(self.calendar)
         if self.account:
             parts.append(f"[{self.account}]")
         # Last 12 chars of provider IDs contain the instance timestamp

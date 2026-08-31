@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import logging
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from api.deps.device_auth import require_device, require_owner_id
@@ -21,6 +24,7 @@ from core.voice.speaker_profile import (
     REQUIRED_CLIP_COUNT,
     SpeakerProfileError,
     SpeakerProfileStatus,
+    append_node_clip,
     delete_profile,
     get_profile_status,
     write_profile,
@@ -49,6 +53,7 @@ EncodedWakeCheckClip = Annotated[
 class SpeakerProfileStatusResponse(BaseModel):
     status: str
     updated_at: datetime | None = None
+    node_ids: list[str] = Field(default_factory=list)
 
 
 class UpsertSpeakerProfileRequest(BaseModel):
@@ -71,6 +76,7 @@ def _status_response(status: SpeakerProfileStatus) -> SpeakerProfileStatusRespon
     return SpeakerProfileStatusResponse(
         status=status.status,
         updated_at=status.updated_at,
+        node_ids=list(status.node_ids),
     )
 
 
@@ -103,6 +109,31 @@ async def _reload_owner_verifiers(owner_id: str) -> int:
     if not reloads:
         return 0
     return sum(await asyncio.gather(*reloads))
+
+
+def _pcm16_wav(pcm: bytes) -> bytes:
+    from core.voice.speaker_verifier import SAMPLE_RATE
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(pcm)
+    return buffer.getvalue()
+
+
+async def _capture_live_node_pcm(owner_id: str, node_id: str) -> bytes:
+    from api.websockets.connection import VoiceSampleCaptureError, manager
+
+    try:
+        return await manager.capture_node_pcm(owner_id, node_id)
+    except VoiceSampleCaptureError as exc:
+        status_code = 404 if exc.reason == "node_offline" else 400
+        raise HTTPException(
+            status_code=status_code,
+            detail={"reason": exc.reason, "message": str(exc)},
+        ) from exc
 
 
 def _decode_clip(raw: str, *, clip_index: int | None = None) -> bytes:
@@ -242,6 +273,55 @@ async def remove_speaker_profile(owner_id: str = Depends(require_owner_id)) -> S
     reloaded = await _reload_owner_verifiers(owner_id)
     logger.info("Speaker profile deleted | owner=%s reloaded_sessions=%d", owner_id, reloaded)
     return _status_response(status)
+
+
+@router.post("/speaker-profile/nodes/{node_id}/sample", response_model=SpeakerProfileStatusResponse)
+async def capture_node_speaker_sample(
+    node_id: str,
+    owner_id: str = Depends(require_owner_id),
+) -> SpeakerProfileStatusResponse:
+    status = get_profile_status(owner_id)
+    if status.status != "enrolled":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason": "not_enrolled",
+                "message": "Enroll a voice profile before adding a room sample",
+            },
+        )
+    try:
+        pcm = await _capture_live_node_pcm(owner_id, node_id)
+        status = await asyncio.to_thread(append_node_clip, owner_id, node_id, pcm)
+    except HTTPException:
+        raise
+    except SpeakerProfileError as exc:
+        raise HTTPException(status_code=400, detail=_profile_error_detail(exc)) from exc
+    except Exception as exc:
+        logger.exception(
+            "Room speaker sample failed | owner=%s node=%s",
+            owner_id,
+            node_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to save room speaker sample") from exc
+
+    reloaded = await _reload_owner_verifiers(owner_id)
+    logger.info(
+        "Room speaker sample saved | owner=%s node=%s reloaded_sessions=%d",
+        owner_id,
+        node_id,
+        reloaded,
+    )
+    return _status_response(status)
+
+
+@router.post("/nodes/{node_id}/pcm")
+async def capture_node_pcm(
+    node_id: str,
+    owner_id: str = Depends(require_owner_id),
+) -> Response:
+    """Return one live utterance from a connected node's mic as 16 kHz WAV. Does not mutate the owner profile."""
+    pcm = await _capture_live_node_pcm(owner_id, node_id)
+    return Response(content=_pcm16_wav(pcm), media_type="audio/wav")
 
 
 @router.post("/wake-check", response_model=WakeCheckResponse)

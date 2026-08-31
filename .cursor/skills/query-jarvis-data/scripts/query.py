@@ -37,6 +37,139 @@ def _preview(content: Any, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+def _compact_json(value: Any, limit: int = 240) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _preview(value, limit)
+    try:
+        text = json.dumps(value, default=str, separators=(",", ":"))
+    except TypeError:
+        text = str(value)
+    return _preview(text, limit)
+
+
+def _meta_first(rows: list[dict[str, Any]], key: str) -> Any:
+    for row in rows:
+        value = (row.get("metadata") or {}).get(key)
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
+def _called_summary(rows: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    for row in rows:
+        meta = row.get("metadata") or {}
+        if meta.get("turn_type") != "tool_call":
+            continue
+        capability = meta.get("capability")
+        if capability:
+            counts[str(capability)] = counts.get(str(capability), 0) + 1
+    parts = [
+        cap if n == 1 else f"{cap}×{n}"
+        for cap, n in counts.items()
+    ]
+    return ", ".join(parts)
+
+
+def _routed_summary(routed: Any) -> str:
+    names = [str(name) for name in (routed if isinstance(routed, list) else [routed])]
+    if len(names) <= 6:
+        return ", ".join(names)
+    grouped: dict[str, list[str]] = {}
+    for name in names:
+        plugin = name.split(".", 1)[0] if "." in name else name
+        grouped.setdefault(plugin, []).append(name)
+    return ", ".join(
+        f"{plugin} ({len(group)})" if len(group) > 1 else group[0]
+        for plugin, group in grouped.items()
+    )
+
+
+def format_turn_dump(
+    rows: list[dict[str, Any]],
+    perf: dict[str, Any] | None = None,
+) -> str:
+    """One-screen ledger from stored conversation + turn_runs fields."""
+    lines: list[str] = []
+    source = next((row.get("source") for row in rows if row.get("source")), None)
+    decision = _meta_first(rows, "decision")
+    rule_id = _meta_first(rows, "rule_id")
+    instance_id = _meta_first(rows, "instance_id")
+    routed = _meta_first(rows, "routed_tools")
+    header_bits = []
+    if source:
+        header_bits.append(f"source={source}")
+    if decision:
+        header_bits.append(f"decision={decision}")
+    if rule_id:
+        header_bits.append(f"rule_id={rule_id}")
+    if instance_id:
+        header_bits.append(f"instance_id={instance_id}")
+    lines.append("[header]")
+    lines.append(f"  {' '.join(header_bits) if header_bits else '(no origin fields)'}")
+    called = _called_summary(rows)
+    if called:
+        lines.append(f"  called: {called}")
+    if routed:
+        lines.append(f"  routed_tools: {_routed_summary(routed)}")
+    routing = (perf or {}).get("tool_routing") or {}
+    if routing:
+        routing_bits = []
+        plugins = routing.get("matched_plugins")
+        if plugins:
+            routing_bits.append(
+                f"matched_plugins={','.join(str(p) for p in plugins)}"
+                if isinstance(plugins, list)
+                else f"matched_plugins={plugins}"
+            )
+        if routing.get("routed_tool_count") is not None:
+            routing_bits.append(f"routed_tool_count={routing['routed_tool_count']}")
+        if routing_bits:
+            lines.append(f"  tool_routing: {' '.join(routing_bits)}")
+    if perf:
+        lines.append("[turn_runs]")
+        lines.append(
+            f"  {perf.get('modality')} {perf.get('status')} "
+            f"response={perf.get('response_ms')}ms total={perf.get('total_ms')}ms "
+            f"node={perf.get('node_id')}"
+        )
+
+    if rows:
+        lines.append("[ledger]")
+        for index, row in enumerate(rows, start=1):
+            meta = row.get("metadata") or {}
+            tt = meta.get("turn_type") or row.get("role") or "?"
+            content = row.get("content")
+            prefix = f"  {index}."
+            if tt == "tool_call":
+                capability = meta.get("capability") or "?"
+                args = _compact_json(meta.get("arguments") or {}, 280)
+                spoken = meta.get("spoken") or ""
+                call = f"{capability}({args})"
+                lines.append(f"{prefix} tool_call {call}")
+                if spoken:
+                    lines.append(f"      spoken={_preview(spoken, 160)!r}")
+            elif tt == "tool_result":
+                invocations = meta.get("invocations") if isinstance(meta.get("invocations"), list) else []
+                status = meta.get("status")
+                capability = meta.get("capability")
+                if invocations and isinstance(invocations[0], dict):
+                    inv = invocations[0]
+                    capability = inv.get("capability") or capability
+                    status = inv.get("status") or status
+                extra = f" {capability}" if capability else ""
+                status_bit = f" status={status}" if status else ""
+                lines.append(f"{prefix} tool_result{status_bit}{extra}")
+                preview = _preview(meta.get("output") if meta.get("output") is not None else content, 200)
+                if preview:
+                    lines.append(f"      {preview!r}")
+            else:
+                lines.append(f"{prefix} {tt} {_preview(content, 200)!r}")
+    return "\n".join(lines)
+
+
 @asynccontextmanager
 async def open_db(source: DataSource) -> AsyncIterator[AsyncIOMotorDatabase]:
     client = AsyncIOMotorClient(source.mongodb_url, serverSelectionTimeoutMS=5000)
@@ -76,40 +209,14 @@ async def cmd_turn(source: DataSource, owner_id: str, turn_id: str) -> None:
         )
         rows = await db.conversations.find(
             {"owner_id": owner_id, "metadata.turn_id": turn_id},
-            {"_id": 0, "role": 1, "content": 1, "timestamp": 1, "metadata": 1},
+            {"_id": 0, "role": 1, "content": 1, "timestamp": 1, "metadata": 1, "source": 1},
         ).sort("timestamp", 1).to_list(200)
 
         print(f"turn_id: {turn_id}")
         if not perf and not rows:
             print("not found")
             return
-
-        if perf:
-            print("\n[turn_runs]")
-            print(
-                f"  {perf.get('modality')} {perf.get('status')} "
-                f"response={perf.get('response_ms')}ms total={perf.get('total_ms')}ms "
-                f"node={perf.get('node_id')}"
-            )
-            for stage in perf.get("stages") or []:
-                i = stage.get("iteration")
-                suffix = f" i{i}" if i is not None else ""
-                print(f"    {stage.get('key')}: {stage.get('ms')}ms{suffix}")
-
-        if rows:
-            print("\n[trace]")
-            for row in rows:
-                meta = row.get("metadata") or {}
-                tt = meta.get("turn_type") or row.get("role") or "?"
-                content = row.get("content")
-                if tt == "tool_call":
-                    spoken = meta.get("spoken", "")
-                    prefix = f"  tool_call spoken={spoken!r}" if spoken else "  tool_call"
-                    print(f"{prefix}\n    {_preview(content, 400)}")
-                elif tt == "tool_result":
-                    print(f"  tool_result {_preview(content, 200)!r}")
-                else:
-                    print(f"  {tt} {_preview(content, 200)!r}")
+        print(format_turn_dump(rows, perf=perf))
 
 
 async def cmd_recent(

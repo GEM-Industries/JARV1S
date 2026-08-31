@@ -9,12 +9,21 @@ import pytest
 from fastapi import HTTPException
 
 import api.routes.presence as presence_routes
-from api.websockets.connection import DEVICE_REVOKED_CLOSE_CODE, ConnectionManager
+from api.websockets.connection import (
+    DEVICE_DISCONNECTED_CLOSE_CODE,
+    DEVICE_REVOKED_CLOSE_CODE,
+    ConnectionManager,
+)
 from api.websockets.presence import build_presence_identity
 from core.auth.device_models import DeviceCredentialSummary, DeviceLocation
 from core.preferences.models import UserPreferences
 from core.presence.models import PresenceCore, PresenceView
-from core.presence.service import assign_node_room, build_presence_view, revoke_presence_device
+from core.presence.service import (
+    assign_node_room,
+    build_presence_view,
+    disconnect_presence_device,
+    revoke_presence_device,
+)
 from tests.test_presence_identity import FakeWebSocket
 
 
@@ -24,6 +33,7 @@ def _cred(
     node_id: str,
     kind: str = "satellite",
     revoked_at: datetime | None = None,
+    disconnected_at: datetime | None = None,
     last_seen_at: datetime | None = None,
     node_label: str | None = None,
     room_name: str | None = None,
@@ -43,6 +53,7 @@ def _cred(
         ),
         kind=kind,
         revoked_at=revoked_at,
+        disconnected_at=disconnected_at,
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         last_seen_at=last_seen_at,
     )
@@ -223,6 +234,28 @@ async def test_build_presence_view_uses_live_device_kind(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_build_presence_view_marks_disconnected_offline_nodes(monkeypatch):
+    manager = ConnectionManager()
+    credentials = [
+        _cred(
+            device_id="dev-bedroom",
+            node_id="bedroom-sat",
+            node_label="Bedroom",
+            disconnected_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        ),
+    ]
+    monkeypatch.setattr(
+        "core.presence.service.device_auth_service.list_devices",
+        AsyncMock(return_value=credentials),
+    )
+
+    view = await build_presence_view("home", manager=manager)
+
+    assert view.nodes[0].status == "offline"
+    assert view.nodes[0].disconnected is True
+
+
+@pytest.mark.asyncio
 async def test_revoke_presence_device_disconnects_live_session(monkeypatch):
     manager = ConnectionManager()
     socket = FakeWebSocket()
@@ -256,6 +289,51 @@ async def test_revoke_presence_device_disconnects_live_session(monkeypatch):
     assert socket.closed is True
     assert socket.close_code == DEVICE_REVOKED_CLOSE_CODE
     assert socket.close_reason == "device_revoked"
+    assert manager.get_session("conn-kitchen") is None
+
+
+@pytest.mark.asyncio
+async def test_disconnect_presence_device_drops_live_session_without_revoke(monkeypatch):
+    manager = ConnectionManager()
+    socket = FakeWebSocket()
+    presence = build_presence_identity(
+        {"owner_id": "home", "node_id": "kitchen-sat", "capabilities": "mic,speaker"},
+        connection_id="conn-kitchen",
+        allow_owner_override=True,
+    )
+
+    with patch("api.websockets.connection.TenVADService"), \
+        patch("api.websockets.connection.WakeWordService"), \
+        patch("api.websockets.connection.SpeechProcessor"), \
+        patch("api.websockets.connection.attention_service.get_state", new=AsyncMock(return_value=None)), \
+        patch("api.websockets.connection.get_user_preferences", new=AsyncMock(return_value=UserPreferences(owner_id="home"))), \
+        patch("api.websockets.connection.collect_widget_snapshots", new=AsyncMock(return_value=[])):
+        await manager.connect(socket, presence, timezone="UTC")
+
+    target = _cred(device_id="dev-kitchen", node_id="kitchen-sat")
+    monkeypatch.setattr(
+        "core.presence.service.device_auth_service.list_devices",
+        AsyncMock(return_value=[target]),
+    )
+    disconnect_device = AsyncMock(return_value=True)
+    revoke_device = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "core.presence.service.device_auth_service.disconnect_device",
+        disconnect_device,
+    )
+    monkeypatch.setattr(
+        "core.presence.service.device_auth_service.revoke_device",
+        revoke_device,
+    )
+
+    held = await disconnect_presence_device("dev-kitchen", owner_id="home", manager=manager)
+
+    assert held is True
+    disconnect_device.assert_awaited_once_with("dev-kitchen")
+    revoke_device.assert_not_called()
+    assert socket.closed is True
+    assert socket.close_code == DEVICE_DISCONNECTED_CLOSE_CODE
+    assert socket.close_reason == "device_disconnected"
     assert manager.get_session("conn-kitchen") is None
 
 

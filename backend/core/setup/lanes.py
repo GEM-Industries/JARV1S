@@ -212,13 +212,28 @@ def _search_lane() -> CapabilityLaneStatus:
 
 
 def _background_agents_lane() -> CapabilityLaneStatus:
-    if not credential_store.get_stored_secret("ANTHROPIC_API_KEY"):
+    has_cursor = bool(credential_store.get_stored_secret("CURSOR_API_KEY"))
+    has_anthropic = bool(credential_store.get_stored_secret("ANTHROPIC_API_KEY"))
+    if has_cursor:
+        detail = "Code work uses Cursor."
+        if has_anthropic and jarvis_runtime.background_agent_ready:
+            detail = "Code work uses Cursor. Jarvis-mode background agents are ready."
+        elif has_anthropic:
+            detail = "Code work uses Cursor. Jarvis-mode still needs a working Anthropic runtime."
+        return CapabilityLaneStatus(
+            id="background_agents",
+            label="Background agents",
+            lane_type="api_key_optional",
+            status="configured",
+            detail=detail,
+        )
+    if not has_anthropic:
         return CapabilityLaneStatus(
             id="background_agents",
             label="Background agents",
             lane_type="api_key_optional",
             status="optional",
-            detail="Add an Anthropic API key in Settings to enable delegated tasks.",
+            detail="Connect Cursor or add an Anthropic API key in Settings to enable delegated tasks.",
         )
     if jarvis_runtime.background_agent_ready:
         return CapabilityLaneStatus(

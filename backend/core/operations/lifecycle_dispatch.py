@@ -8,6 +8,7 @@ from core.attention.service import attention_service
 from core.operations.projection import ManagedSetup
 from core.operations.setups import (
     SetupPatch,
+    definition_pause_patch,
     delete_scheduler_rule,
     patch_rule_lifecycle,
 )
@@ -33,23 +34,9 @@ def _require_id(value: str | None, label: str, row: ManagedSetup) -> str:
 
 async def pause_managed_setup(owner_id: str, row: ManagedSetup, *, until: datetime | None = None) -> str:
     _require_action("pause", row)
-    if row.managed_by == "scheduler":
-        setup_id = f"rule:{_require_id(row.series_id, 'series_id', row)}"
-        patch = (
-            SetupPatch(enabled=True, paused_until=until)
-            if until is not None
-            else SetupPatch(enabled=False, paused_until=None)
-        )
-        await patch_rule_lifecycle(owner_id, setup_id, patch)
-        return f"Paused {row.name}."
-    if row.managed_by == "automations":
-        setup_id = f"rule:{_require_id(row.rule_id, 'rule_id', row)}"
-        patch = (
-            SetupPatch(enabled=True, paused_until=until)
-            if until is not None
-            else SetupPatch(enabled=False, paused_until=None)
-        )
-        await patch_rule_lifecycle(owner_id, setup_id, patch)
+    if row.managed_by in {"scheduler", "automations"}:
+        rule_id = _require_id(row.series_id or row.rule_id, "rule identifier", row)
+        await patch_rule_lifecycle(owner_id, f"rule:{rule_id}", definition_pause_patch(until))
         return f"Paused {row.name}."
     if row.managed_by == "habits":
         await habit_store.pause_checkin_plan(owner_id, row.resource_id, until=until)

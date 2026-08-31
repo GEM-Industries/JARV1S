@@ -46,7 +46,7 @@ If the app is quit, the socket is down — start JARV1S (do not invent a second 
 |---------|---------|
 | `status` | Which source + key collection counts |
 | `recent [--hours N]` | Recent user turns (`turn_runs`) |
-| `turn <id>` | Joined trace + perf |
+| `turn <id>` | Header (`called` vs `routed_tools`) plus capability/args/status/spoken. `routed_tools` is semantic matches only — always-on is not listed. Timings are one line; stages stay in `eou`. |
 | `eou [--hours N]` | EOU submit-latency scorecard by `endpointing_profile` |
 | `rules [-q REGEX] [--enabled-only]` | List rules |
 | `rule <id>` | Full rule + recent instances |
@@ -67,8 +67,9 @@ Not in Mongo: live WS diagnostics; prompt dumps under logs when enabled; HA enti
 
 1. `status` — confirm `source: app` (or force `--source app`)
 2. `rules -q …` / `search …` — find the rule or turn
-3. `rule <id>` — check `enabled`, `original_local_time`, duplicate names still enabled
-4. `turn <id>` — creation/correction/fire trace
+3. `turn <id>` — classify from the ledger **before** proposing a plugin or process change: routing/selection, call shape, domain evidence, provider/auth, policy, or runtime (see `.cursor/rules/plugin-tool-conventions.mdc`). Compare `called` to `routed_tools`. Always-on tools can appear in `called` without being routed.
+4. `rg` the **capability and mechanism** (`control_lights`, `transition`, `replace_alert`, omit/`due_at`) in `backend/evals` and `backend/tests`. A matching eval **id** or plugin test means that class is already gated. A new live turn that still fails means the gate is the wrong layer or too narrow — do not add a second souvenir case.
+5. This chat is not the issue inventory. Domain failures close in pytest. Selection failures close in one generalized eval plus an adjacent negative.
 
 ## DB writes
 

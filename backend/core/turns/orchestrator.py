@@ -919,6 +919,14 @@ class AssistantOrchestrator:
         task.add_done_callback(_clear_current_run_task)
         return task
 
+    @staticmethod
+    async def _publish_tts_end_after_run(session: Any, voice: Optional[VoiceDelivery]) -> None:
+        """Release this run, then publish producer-done so playback_end is final."""
+        if session.current_run_task is asyncio.current_task():
+            session.current_run_task = None
+        if voice is not None:
+            await voice.send_tts_end_if_ready()
+
     async def _handle_protocol_run(self, event: Event) -> None:
         """Handle on-demand protocol execution triggered by the run tool."""
         owner_id = event.data.get("owner_id")
@@ -1366,6 +1374,7 @@ class AssistantOrchestrator:
                 session.processor.set_mode(
                     VoiceMode.ACTIVE_IDLE, source="orchestrator.deliver_text_finally",
                 )
+            await self._publish_tts_end_after_run(session, voice)
             reset_log_context(log_token)
 
     async def _persist_trace(
@@ -1772,13 +1781,9 @@ class AssistantOrchestrator:
                     # generation finishes. Calling it here causes SESSION_ENDED to fire
                     # immediately after ACTIVE_IDLE starts for any response >8s of audio.
 
-            # Clean up task reference only if it's the current task
-            cleared_current_run_task = False
-            if session.current_run_task == asyncio.current_task():
-                session.current_run_task = None
-                cleared_current_run_task = True
-            if cleared_current_run_task and produce_audio and voice is not None:
-                await voice.send_tts_end_if_ready()
+            await self._publish_tts_end_after_run(
+                session, voice if produce_audio else None,
+            )
             if not turn_lock_acquired:
                 perf.discard("turn_lock_wait", connection_id)
             perf.reset_context(perf_token)

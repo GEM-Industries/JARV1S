@@ -84,6 +84,7 @@ frontend/dist/
 apps/desktop/node_modules/
 apps/desktop/shell-dist/
 apps/desktop/resources/host/
+apps/desktop/resources/product_oauth.json
 apps/desktop/resources/helpers/Ollama/
 apps/desktop/.build-cache/
 apps/desktop/.cache/

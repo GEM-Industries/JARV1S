@@ -155,11 +155,14 @@ async def lifespan(app: FastAPI):
     group_started = time.perf_counter()
     await event_bus.start()
 
+    from core.home import seed_home
+    seed_home()
+
     await registry.load_plugins()
     # Load persisted disabled plugins before tool router embeds utterances,
     # so disabled plugins are excluded from the router's vector index.
     await registry.load_disabled()
-    # Auto-bridge MCP servers (mcp_servers.yaml → MCPBridgePlugin instances).
+    # Auto-bridge MCP servers (packaged mcp_servers.json + home/mcp.json).
     # Runs after bespoke plugins so bespoke always wins on name collision.
     await load_mcp_bridges()
     logger.info(

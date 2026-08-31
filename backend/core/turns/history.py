@@ -195,6 +195,22 @@ def merge_user_history_with_system_tail(
     return strip_context_metadata(merged)
 
 
+async def resolve_prompt_window_start(
+    owner_id: str,
+    node_id: str | None,
+    *,
+    exclude_turn_id: str | None = None,
+) -> datetime | None:
+    """Resolve the node-local prompt window used by turns and the live transcript."""
+    return await mongodb.resolve_conversation_window_start(
+        owner_id,
+        str(node_id) if node_id else None,
+        gap=timedelta(minutes=settings.CONVERSATION_SESSION_INACTIVITY_MINUTES),
+        exclude_turn_id=exclude_turn_id,
+        visible_deliveries=list(VISIBLE_DELIVERY_TAGS),
+    )
+
+
 async def load_turn_history(
     *,
     owner_id: str,
@@ -208,12 +224,10 @@ async def load_turn_history(
 
     hidden = list(HIDDEN_DELIVERIES)
     node_id = session_context.get("node_id")
-    history_since = await mongodb.resolve_conversation_window_start(
+    history_since = await resolve_prompt_window_start(
         owner_id,
         str(node_id) if node_id else None,
-        gap=timedelta(minutes=settings.CONVERSATION_SESSION_INACTIVITY_MINUTES),
         exclude_turn_id=current_turn_id,
-        visible_deliveries=list(VISIBLE_DELIVERY_TAGS),
     )
     # Suppressed user turns stay in context: input that completed silently
     # (e.g. "cancel the alarm, I'm awake" -> tool call -> NO_REPLY) is still

@@ -298,9 +298,17 @@ tasks:
     dir: satellite
     cmd: bash deploy/deploy.sh
 
+  sat:pair:
+    desc: Pair the Raspberry Pi speaker from this Mac using a Rooms setup code
+    dir: satellite
+    cmd: bash deploy/pair-remote.sh {{.CLI_ARGS}}
+
   sat:logs:
     desc: Tail Raspberry Pi satellite service logs
-    cmd: ssh ${SATELLITE_USER:-pi}@${SATELLITE_HOST:-jarvis-satellite-1.local} 'if [ -f ~/.jarvis-satellite/satellite.log ]; then tail -f ~/.jarvis-satellite/satellite.log; else journalctl --user -u ${SERVICE_NAME:-jarvis-satellite} -f; fi'
+    cmds:
+      - |
+        REMOTE="$(bash satellite/deploy/resolve-remote.sh)"
+        ssh "$REMOTE" 'if [ -f ~/.jarvis-satellite/satellite.log ]; then tail -f ~/.jarvis-satellite/satellite.log; else journalctl --user -u ${SERVICE_NAME:-jarvis-satellite} -f; fi'
 
   sat:proxy:
     desc: "Legacy: TCP relay 0.0.0.0:8001 -> localhost:8000. Prefer task be:dev:lan instead."

@@ -122,12 +122,18 @@ recurring schedules, even when the user says "automation") →
 `scheduler.get_alerts`. Cross-domain configured behavior (rules, protocols,
 habit check-ins, quiet windows, disabled duplicates) → `setups.find` /
 `setups.get`. Results identify `setup_type`, `managed_by`, `supported_actions`,
-exact downstream IDs, and the owning `edit_tool`. Use `resource_ref` for common
-pause/resume/delete operations; schedule or structural edits stay in the owning tool
+exact downstream IDs, and the owning `edit_tool`. Use `resource_ref` or a
+natural query for common pause/resume operations — `setups.pause` applies to
+every pause-capable match and keeps `status=paused` (omit `until` for
+indefinite). `delete` stays singular and fail-closed. Schedule or structural
+edits stay in the owning tool
 (`scheduler.replace_alert`, `automations.update_rule`, `habits.*`,
 `attention.*`, `protocol.*`). `activity.why_last_fire` remains the history path
 for "why did that fire?". Permanent removal of time-based duplicates →
 `setups.delete`; external event rules remain owned by `automations.delete_rule`.
+Domain tools that own a verb (`automations.delete_rule`) resolve unique names,
+`resource_ref`, or ids via `resolve_managed_setup`; `edit_tool` promotion stays
+lookup-then-edit only.
 Pending one-shot work can appear in broad `setups.find` results, but explicit
 upcoming, cancel, snooze, and reschedule requests should use `get_alerts`.
 
@@ -195,7 +201,7 @@ immediate-reply frame; durable decision state is read at fire time.
 
 | Axis | Where it lives | Use |
 | :--- | :--- | :--- |
-| Dialogue | `conversations` via `HistoryPolicy` (`core/turns/history.py`) | Recent node-scoped turns for pronouns, corrections, and same-session follow-ups. Bounded by `CONVERSATION_SESSION_INACTIVITY_MINUTES` (default 2h). |
+| Dialogue | `conversations` via `HistoryPolicy` (`core/turns/history.py`) | Recent node-scoped turns for pronouns, corrections, and same-session follow-ups. Bounded by `CONVERSATION_SESSION_INACTIVITY_MINUTES` (default 2h) or an explicit `reset_conversation_window`. |
 | Durable decision state | trigger snapshots, freshness, attention, and assembled `current_state` | Pending alarms/timers/reminders and trigger age for `offer` evaluate turns. Injected as `CURRENT_STATE`, not transcript replay. |
 | Long-tail recall | `recall()` / memory tools | Pull-based only when the user asks or a turn explicitly needs older history. |
 | Prompt surface | `PromptBuilder` + `SystemTurnContext` | `tell` gets imperative alert framing; `offer` gets decision framing (`DEFER` / `DEFER_UNTIL` / `NO_REPLY`). |

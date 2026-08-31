@@ -362,6 +362,10 @@ async def _execute_eval_turn(
         with (
             patch("core.turns.history.mongodb") as mock_db,
             patch("core.turns.execution.get_profile_block", AsyncMock(return_value="")),
+            patch(
+                "plugins.agents.work.load_open_roster",
+                AsyncMock(return_value=str(case.get("open_work_block") or "")),
+            ),
             patch("core.turns.execution.require_llm_ready", lambda: None),
             _live_temperature_patch(orchestrator.agent, temperature) if temperature is not None else nullcontext(),
         ):
@@ -428,10 +432,15 @@ async def _run_live_case(
     connection_id: str,
     meta: dict[str, Any],
 ) -> TurnTraceSnapshot:
+    from core.home import seed_home
     from core.llm.service import LLMService
     from core.setup.llm_config import llm_config_store, resolve_llm_config
 
+    seed_home()
     await _ensure_eval_plugins_loaded()
+    from services.database.mongodb import mongodb
+    if mongodb.db is None:
+        await mongodb.connect()
     await llm_config_store.load_persisted()
     config = await resolve_llm_config()
     if not config.attemptable:

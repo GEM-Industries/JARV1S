@@ -166,9 +166,9 @@ export const PrimaryCanvas: React.FC = () => {
                 <div
                   ref={focalRef}
                   tabIndex={isPendingApprovalWidget(visibleForeground) ? -1 : undefined}
-                  className="flex w-full max-w-4xl flex-1 items-center justify-center py-2 outline-none focus-visible:ring-2 focus-visible:ring-brand/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+                  className="flex min-h-0 w-full max-w-4xl flex-1 items-stretch justify-center py-2 outline-none focus-visible:ring-2 focus-visible:ring-brand/70 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
                 >
-                  <div className="max-h-full min-h-[16rem] w-full">
+                  <div className="h-full min-h-0 w-full p-3">
                     <WidgetErrorBoundary key={visibleForeground.widget_id}>
                       <WidgetWrapper
                         envelope={visibleForeground}

@@ -30,7 +30,6 @@ from api.websockets.types import WSMessageType
 from core.agent.agent import AgentEvent, AgentEventType, JarvisAgent
 from core.llm.types import TextEvent, ToolCallEvent
 from core.preferences.models import AudioPreferences, UserPreferences
-from core.prompts.builder import PromptMode
 from core.prompts.system_turn_context import (
     SystemTurnContext,
     build_system_routing_hint,
@@ -43,7 +42,6 @@ from core.triggers.freshness import trigger_expiry_reason
 from core.turns.orchestrator import (
     AssistantOrchestrator,
 )
-from core.turns.execution import resolve_prompt_mode
 from core.turns.history import (
     latest_reply_context_system_row,
     load_turn_history,
@@ -1890,15 +1888,6 @@ class TestRoutingHint:
             mock_db.get_history.assert_not_awaited()
 
 
-class TestPromptModeResolution:
-    def test_user_turns_use_full_prompt(self):
-        assert resolve_prompt_mode("user") == PromptMode.FULL
-
-    def test_system_turns_use_background_prompt(self):
-        assert resolve_prompt_mode("system") == PromptMode.BACKGROUND
-        assert resolve_prompt_mode("automation") == PromptMode.BACKGROUND
-
-
 class TestAssistantSanitizationBoundary:
     @pytest.mark.asyncio
     async def test_execute_turn_sanitizes_before_delivery_and_persistence(self):
@@ -1996,7 +1985,7 @@ class TestAgentToolIdentityBoundary:
             async def chat_stream(self, **kwargs):
                 yield ToolCallEvent(
                     call_id="tcall-1",
-                    name="db__clear_conversation_history",
+                    name="db__reset_conversation_window",
                     arguments={},
                 )
 
@@ -2020,7 +2009,7 @@ class TestAgentToolIdentityBoundary:
                 ),
             )
 
-        definition = SimpleNamespace(fqn="db.clear_conversation_history")
+        definition = SimpleNamespace(fqn="db.reset_conversation_window")
         agent = JarvisAgent(FakeLLM())
         agent.prompt_builder.build = MagicMock(return_value="")
 
@@ -2045,14 +2034,14 @@ class TestAgentToolIdentityBoundary:
                 )
             ]
 
-        assert captured[0].capability == "db.clear_conversation_history"
+        assert captured[0].capability == "db.reset_conversation_window"
         assert any(event.type == AgentEventType.TOOL_OUTPUT for event in events)
-        assert any(event.type == AgentEventType.TOOL_CALL and event.capability == "db.clear_conversation_history" for event in events)
+        assert any(event.type == AgentEventType.TOOL_CALL and event.capability == "db.reset_conversation_window" for event in events)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("text", [
-        "```python\nawait jarvis.db.clear_conversation_history()\n```",
-        "I'll check. <tool_call>\nawait jarvis.db.clear_conversation_history()",
+        "```python\nawait jarvis.db.reset_conversation_window()\n```",
+        "I'll check. <tool_call>\nawait jarvis.db.reset_conversation_window()",
         '<|tool_call>call:get_weather{location:<|"|>Tokyo<|"|>}<tool_call|>',
     ])
     async def test_legacy_action_text_is_not_executed(self, text):

@@ -60,7 +60,7 @@ handler receives SpeechEvent
   │       • audio EOU (LiveKit v1-mini) is the main commit signal (unless Cartesia native turn detection commits on turn.end)
   │       • done: consume_turn_audio(), register endpoint task as accepted_input_task,
   │         finalize streaming STT, merge continuation_prefix, run local commands,
-  │         turn admission (reuse wake/barge/PTT stamp, else fail-open follow-up),
+  │         turn admission (reuse wake/barge/PTT stamp, else owner-gated follow-up),
   │         start response_latency, schedule process_turn with transcript text
   │       • not done: processor.continue_turn(), keep the same VoiceInputTurn/buffer/stream
   │       • max delay: commit anyway to avoid hanging
@@ -125,8 +125,8 @@ VoiceDelivery._tts_worker (concurrent task spawned by delivery.start)
   ├─ On normal None sentinel after audio was sent: mark audio.tts_end ready
   └─ Stops on None sentinel, cancelled task, or `VoiceDelivery`'s turn-scoped cancellation signal
 
-TurnOrchestrator.process_turn finally
-  └─ Clears session.current_run_task, then publishes ready audio.tts_end with turn_id
+Spoken delivery finally (`process_turn` and `_deliver_text`)
+  └─ Clears session.current_run_task when this task owns it, then publishes ready audio.tts_end with turn_id
      so an immediate satellite audio.playback_end is treated as final playback, not a mid-turn gap
 
 playback client audio.playback_end
@@ -145,7 +145,7 @@ Local voice controls are handled just before turn admission and `process_turn()`
 | :--- | :--- |
 | `VoiceInputTurn` | The current logical user voice utterance. It owns VAD/STT transcript text, endpoint candidate metadata, stable transcript message id, late-continuation prefix, and optional `admission_source` / `admission_reason` (`wake` \| `barge_in` \| `followup` \| `push_to_talk`). It is cleared when the merged voice input is accepted, dropped, or replaced by a fresh barge-in. |
 | `accepted_input_task` | Voice-only post-commit handoff task. Active between endpointing commit and assistant run start: runs STT finalize (Cartesia or Apple Speech stream `finish()`), local-command check, turn admission, and schedules `process_turn()`. Fast recovery **awaits** this task (never cancels mid-handoff — consumed PCM would be lost); then cancels `current_run_task` if the assistant run already started. Cleared by `_resolve_endpoint_candidate`'s finally block. |
-| `current_run_task` | The active assistant execution/delivery task. Set by `_commit_voice_turn` (voice), `handle_text_input` (text), and trigger/protocol/prefetch paths. Barge-in and interruption cancel this. Cleared in `process_turn()`'s finally block. |
+| `current_run_task` | The active assistant execution/delivery task. Set by `_commit_voice_turn` (voice), `handle_text_input` (text), and trigger/protocol/prefetch paths. Barge-in and interruption cancel this. Cleared when spoken delivery finishes (`process_turn` / `_deliver_text`). |
 | `process_turn()` | The accepted input execution lifecycle: session lookup, STT/text/system ingest, turn lock, agent execution, delivery, persistence, and mode cleanup. |
 | `VoiceDelivery` / `HeadlessDelivery` | A delivery attempt for a run. Delivery owns TTS and audio cancellation; it does not own `VoiceInputTurn`. |
 | `turn_id` | Correlation key across `VoiceInputTurn`, transcript rows, assistant trace rows, `turn_runs`, and protocol logs. |
@@ -153,6 +153,10 @@ Local voice controls are handled just before turn admission and `process_turn()`
 ### Pending Approval State
 
 Pending approvals are not assistant turns and do not take the session turn lock. A destructive tool call creates a `pending_inputs` row and pushes `PendingInputWidget`; the live Python callback/waiter remains process-local. Foreground approvals are resolved through `approve_pending()` / `deny_pending()` for voice yes/no follow-ups or `resolve_pending_input(input_id, decision)` from the widget. `mode="jarvis"` background tasks use the same contract, but store the visible pointer on `background_tasks.pending_input` and set `attention="approval"` while the task remains `status="running"`. On backend restart, unresolved runtime-bound pending inputs are cancelled because their executable callbacks no longer exist.
+
+### Background Task Terminal States
+
+Delegated work rows in `background_tasks` settle independently of the Home turn lock. `status=completed` and `status=failed` enqueue a title-first `TRIGGER_DUE` follow-up. User `cancel_task` records `status=cancelled` and does not chime. Interrupted local work after a backend restart is `failed` with `interrupted_reason=backend_restart` and stays open/resumable; it is never auto-resumed. `mode="code"` pins `worker_kind` (`cursor_local` or `claude_code`) on the lineage; Conductor-style mid-run questions/approvals remain deferred for code workers.
 
 ### What happens to audio, conversation, and UI in each scenario
 
@@ -197,14 +201,14 @@ The in-flight accepted turn work runs concurrently during the window — STT fin
 
 #### Barge-in candidate (user speaks while AI is talking — ACTIVE_AI_TURN)
 
-Trigger: sustained VAD emits `BARGE_IN_CANDIDATE_STARTED`. The backend starts STT and a short candidate window without publishing `VOICE_USER_START`. When an owner speaker profile is enrolled, onset-forward speaker scores use `EnrolledSpeakerVerifier`. Short VAD endpoints do not terminal-suppress speaker mismatch before `barge_in_candidate_max_wait_s`; a first negative may be rescored once over accumulated PCM at max-wait (at most two inferences).
+Trigger: sustained VAD emits `BARGE_IN_CANDIDATE_STARTED`. The backend starts STT and a short candidate window without publishing `VOICE_USER_START`. When an owner speaker profile is enrolled, the shared `EnrolledSpeakerVerifier` scores the first 0.8s of onset speech (max cosine vs enrollment plus the optional per-node room vector). Empty or sub-0.4s PCM is unscorable, not a mismatch. Short VAD endpoints do not terminal-suppress speaker mismatch or unscorable audio before `barge_in_candidate_max_wait_s`; a first negative may be rescored once over accumulated PCM at max-wait (at most two inferences).
 
 | Candidate outcome | Outcome |
 | :--- | :--- |
 | Suppress | Candidate STT is closed, candidate audio is discarded, provisional candidate transcript is retracted via `conversation.retract {message_id}`, mode remains `ACTIVE_AI_TURN`, and the active delivery continues. Enrolled sessions suppress speaker mismatch / verifier failure only after max-wait (optionally after one rescore). Without enrollment, proactive alerts suppress arbitrary endpointed side speech unless it is wake-prefixed or an exact local control. |
 | Commit | `VOICE_USER_START` is published and `_handle_interruption` runs. Wake-prefix and exact local controls always commit. Enrolled owner match commits only with meaningful text on endpoint or max wait (including proactive). Matched-but-tiny transcripts wait for STT until max-wait, then suppress as `empty_or_tiny` (including soft-wait resolves with `endpointed=False`). Without enrollment, normal answers still commit on endpointed text / max wait. Matched owner identity is stamped on `VoiceInputTurn` (`speaker_id`, `speaker_confidence`, `speaker_source="barge_in"`) along with `admission_source="barge_in"` and the policy reason. When commit lands while already `ENDPOINT_CANDIDATE` (direct VAD, soft-wait, or endpointed max-wait), the same path publishes `VOICE_USER_END` and schedules exactly one normal endpoint decision so STT finalizes; mid-speech commits (`SPEAKING`) keep listening until a silence edge; push-to-talk bypasses the scheduler and finalizes directly. |
 
-Admission after final STT: wake / barge-in / push-to-talk stamps are reused and not re-evaluated. Ordinary `ACTIVE_IDLE` follow-ups call fail-open `decide_followup_admission` (commit every non-empty transcript while `Directedness` is unknown). Future DDSD populates `Directedness`; it must not become an owner-only allow-list.
+Admission after final STT: wake / barge-in / push-to-talk stamps are reused and not re-evaluated. Ordinary `ACTIVE_IDLE` follow-ups call `decide_followup_admission`: enrolled owner match commits (including short `yes`/`no`); mismatch suppresses and retracts; too-short/unscorable clips fail-open (`followup_unscorable`); no owner profile stays fail-open. Wake-prefix is not an identity bypass on follow-up. Future DDSD populates `Directedness` for owner side-speech; it must not replace the owner allow-list.
 
 #### Committed barge-in
 
@@ -280,7 +284,7 @@ Local command matching is full-transcript only after normalization and optional 
 | `voice_turn` | Current `VoiceInputTurn` (`turn_id`, latest transcript text, continuation prefix, monotonic endpoint timing, endpoint candidate text length, stable transcript message id, optional `admission_source` / `admission_reason`). This survives late continuation and is cleared only when the merged voice input is done. |
 | `endpoint_decision_task` | Cancellable task that resolves a VAD endpoint candidate after `turn_detector_min_delay`. It owns the pre-submit endpoint window and is cancelled when speech resumes before commit. |
 | `accepted_input_task` | Voice-only post-commit handoff task. Active in the narrow window between endpointing commit and assistant run start: runs final STT flush, local-command check, turn admission, and schedules `process_turn()`. Late continuation awaits this (does not cancel mid-handoff), then cancels the assistant run if needed. |
-| `current_run_task` | asyncio Task for the active assistant execution/delivery run. Set by voice commit, text input, and trigger/protocol/prefetch paths. Barge-in and interruption cancel this. Cleared in `process_turn()`'s finally block. |
+| `current_run_task` | asyncio Task for the active assistant execution/delivery run. Set by voice commit, text input, and trigger/protocol/prefetch paths. Barge-in and interruption cancel this. Cleared when spoken delivery finishes (`process_turn` / `_deliver_text`). |
 | `stt_stream` | Active per-`VoiceInputTurn` `StreamingSTTCoordinator` for Apple Speech or Cartesia. Voice turns require this stream; batch transcription is reserved for offline eval tooling. |
 | `soft_muted` | Session-local voice input cache. When true, normal post-wake transcripts are dropped before the orchestrator and before `VOICE_USER_START`; local unmute/resume plus stop/ack/snooze passthrough commands still run. Does **not** control proactive system output — use `AttentionMode` (persisted to MongoDB via `attention_service`) for that. Reset to `False` on session reconnect. |
 | `tts_sentence_queue` | Pipe between LLM streamer and TTS worker; drained on interruption |

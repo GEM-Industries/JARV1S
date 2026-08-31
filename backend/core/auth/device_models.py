@@ -48,6 +48,7 @@ class DeviceCredentialRecord(BaseModel):
     token_hash: str
     kind: DeviceKind = "browser"
     revoked_at: datetime | None = None
+    disconnected_at: datetime | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     last_seen_at: datetime | None = None
 
@@ -61,6 +62,7 @@ class DeviceCredentialSummary(BaseModel):
     location: DeviceLocation
     kind: DeviceKind
     revoked_at: datetime | None = None
+    disconnected_at: datetime | None = None
     created_at: datetime
     last_seen_at: datetime | None = None
 
@@ -86,7 +88,7 @@ class PairConsumeRequest(BaseModel):
     node_id: str = Field(max_length=128)
     node_label: str | None = Field(default=None, max_length=80)
     capabilities: str | None = Field(default=None, max_length=256)
-    client_surface: Literal["browser", "desktop_app", "phone"] | None = None
+    client_surface: Literal["browser", "desktop_app", "phone", "satellite"] | None = None
     location_provider: str | None = Field(default=None, max_length=32)
     room_id: str | None = Field(default=None, max_length=128)
     room_name: str | None = Field(default=None, max_length=128)
@@ -99,6 +101,7 @@ class PairConsumeResponse(BaseModel):
     device_id: str
     owner_id: str
     node_id: str
+    device_token: str | None = None
 
 
 class PairConsumeResult(PairConsumeResponse):
@@ -109,6 +112,8 @@ class PairingCodeIssueRequest(BaseModel):
     node_label: str | None = Field(default=None, max_length=80)
     capabilities: list[str] | None = Field(default=None, max_length=16)
     room_name: str | None = Field(default=None, max_length=128)
+    node_id: str | None = Field(default=None, max_length=128)
+    ha_area_id: str | None = Field(default=None, max_length=128)
 
 
 class PairingCodeIssueResponse(BaseModel):

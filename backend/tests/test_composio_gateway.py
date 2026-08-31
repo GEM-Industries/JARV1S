@@ -49,3 +49,21 @@ async def test_composio_gateway_caches_mcp_clients(monkeypatch):
     assert created[0].started is True
     assert created[0].shutdown_called is True
 
+
+@pytest.mark.asyncio
+async def test_on_app_connected_mounts_nothing_without_allowlist(monkeypatch):
+    gateway = ComposioGateway(
+        api_key="test-composio-key",
+        user_id="user-1",
+        callback_host="http://localhost:8000",
+        frontend_origin="http://localhost:5173",
+    )
+
+    async def boom(_app_name):
+        raise AssertionError("must not contact Composio MCP without an allowlist")
+
+    monkeypatch.setattr(gateway, "get_mcp_url", boom)
+
+    assert await gateway.on_app_connected("github", tools_allowlist=None) is False
+    assert await gateway.on_app_connected("github", tools_allowlist=[]) is False
+

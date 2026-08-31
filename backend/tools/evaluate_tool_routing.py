@@ -291,23 +291,21 @@ def _voice_sweep_policies() -> dict[str, RoutingPolicy]:
         for threshold in (0.70, 0.72, 0.74):
             for fallback_threshold, fallback_top_k in ((0.65, 1), (0.68, 1), (1.01, 0)):
                 for segment_top_k in (1, 2):
-                    for schema_budget in (8_000, 12_000, 16_000):
-                        name = (
-                            f"voice_m{max_matched}_t{int(threshold * 100)}"
-                            f"_fb{int(fallback_threshold * 100) if fallback_top_k else 'off'}"
-                            f"_s{segment_top_k}_b{schema_budget // 1000}k"
-                        )
-                        policies[name] = RoutingPolicy(
-                            name=name,
-                            threshold=threshold,
-                            fallback_threshold=fallback_threshold,
-                            fallback_top_k=fallback_top_k,
-                            max_matched=max_matched,
-                            segment_top_k=segment_top_k,
-                            multi_intent=True,
-                            session_carryover=True,
-                            schema_char_budget=schema_budget,
-                        )
+                    name = (
+                        f"voice_m{max_matched}_t{int(threshold * 100)}"
+                        f"_fb{int(fallback_threshold * 100) if fallback_top_k else 'off'}"
+                        f"_s{segment_top_k}"
+                    )
+                    policies[name] = RoutingPolicy(
+                        name=name,
+                        threshold=threshold,
+                        fallback_threshold=fallback_threshold,
+                        fallback_top_k=fallback_top_k,
+                        max_matched=max_matched,
+                        segment_top_k=segment_top_k,
+                        multi_intent=True,
+                        session_carryover=True,
+                    )
     return policies
 
 
@@ -318,7 +316,6 @@ def _voice_score(summary: dict[str, Any]) -> float:
         + summary["no_tool_clean_rate"] * 25
         + summary["precision"] * 15
         - summary["hard_negative_hit_count"] * 3
-        - max(0.0, summary["avg_schema_tokens"] - 2200) / 120
         - max(0.0, summary["p95_route_latency_ms"] - 25) / 10
     )
 

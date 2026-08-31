@@ -51,6 +51,7 @@ class IntegrationView(BaseModel):
     # "composio" | "<oauth-provider>" | None — signals which reconnect flow the frontend should use
     auth_type: Optional[str] = None
     auth_providers: list[str] = Field(default_factory=list)
+    connected_providers: list[str] = Field(default_factory=list)
     description: str = ""
     connection: IntegrationConnection = "unknown"
     health: IntegrationHealth = "unknown"

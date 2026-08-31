@@ -107,8 +107,12 @@ class JarvisRuntime:
     def _register_background_agent(self, background_llm) -> None:
         from core.agent.agent import JarvisAgent
         from core.integrations.manager import integrations
+        from core.prompts.background import BackgroundPromptBuilder
 
-        background_agent = JarvisAgent(llm_service=background_llm)
+        background_agent = JarvisAgent(
+            llm_service=background_llm,
+            prompt_builder=BackgroundPromptBuilder(),
+        )
         integrations.register("background_agent", lambda config: background_agent, config_keys=[])
         self.background_agent_ready = True
         self.background_agent_last_error = None

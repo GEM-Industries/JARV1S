@@ -11,6 +11,7 @@ from core.context import (
     get_owner_id,
     reset_tool_context,
 )
+from core.plugins.capabilities import CapabilityErrorDetail
 
 
 class EmptyCursor:
@@ -53,29 +54,55 @@ def test_runtime_identity_exposes_owner_and_connection_ids():
 
 
 @pytest.mark.asyncio
-async def test_clear_conversation_history_uses_owner_for_storage_and_delivery(monkeypatch):
+async def test_reset_conversation_window_uses_owner_node_and_clears_transcript(monkeypatch):
     from api.websockets.connection import manager
     from api.websockets.types import WSMessageType
-    from plugins import db as db_plugin
+    from plugins.db import DbPlugin
 
-    clear_history = AsyncMock(return_value=3)
+    set_reset = AsyncMock()
     send_voice_response = AsyncMock()
-    monkeypatch.setattr(db_plugin.mongodb, "clear_conversation_history", clear_history)
+    monkeypatch.setattr("plugins.db.mongodb.set_conversation_window_reset", set_reset)
     monkeypatch.setattr(manager, "send_voice_response", send_voice_response)
 
     token = _bind_identity()
     try:
-        result = await db_plugin.clear_conversation_history()
+        result = await DbPlugin().reset_conversation_window()
     finally:
         reset_tool_context(token)
 
-    assert result == "Deleted 3 messages."
-    clear_history.assert_awaited_once_with("geoff")
+    assert result == "Started a fresh conversation on this device. Earlier chat is still saved."
+    set_reset.assert_awaited_once_with("geoff", "browser-node")
     send_voice_response.assert_awaited_once_with(
         "conn-browser",
         WSMessageType.CLEAR_TRANSCRIPT,
         {},
     )
+
+
+@pytest.mark.asyncio
+async def test_reset_conversation_window_requires_node(monkeypatch):
+    from plugins.db import DbPlugin
+
+    set_reset = AsyncMock()
+    monkeypatch.setattr("plugins.db.mongodb.set_conversation_window_reset", set_reset)
+
+    token = bind_tool_context(
+        ToolRuntimeContext(
+            identity=RuntimeIdentity(
+                owner_id="geoff",
+                connection_id="conn-browser",
+            ),
+            timezone="Australia/Sydney",
+        )
+    )
+    try:
+        result = await DbPlugin().reset_conversation_window()
+    finally:
+        reset_tool_context(token)
+
+    assert isinstance(result, CapabilityErrorDetail)
+    assert result.code == "no_node"
+    set_reset.assert_not_awaited()
 
 
 @pytest.mark.asyncio

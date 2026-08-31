@@ -45,6 +45,11 @@ async def test_list_masks_stored_secret(isolated_store):
     assert background_agents.status == CredentialCardStatus.STORED
     assert background_agents.masked_suffix == "…5678"
     assert background_agents.detail == "Background agent runtime is available."
+    cursor_coding = next(item for item in response.items if item.id == "cursor_coding")
+    assert cursor_coding.status == CredentialCardStatus.MISSING
+    assert cursor_coding.docs_url == "https://cursor.com/dashboard/integrations"
+    assert cursor_coding.docs_label == "Create API key"
+    assert "New code work will use Cursor" in cursor_coding.description
     assert "external triggers" in response.external_triggers.detail.lower()
 
 
@@ -238,3 +243,16 @@ async def test_remove_credential_clears_store(isolated_store, monkeypatch):
 def test_unknown_credential_raises():
     with pytest.raises(KeyError):
         credentials_service.get_spec("unknown")
+
+
+@pytest.mark.asyncio
+async def test_cursor_key_is_validated_before_save(isolated_store, monkeypatch):
+    async def reject(_credential_id, _value):
+        return type("Validation", (), {"ok": False, "message": "Cursor rejected this API key."})()
+
+    monkeypatch.setattr(credentials_service, "validate_credential", reject)
+
+    with pytest.raises(ValueError, match="rejected"):
+        await credentials_service.save_credential("cursor_coding", "cursor-bad-key-12345678")
+
+    assert isolated_store.get_stored_secret("CURSOR_API_KEY") is None

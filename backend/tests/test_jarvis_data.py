@@ -27,6 +27,8 @@ def _write_app_data(app_support: Path, value: str = "current") -> None:
     (app_support / "host-prefs.json").write_text('{"external_triggers_enabled": true}')
     (app_support / "voice" / "speaker-profiles").mkdir(parents=True)
     (app_support / "voice" / "speaker-profiles" / "owner.npz").write_bytes(b"profile")
+    (app_support / "home").mkdir()
+    (app_support / "home" / "PROMPT.md").write_text("Call me Geoff.")
     (app_support / "run").mkdir()
     (app_support / "run" / "stale.sock").write_text("")
 
@@ -107,13 +109,14 @@ def test_backup_copies_only_durable_app_state(app_paths: tuple[Path, Path]) -> N
 
     manifest = json.loads((destination / "manifest.json").read_text())
     assert manifest["format_version"] == jarvis_data.BACKUP_FORMAT_VERSION
-    assert manifest["entries"] == ["mongo", "credentials", "host-prefs.json", "voice"]
+    assert manifest["entries"] == ["mongo", "credentials", "host-prefs.json", "voice", "home"]
     assert manifest["credential_portability"] == jarvis_data.CREDENTIAL_PORTABILITY
     assert [record["path"] for record in manifest["files"]] == [
         "mongo/data.wt",
         "credentials/secrets.enc",
         "host-prefs.json",
         "voice/speaker-profiles/owner.npz",
+        "home/PROMPT.md",
     ]
     assert (destination / "mongo" / "data.wt").read_text() == "current"
     assert (destination / "credentials" / "secrets.enc").read_text() == "encrypted"
@@ -135,6 +138,7 @@ def test_restore_replaces_app_data_from_valid_backup(app_paths: tuple[Path, Path
     assert (app_support / "mongo" / "data.wt").read_text() == "current"
     assert (app_support / "credentials" / "secrets.enc").read_text() == "encrypted"
     assert (app_support / "voice" / "speaker-profiles" / "owner.npz").exists()
+    assert (app_support / "home" / "PROMPT.md").read_text() == "Call me Geoff."
     assert (app_support / "models" / "ollama" / "blob").read_text() == "large-model"
     assert (app_support / "run" / "stale.sock").exists()
 
@@ -278,6 +282,7 @@ def test_reset_is_first_run_wipe(app_paths: tuple[Path, Path]) -> None:
     assert not (app_support / "credentials").exists()
     assert not (app_support / "voice").exists()
     assert (app_support / "host-prefs.json").exists()
+    assert (app_support / "home" / "PROMPT.md").exists()
     assert (app_support / "models" / "ollama" / "blob").read_text() == "keep"
 
 

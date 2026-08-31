@@ -23,7 +23,6 @@ import {
 } from '../../../utils/oauthFlow';
 import { Button } from '../../ui/Button';
 import { Disclosure } from '../../ui/Disclosure';
-import { StatusDot } from '../../ui/StatusDot';
 import { StatusPill, type StatusTone } from '../../ui/StatusPill';
 import { SearchField } from '../../ui/FieldControl';
 import { SegmentedTabs } from '../../ui/SegmentedTabs';
@@ -33,6 +32,14 @@ import { EmptyState } from '../../ui/EmptyState';
 import { SectionHeader } from '../../ui/SectionHeader';
 import { StatusBarWorkspaceHeader } from '../../ui/StatusBarWorkspaceHeader';
 import { TextLink } from '../../ui/TextLink';
+import { ConnectionList } from './ConnectionList';
+import {
+  COMPOSIO_CONNECTOR_LABEL,
+  connectionIds,
+  connectionLabel,
+  connectionSummary,
+  oauthRedirectUri,
+} from './connections';
 
 type RowPhase =
   | 'idle'
@@ -79,18 +86,6 @@ function attentionPill(item: IntegrationSummary): { tone: StatusTone; label: str
 
 function titleCase(value: string) {
   return value.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-function providerLabel(provider: string) {
-  if (provider === 'google') return 'Google';
-  if (provider === 'microsoft') return 'Microsoft';
-  return titleCase(provider);
-}
-
-function oauthProviders(item: IntegrationSummary) {
-  if (item.auth_providers?.length) return item.auth_providers;
-  if (item.auth_type && item.auth_type !== 'composio') return [item.auth_type];
-  return [];
 }
 
 function matchesQuery(haystack: string, query: string) {
@@ -254,7 +249,7 @@ const CatalogCard: React.FC<CatalogCardProps> = ({ item, phase, error, onConnect
         <div className="min-w-0">
           <h3 className="truncate type-heading text-foreground">{item.display_name}</h3>
           <p className="mt-1 type-meta text-foreground-subtle">
-            {item.managed_auth ? 'Managed sign-in' : 'Custom setup required'}
+            {item.managed_auth ? COMPOSIO_CONNECTOR_LABEL : 'Custom setup required'}
           </p>
         </div>
         {item.connected ? (
@@ -359,133 +354,6 @@ const SectionLabel: React.FC<{
   <SectionHeader icon={icon} label={label} count={count} className="px-4" />
 );
 
-const ProviderChoicePanel: React.FC<{
-  item: IntegrationSummary;
-  providerStatuses: Record<string, ProviderStatus>;
-  busyProvider?: string;
-  onAuthorize: (name: string, provider: string) => void;
-  onSetupProvider: (name: string, provider: string) => void;
-  onConfirmDisconnect: (name: string, provider: string) => void;
-  onClose: () => void;
-}> = ({
-  item,
-  providerStatuses,
-  busyProvider,
-  onAuthorize,
-  onSetupProvider,
-  onConfirmDisconnect,
-  onClose,
-}) => {
-  const providers = oauthProviders(item);
-  const activeProvider = item.connected && item.auth_type && item.auth_type !== 'composio'
-    ? item.auth_type
-    : undefined;
-
-  return (
-    <div className="rounded-panel bg-surface/10 p-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <p className="type-label-small text-foreground-subtle">
-            Account
-          </p>
-          <p className="mt-1 type-body text-foreground-muted">
-            Choose which account powers {item.display_name}.
-          </p>
-        </div>
-        <Button variant="ghost" color="neutral" size="xs" shape="control" onClick={onClose}>
-          Close
-        </Button>
-      </div>
-
-      <div className="ui-surface-group mt-3">
-        {providers.map((provider) => {
-          const status = providerStatuses[provider];
-          const needsSetup = status ? !status.connectable : false;
-          const isConnected = status?.connected ?? false;
-          const isActive = activeProvider === provider;
-          const busy = busyProvider === provider;
-          const stateLabel = needsSetup
-            ? 'Setup needed'
-            : isActive
-              ? 'In use'
-              : isConnected
-                ? 'Connected'
-                : 'Ready';
-          const actionLabel = needsSetup
-            ? 'Set up'
-            : busy
-              ? 'Waiting…'
-              : isActive
-                ? 'Reconnect'
-                : item.connected
-                  ? 'Switch'
-                  : 'Connect';
-
-          return (
-            <div
-              key={provider}
-              className={cn(
-                'flex min-h-14 items-center gap-3 px-3 py-2',
-                isActive
-                  ? 'bg-status-success/[0.05]'
-                  : 'bg-canvas-sunken/25',
-              )}
-            >
-              <StatusDot status={needsSetup ? 'error' : isConnected ? 'success' : 'off'} size="sm" />
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-2">
-                  <p className="type-label text-foreground">
-                    {providerLabel(provider)}
-                  </p>
-                  <span className={cn(
-                    'rounded-full px-2 py-0.5 type-meta',
-                    needsSetup
-                      ? 'bg-status-danger/10 text-status-danger/80'
-                      : isActive
-                        ? 'bg-status-success/10 text-status-success/80'
-                        : 'bg-surface/10 text-foreground-disabled/70',
-                  )}>
-                    {stateLabel}
-                  </span>
-                </div>
-                {status?.account_email && (
-                  <p className="mt-0.5 truncate type-meta text-foreground-muted/65">
-                    {status.account_email}
-                  </p>
-                )}
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <Button
-                  variant="ghost"
-                  color={needsSetup ? 'brand' : isActive ? 'neutral' : 'brand'}
-                  size="xs"
-                  shape="control"
-                  disabled={busy}
-                  onClick={() => needsSetup ? onSetupProvider(item.name, provider) : onAuthorize(item.name, provider)}
-                >
-                  {actionLabel}
-                </Button>
-                {isActive && (
-                  <Button
-                    variant="ghost"
-                    color="danger"
-                    size="xs"
-                    shape="control"
-                    disabled={busy}
-                    onClick={() => onConfirmDisconnect(item.name, provider)}
-                  >
-                    Disconnect
-                  </Button>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-};
-
 const ProviderSetupPanel: React.FC<{
   provider: string;
   busy?: boolean;
@@ -493,7 +361,7 @@ const ProviderSetupPanel: React.FC<{
   onSave: (clientId: string, clientSecret?: string) => void;
   onCancel: () => void;
 }> = ({ provider, busy = false, error, onSave, onCancel }) => {
-  const redirectUri = `${window.location.origin}/api/v1/auth/oauth/callback`;
+  const redirectUri = oauthRedirectUri(provider);
   const requiresSecret = provider === 'google';
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
@@ -514,7 +382,7 @@ const ProviderSetupPanel: React.FC<{
             OAuth setup
           </p>
           <p className="mt-1 type-heading text-foreground">
-            Set up {providerLabel(provider)}
+            Set up {connectionLabel(provider)}
           </p>
           <p className="mt-1 type-body text-foreground-muted">
             Add credentials once, then continue with the normal consent flow.
@@ -595,10 +463,12 @@ interface AppDetailProps {
   item: IntegrationSummary;
   state: RowState;
   toggling: boolean;
+  providerStatuses: Record<string, ProviderStatus>;
   onToggle: (name: string, enabled: boolean) => void;
   onConnect: (name: string) => void;
   onRecover: (name: string) => void;
-  onManageOAuth: (name: string) => void;
+  onAuthorizeConnection: (name: string, connectionId: string) => void;
+  onSetupConnection: (name: string, connectionId: string) => void;
   onConfirmDisconnect: (name: string, provider?: string) => void;
   onDisconnect: (name: string, provider?: string) => void;
   onCancelDisconnect: (name: string) => void;
@@ -609,41 +479,41 @@ const AppDetail: React.FC<AppDetailProps> = ({
   item,
   state,
   toggling,
+  providerStatuses,
   onToggle,
   onConnect,
   onRecover,
-  onManageOAuth,
+  onAuthorizeConnection,
+  onSetupConnection,
   onConfirmDisconnect,
   onDisconnect,
   onCancelDisconnect,
   children,
 }) => {
   const busy = toggling || ['connecting', 'disconnecting', 'reconciling'].includes(state.phase);
-  const providers = oauthProviders(item);
-  const provider = state.provider ?? item.provider ?? item.auth_type ?? undefined;
+  const sources = connectionIds(item);
   const attention = attentionPill(item);
   const capabilityCount = item.capabilities.length;
   const hasActionRow = state.phase === 'confirm_disconnect'
-    || providers.length > 0
     || item.auth_type === 'composio'
     || item.kind === 'composio'
     || (item.connected && !item.loaded);
 
   const facts: Array<{ label: string; value: string }> = [];
   if (item.connection !== 'connected' || item.health !== 'healthy') {
-    facts.push({ label: 'Connection', value: titleCase(item.connection) });
+    facts.push({ label: 'Status', value: titleCase(item.connection) });
   }
   if (item.health !== 'healthy') {
     facts.push({ label: 'Health', value: titleCase(item.health) });
-  }
-  if (provider && providers.length > 0) {
-    facts.push({ label: 'Provider', value: providerLabel(provider) });
   }
   if (item.account) {
     facts.push({ label: 'Account', value: item.account });
   }
   if (item.last_used_at) {
     facts.push({ label: 'Last used', value: formatLastUsed(item.last_used_at) });
+  }
+  if (item.kind === 'composio' || item.auth_type === 'composio') {
+    facts.push({ label: 'Connector', value: COMPOSIO_CONNECTOR_LABEL });
   }
 
   return (
@@ -679,7 +549,7 @@ const AppDetail: React.FC<AppDetailProps> = ({
           <div className="mt-4 flex flex-wrap items-center gap-2">
             {state.phase === 'confirm_disconnect' ? (
               <>
-                <span className="type-body text-foreground-muted">Disconnect this account?</span>
+                <span className="type-body text-foreground-muted">Disconnect this connection?</span>
                 <Button size="md" color="critical" shape="control" onClick={() => onDisconnect(item.name, state.provider)}>
                   Confirm disconnect
                 </Button>
@@ -687,10 +557,6 @@ const AppDetail: React.FC<AppDetailProps> = ({
                   Cancel
                 </Button>
               </>
-            ) : providers.length > 0 ? (
-              <Button size="md" variant="ghost" color="brand" shape="control" disabled={busy} onClick={() => onManageOAuth(item.name)}>
-                {item.connected ? 'Manage connection' : 'Connect account'}
-              </Button>
             ) : item.auth_type === 'composio' ? (
               item.connected ? (
                 <Button
@@ -754,6 +620,17 @@ const AppDetail: React.FC<AppDetailProps> = ({
         </dl>
       )}
 
+      {state.phase !== 'confirm_disconnect' && sources.length > 0 ? (
+        <ConnectionList
+          item={item}
+          providerStatuses={providerStatuses}
+          busyId={state.phase === 'connecting' ? state.provider : undefined}
+          onConnect={onAuthorizeConnection}
+          onSetup={onSetupConnection}
+          onDisconnect={onConfirmDisconnect}
+        />
+      ) : null}
+
       {state.phase !== 'confirm_disconnect' ? children : null}
 
       {capabilityCount > 0 ? (
@@ -799,7 +676,6 @@ export const IntegrationsPanelContent: React.FC = () => {
   const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [catalogRowStates, setCatalogRowStates] = useState<Record<string, RowState>>({});
   const catalogDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [providerChoiceTarget, setProviderChoiceTarget] = useState<string | null>(null);
   const [setupTarget, setSetupTarget] = useState<{ name: string; provider: string } | null>(null);
   const [setupError, setSetupError] = useState<string | undefined>();
 
@@ -1005,12 +881,25 @@ export const IntegrationsPanelContent: React.FC = () => {
       return;
     }
 
-    const provider = providerOverride ?? item.auth_type ?? oauthProviders(item)[0];
+    const provider = providerOverride ?? item.auth_type ?? connectionIds(item)[0];
     if (!provider) return;
+
+    if (provider === 'macos') {
+      setRow(name, 'connecting', undefined, provider);
+      try {
+        const result = await integrationsApi.authorizeMacosCalendar();
+        await syncRow(name, result.success ? undefined : result.message);
+      } catch (e) {
+        setRow(name, 'idle', errMsg(e, 'Could not request Calendar access on this Mac.'));
+      }
+      return;
+    }
 
     setRow(name, 'connecting', undefined, provider);
     try {
-      const { authorize_url } = await oauthApi.authorize(provider, window.location.origin);
+      const { authorize_url } = await oauthApi.authorize(provider, window.location.origin, {
+        plugin: name === provider ? undefined : name,
+      });
       const launch = await beginOAuthAuthorization(`Reconnect ${item.display_name}`, authorize_url);
       closeOAuthPopup(popupRef.current);
       clearPopup();
@@ -1040,7 +929,6 @@ export const IntegrationsPanelContent: React.FC = () => {
       });
     } catch (e) {
       if (e instanceof OAuthApiError && e.status === 409) {
-        setProviderChoiceTarget(name);
         setSetupTarget({ name, provider });
         setSetupError(undefined);
         setRow(name, 'idle');
@@ -1053,6 +941,13 @@ export const IntegrationsPanelContent: React.FC = () => {
   const handleBuiltInDisconnect = async (name: string, provider?: string) => {
     setRow(name, 'disconnecting', undefined, provider);
     try {
+      if (provider === 'macos') {
+        await syncRow(
+          name,
+          'Turn off Calendar access in System Settings → Privacy & Security → Calendars.',
+        );
+        return;
+      }
       if (provider) {
         await oauthApi.deleteProvider(provider);
         await loadProviderStatuses();
@@ -1077,7 +972,7 @@ export const IntegrationsPanelContent: React.FC = () => {
       await handleBuiltInReconnect(name, provider);
     } catch (e) {
       setRow(name, 'idle');
-      setSetupError(errMsg(e, `Could not save ${providerLabel(provider)} credentials.`));
+      setSetupError(errMsg(e, `Could not save ${connectionLabel(provider)} credentials.`));
     }
   };
 
@@ -1106,12 +1001,8 @@ export const IntegrationsPanelContent: React.FC = () => {
   const showDetailMobile = Boolean(selectedItem && activeTab === 'my_apps');
 
   const builtInSubtitle = (item: IntegrationSummary) => {
-    const providers = oauthProviders(item);
-    if (providers.length > 0) {
-      return item.connected && item.provider
-        ? `Connected via ${providerLabel(item.provider)}`
-        : `${providers.length} provider${providers.length !== 1 ? 's' : ''} available`;
-    }
+    const summary = connectionSummary(item, providerStatuses);
+    if (summary) return summary;
     if (item.status === 'error') return 'Needs connection';
     if (item.enabled) return `${item.tool_count} tool${item.tool_count !== 1 ? 's' : ''} active`;
     return 'Disabled';
@@ -1275,7 +1166,7 @@ export const IntegrationsPanelContent: React.FC = () => {
                   className="m-5"
                   icon={<ShieldCheckIcon size={20} />}
                   title="Select an app"
-                  description="Check connection status, manage accounts, or see what JARV1S can do."
+                  description="Check connection status, manage sources, or see what JARV1S can do."
                 />
               ) : (
                 <>
@@ -1294,36 +1185,19 @@ export const IntegrationsPanelContent: React.FC = () => {
                     item={selectedItem}
                     state={getRow(selectedItem.name)}
                     toggling={toggleStates[selectedItem.name]?.toggling ?? false}
+                    providerStatuses={providerStatuses}
                     onToggle={handleToggle}
                     onConnect={selectedItem.kind === 'built_in' ? handleBuiltInReconnect : handleConnect}
                     onRecover={handleRecover}
-                    onManageOAuth={(name) => {
-                      setProviderChoiceTarget((current) => (current === name ? null : name));
-                      setSetupTarget(null);
+                    onAuthorizeConnection={(name, connectionId) => void handleBuiltInReconnect(name, connectionId)}
+                    onSetupConnection={(name, connectionId) => {
+                      setSetupTarget({ name, provider: connectionId });
                       setSetupError(undefined);
                     }}
                     onConfirmDisconnect={(name, provider) => setRow(name, 'confirm_disconnect', undefined, provider)}
                     onDisconnect={selectedItem.kind === 'built_in' ? handleBuiltInDisconnect : handleDisconnect}
                     onCancelDisconnect={(name) => setRow(name, 'idle')}
                   >
-                    {providerChoiceTarget === selectedItem.name && !setupTarget && (
-                      <ProviderChoicePanel
-                        item={selectedItem}
-                        providerStatuses={providerStatuses}
-                        busyProvider={
-                          getRow(selectedItem.name).phase === 'connecting'
-                            ? getRow(selectedItem.name).provider
-                            : undefined
-                        }
-                        onAuthorize={(name, provider) => void handleBuiltInReconnect(name, provider)}
-                        onSetupProvider={(name, provider) => {
-                          setSetupTarget({ name, provider });
-                          setSetupError(undefined);
-                        }}
-                        onConfirmDisconnect={(name, provider) => setRow(name, 'confirm_disconnect', undefined, provider)}
-                        onClose={() => setProviderChoiceTarget(null)}
-                      />
-                    )}
                     {setupTarget?.name === selectedItem.name && (
                       <ProviderSetupPanel
                         provider={setupTarget.provider}

@@ -9,6 +9,7 @@ import { CapabilityReceiptItem } from './CapabilityReceiptItem'
 import {
   formatTranscriptTime,
   groupTranscriptTurns,
+  isUnsolicitedTurn,
   turnTimestamp,
   type TranscriptTurn,
 } from './transcriptTurns'
@@ -16,27 +17,35 @@ import {
 const TurnHeader: React.FC<{
   speaker: 'user' | 'assistant'
   timestamp: number
-}> = ({ speaker, timestamp }) => (
-  <div className="flex items-center gap-2">
+  notice?: boolean
+}> = ({ speaker, timestamp, notice = false }) => (
+  <div className="flex items-baseline gap-2">
     <span
       className={cn(
         'type-label-small',
-        speaker === 'assistant' ? 'text-brand-output' : 'text-foreground-subtle',
+        notice
+          ? 'text-foreground-subtle'
+          : speaker === 'assistant'
+            ? 'text-brand-output'
+            : 'text-foreground-subtle',
       )}
     >
       {speaker === 'user' ? 'You' : 'Jarvis'}
     </span>
+    {notice && (
+      <span className="type-meta text-foreground-subtle">Notice</span>
+    )}
     <span className="type-meta tabular-nums text-foreground-subtle">
       {formatTranscriptTime(timestamp)}
     </span>
   </div>
 )
 
-const TextBody: React.FC<{ item: TranscriptItemType }> = ({ item }) => {
+const TextBody: React.FC<{ item: TranscriptItemType; quiet?: boolean }> = ({ item, quiet = false }) => {
   const isUser = item.sender === 'user'
   const contentClassName = cn(
     'type-body',
-    item.isPartial ? 'text-brand' : 'text-foreground',
+    item.isPartial ? 'text-brand' : quiet ? 'text-foreground-muted' : 'text-foreground',
   )
 
   return (
@@ -47,7 +56,8 @@ const TextBody: React.FC<{ item: TranscriptItemType }> = ({ item }) => {
         <div
           className={cn(
             contentClassName,
-            'space-y-2 [&_em]:italic [&_li]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-0 [&_strong]:font-semibold [&_strong]:text-foreground [&_ul]:list-disc [&_ul]:pl-5',
+            'space-y-2 [&_em]:italic [&_li]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-0 [&_strong]:font-semibold [&_ul]:list-disc [&_ul]:pl-5',
+            quiet ? '[&_strong]:text-foreground-muted' : '[&_strong]:text-foreground',
           )}
         >
           <ReactMarkdown>{item.text ?? ''}</ReactMarkdown>
@@ -122,18 +132,25 @@ const ReasoningPart: React.FC<{ item: TranscriptItemType }> = ({ item }) => {
 const SpokenTurn: React.FC<{
   speaker: 'user' | 'assistant'
   timestamp: number
+  notice?: boolean
   children: React.ReactNode
-}> = ({ speaker, timestamp, children }) => (
+}> = ({ speaker, timestamp, notice = false, children }) => (
   <article
-    className="flex flex-col gap-1 pr-4"
-    aria-label={`${speaker === 'user' ? 'You' : 'Jarvis'}, ${formatTranscriptTime(timestamp)}`}
+    className={cn(
+      'flex flex-col gap-1 pr-4',
+      notice && 'border-l border-outline/40 pl-3',
+    )}
+    aria-label={`${speaker === 'user' ? 'You' : notice ? 'Jarvis notice' : 'Jarvis'}, ${formatTranscriptTime(timestamp)}`}
   >
-    <TurnHeader speaker={speaker} timestamp={timestamp} />
+    <TurnHeader speaker={speaker} timestamp={timestamp} notice={notice} />
     <div className="flex flex-col gap-2">{children}</div>
   </article>
 )
 
-const AssistantParts: React.FC<{ items: TranscriptItemType[] }> = ({ items }) => (
+const AssistantParts: React.FC<{ items: TranscriptItemType[]; quiet?: boolean }> = ({
+  items,
+  quiet = false,
+}) => (
   <>
     {items.map((item) => {
       if (item.type === 'code') {
@@ -143,12 +160,12 @@ const AssistantParts: React.FC<{ items: TranscriptItemType[] }> = ({ items }) =>
         return <ReasoningPart key={item.id} item={item} />
       }
       if (!item.text?.trim() && !item.attachments?.length) return null
-      return <TextBody key={item.id} item={item} />
+      return <TextBody key={item.id} item={item} quiet={quiet} />
     })}
   </>
 )
 
-function renderTurn(turn: TranscriptTurn) {
+function renderTurn(turn: TranscriptTurn, notice = false) {
   if (turn.kind === 'notice') {
     return <NoticeTurn item={turn.item} />
   }
@@ -160,8 +177,8 @@ function renderTurn(turn: TranscriptTurn) {
     )
   }
   return (
-    <SpokenTurn speaker="assistant" timestamp={turnTimestamp(turn)}>
-      <AssistantParts items={turn.items} />
+    <SpokenTurn speaker="assistant" timestamp={turnTimestamp(turn)} notice={notice}>
+      <AssistantParts items={turn.items} quiet={notice} />
     </SpokenTurn>
   )
 }
@@ -223,12 +240,18 @@ export const TranscriptWidget: React.FC = () => {
                 const showBoundary = previous
                   ? startsNewConversation(turnTimestamp(previous), turnTimestamp(turn))
                   : false
+                const notice = isUnsolicitedTurn(previous, turn)
+                const spacing = index === 0 || showBoundary
+                  ? undefined
+                  : notice
+                    ? 'mt-8'
+                    : 'mt-6'
 
                 return (
                   <React.Fragment key={turn.id}>
                     {showBoundary && <ConversationBoundary />}
-                    <div className={index === 0 || showBoundary ? undefined : 'mt-6'}>
-                      {renderTurn(turn)}
+                    <div className={spacing}>
+                      {renderTurn(turn, notice)}
                     </div>
                   </React.Fragment>
                 )

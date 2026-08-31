@@ -24,7 +24,7 @@ from core.voice.config import (
 )
 
 logger = logging.getLogger(__name__)
-MODEL_ID = "sonic-3.5"
+MODEL_ID = "sonic-3.6"
 LANGUAGE = "en"
 SAMPLE_RATE = 24000
 EMOTION = "calm"

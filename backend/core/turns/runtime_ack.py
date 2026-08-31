@@ -48,6 +48,11 @@ _unused: list[str] = []
 # Instantaneous controls have no latency to mask. Lives here so plugins stay
 # unaware of voice delivery. Delete with this module.
 _SILENT_CAPABILITIES: frozenset[str] = frozenset({
+    "profile.add_memory",
+    "profile.forget",
+    "profile.remember",
+    "profile.remove_memory",
+    "profile.update_memory",
     "smart_home.adjust_lights",
     "smart_home.control_devices",
     "smart_home.control_lights",

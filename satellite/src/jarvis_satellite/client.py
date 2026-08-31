@@ -5,19 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
+import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Protocol
 
 import websockets  # type: ignore[import-not-found]
 
 from .audio import AlsaProcessAudioIO, AudioIO, pyaudio_available
 from .backend_url import validate_backend_url
-from .config import SatelliteConfig
+from .config import DEFAULT_CONFIG_PATH, SatelliteConfig
 from .identity import build_websocket_url, ensure_state_dir, load_or_create_node_id
 from .led import build_led_controller
 from .notification_audio import NotificationSoundPlayer, cue_audio, notification_audio
-from .ticket import mint_ws_ticket
+from .ticket import TicketAuthError, mint_ws_ticket
 from .diagnostics import SatelliteDiagnostics
 from .protocol import (
     INPUT_SAMPLE_RATE,
@@ -30,6 +34,7 @@ from .protocol import (
     user_audio_message,
     voice_activate_message,
 )
+from .setup_server import start_setup_server
 from .wakeword import WakeDetector, build_wake_detector
 
 logger = logging.getLogger(__name__)
@@ -64,9 +69,10 @@ class AudioAdapter(Protocol):
 class SatelliteClient:
     """Thin transport client; the backend owns voice state and turn logic."""
 
-    def __init__(self, config: SatelliteConfig) -> None:
+    def __init__(self, config: SatelliteConfig, config_path: Path | None = None) -> None:
         validate_backend_url(config.backend_url)
         self._config = config
+        self._config_path = (config_path or DEFAULT_CONFIG_PATH).expanduser()
         ensure_state_dir(config)
         self._node_id = load_or_create_node_id(config)
         self._mic_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=config.mic_queue_max_chunks)
@@ -105,6 +111,7 @@ class SatelliteClient:
             1,
             int(INPUT_SAMPLE_RATE * INPUT_SAMPLE_WIDTH_BYTES * max(0.5, config.wake_preroll_seconds)),
         )
+        self._setup_server = None
         self._init_edge_wake()
 
     def _init_edge_wake(self) -> None:
@@ -161,7 +168,39 @@ class SatelliteClient:
     def node_id(self) -> str:
         return self._node_id
 
+    def _restart_after_pair(self) -> None:
+        def _terminate() -> None:
+            logger.info("Paired; restarting to load the new credential")
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Timer(0.4, _terminate).start()
+
+    def _start_setup_listener(self) -> None:
+        if self._setup_server is not None:
+            return
+        try:
+            self._setup_server = start_setup_server(
+                node_id=self._node_id,
+                config_path=self._config_path,
+                on_paired=self._restart_after_pair,
+            )
+        except OSError as exc:
+            logger.warning("Setup listener unavailable: %s", exc)
+
+    def _stop_setup_listener(self) -> None:
+        server = self._setup_server
+        if server is None:
+            return
+        self._setup_server = None
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            logger.debug("Setup listener stop failed", exc_info=True)
+
     async def run(self) -> None:
+        if not self._config.device_token:
+            self._start_setup_listener()
         self._start_audio()
         self._led.start()
         attempt = 0
@@ -192,6 +231,7 @@ class SatelliteClient:
                 logger.info("Reconnecting in %.1fs", delay)
                 await asyncio.sleep(delay)
         finally:
+            self._stop_setup_listener()
             self._audio_close()
             await self._led.stop()
             await self._led.set_disconnected()
@@ -209,6 +249,11 @@ class SatelliteClient:
                     self._config.device_token,
                 )
                 ticket = ws_ticket.ticket
+            except TicketAuthError as exc:
+                logger.warning("Failed to mint WebSocket ticket: %s", exc)
+                self._start_setup_listener()
+                await self._led.set_disconnected()
+                return None
             except RuntimeError as exc:
                 logger.warning("Failed to mint WebSocket ticket: %s", exc)
                 await self._led.set_disconnected()
@@ -222,6 +267,7 @@ class SatelliteClient:
         try:
             async with websockets.connect(url, ping_interval=None) as ws:
                 logger.info("Connected to JARV1S backend")
+                self._stop_setup_listener()
                 await self._led.set_connected()
                 self._last_pong_at = time.monotonic()
                 recovered = self._reconnect_attempt > 0

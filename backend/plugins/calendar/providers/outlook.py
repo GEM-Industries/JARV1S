@@ -275,9 +275,10 @@ class OutlookProvider(_ProviderBase):
 
     name: str = "microsoft"
 
-    def __init__(self, client: httpx.AsyncClient, account: Optional[str] = None):
-        super().__init__(client, account)
+    def __init__(self, client: httpx.AsyncClient):
+        super().__init__(client)
         self._calendar_ids_cache: Optional[List[str]] = None
+        self._calendar_names: Dict[str, str] = {}
 
     async def list_calendar_ids(self) -> Optional[List[str]]:
         """Discover the user's calendar IDs on Microsoft Graph (cached).
@@ -291,7 +292,12 @@ class OutlookProvider(_ProviderBase):
             resp = await self._client.get("/calendars", params={"$select": "id,name"})
             resp.raise_for_status()
             items = resp.json().get("value", [])
-            self._calendar_ids_cache = [item["id"] for item in items if item.get("id")]
+            self._calendar_names = {
+                item["id"]: (item.get("name") or item["id"])
+                for item in items
+                if item.get("id")
+            }
+            self._calendar_ids_cache = list(self._calendar_names)
             logger.info("Discovered %d Outlook calendars", len(self._calendar_ids_cache))
             return self._calendar_ids_cache or None
         except Exception as e:
@@ -318,23 +324,22 @@ class OutlookProvider(_ProviderBase):
             "$top": max_results,
         }
 
-        async def _query(path: str) -> List[CalendarEvent]:
+        async def _query(path: str, calendar_id: str | None) -> List[CalendarEvent]:
             resp = await self._client.get(path, params=params_base)
             resp.raise_for_status()
+            title = self._calendar_names.get(calendar_id) if calendar_id else None
             return [
-                _parse_graph_event(i)
+                self._stamp(_parse_graph_event(i), calendar=title)
                 for i in resp.json().get("value", [])
                 if _is_graph_relevant(i)
             ]
 
         if cal_ids is None:
-            paths = ["/calendarView"]
+            jobs = [_query("/calendarView", None)]
         else:
-            paths = [f"/calendars/{cid}/calendarView" for cid in cal_ids]
+            jobs = [_query(f"/calendars/{cid}/calendarView", cid) for cid in cal_ids]
 
-        results = await asyncio.gather(
-            *[_query(p) for p in paths], return_exceptions=True,
-        )
+        results = await asyncio.gather(*jobs, return_exceptions=True)
 
         all_events: List[CalendarEvent] = []
         errors: List[Exception] = []
@@ -351,7 +356,7 @@ class OutlookProvider(_ProviderBase):
         unique = [ev for ev in all_events if ev.id not in seen and not seen.add(ev.id)]
         unique.sort(key=lambda e: e.start)
         return ProviderEventBatch(
-            events=[self._stamp(e) for e in unique[:max_results]],
+            events=unique[:max_results],
             incomplete=bool(errors),
         )
 
@@ -423,7 +428,7 @@ class OutlookProvider(_ProviderBase):
         resp.raise_for_status()
         return _confirmation_from_graph_item(
             resp.json(),
-            account=self._account,
+            account=self.name,
             fallback_start=start_iso,
             fallback_end=end_iso,
         )
@@ -510,12 +515,12 @@ class OutlookProvider(_ProviderBase):
 
         if not body:
             return EventConfirmation(
-                id=event_id, title="(no changes)", start="", end="", account=self._account,
+                id=event_id, title="(no changes)", start="", end="", account=self.name,
             )
 
         resp = await self._client.patch(f"/events/{event_id}", json=body)
         resp.raise_for_status()
-        return _confirmation_from_graph_item(resp.json(), account=self._account)
+        return _confirmation_from_graph_item(resp.json(), account=self.name)
 
     async def search_events(
         self,
@@ -534,27 +539,26 @@ class OutlookProvider(_ProviderBase):
             "$top": max_results,
         }
 
-        async def _query(path: str) -> List[CalendarEvent]:
+        async def _query(path: str, calendar_id: str | None) -> List[CalendarEvent]:
             resp = await self._client.get(
                 path,
                 params=params,
                 headers={"ConsistencyLevel": "eventual"},
             )
             resp.raise_for_status()
+            title = self._calendar_names.get(calendar_id) if calendar_id else None
             return [
-                _parse_graph_event(i)
+                self._stamp(_parse_graph_event(i), calendar=title)
                 for i in resp.json().get("value", [])
                 if _is_graph_relevant(i)
             ]
 
         if cal_ids is None:
-            paths = ["/calendarView"]
+            jobs = [_query("/calendarView", None)]
         else:
-            paths = [f"/calendars/{cid}/calendarView" for cid in cal_ids]
+            jobs = [_query(f"/calendars/{cid}/calendarView", cid) for cid in cal_ids]
 
-        results = await asyncio.gather(
-            *[_query(p) for p in paths], return_exceptions=True,
-        )
+        results = await asyncio.gather(*jobs, return_exceptions=True)
         all_events: List[CalendarEvent] = []
         errors: List[Exception] = []
         for r in results:
@@ -570,7 +574,7 @@ class OutlookProvider(_ProviderBase):
         unique = [ev for ev in all_events if ev.id not in seen and not seen.add(ev.id)]
         unique.sort(key=lambda e: e.start)
         return ProviderEventBatch(
-            events=[self._stamp(e) for e in unique[:max_results]],
+            events=unique[:max_results],
             incomplete=bool(errors),
         )
 

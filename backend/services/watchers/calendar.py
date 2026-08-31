@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class CalendarWatcher:
     """
-    Polls every connected calendar provider (Google personal + Outlook work + …)
+    Polls every connected calendar provider (this Mac, Google, Microsoft, …)
     for upcoming events in a 24h window. Reads flow through the
     UnifiedCalendarClient so multi-calendar discovery, deduplication, provider
     fan-out, and attendee filtering stay in sync with the LLM-facing calendar tool.
@@ -41,7 +41,7 @@ class CalendarWatcher:
         {"field": "attendee_count", "type": "number", "hint": "excludes self"},
         {"field": "duration_minutes", "type": "number", "hint": "timed events only, null for all-day"},
         {"field": "meet_link", "type": "string"},
-        {"field": "account", "type": "string", "hint": "'personal' or 'work' — which calendar it came from"},
+        {"field": "account", "type": "string", "hint": "'google', 'microsoft', or 'macos' — which connection it came from"},
     ]
 
     async def poll(self) -> list[dict]:

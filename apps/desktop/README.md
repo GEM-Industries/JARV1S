@@ -49,8 +49,8 @@ Durable state is under `~/Library/Application Support/JARV1S`.
 
 | Saves | Skips |
 | :--- | :--- |
-| `mongo/` (LLM, HA URL, OAuth, transcript) | `models/` (re-downloadable, large) |
-| `credentials/` (API keys, HA_TOKEN) | `cache/`, `valkey/`, `run/` |
+| `mongo/` (LLM, HA URL, OAuth grant metadata, transcript) | `models/` (re-downloadable, large) |
+| `credentials/` (API keys, HA_TOKEN, OAuth tokens) | `cache/`, `valkey/`, `run/` |
 | `host-prefs.json`, `voice/` | Diagnostics JSON in `~/Library/Logs/JARV1S` |
 
 ```bash
@@ -72,6 +72,11 @@ Use `task desktop:dogfood` when you want to test the packaged user path. It buil
 Before a change that mutates persisted app data, quit JARV1S and run `task desktop:data:backup`. Code-only changes do not require a backup.
 
 `task desktop:dev` is for contributor-only shell work. Its Docker database and `repo/.data` are disposable and **never** share dogfood Application Support data.
+
+Official Google OAuth identity is gitignored `apps/desktop/resources/product_oauth.json` (see `product_oauth.json.example`). Packaged builds copy it into Host resources; the supervisor sets `JARVIS_PRODUCT_OAUTH`. Without that file, Connect Gmail uses Apps → Advanced.
+
+Optional household Spotify `client_id` may live in the same file (PKCE, no secret). Register Spotify redirect `http://127.0.0.1:8000/api/v1/auth/oauth/callback` (Host default port; the dashboard rejects portless loopback). Do not ship a Spotify client ID in official builds; forks use Apps → Advanced.
+
 Use `task desktop:release:local` for local releases. The first run asks for the Apple and updater key details, saves non-secret settings under `~/.config/jarv1s`, and stores the updater password in macOS Keychain. Later releases require only the same command. Run `task desktop:release:local -- --setup` to replace the saved settings. If only updater signing failed after notarization, run `task desktop:release:local -- --retry-updater` to replace that password and reuse the accepted app and DMG.
 
 `task desktop:release` is the non-interactive CI entry point. It builds the runtime once, then signs, notarizes, staples, and emits updater metadata.
@@ -107,8 +112,8 @@ npm run tauri signer generate -- --ci -w ~/.tauri/jarvis-updater.key -f
 | Path | Purpose |
 | :--- | :--- |
 | `~/Library/Application Support/JARV1S` | Host data root + encrypted credentials |
-| `~/Library/Application Support/JARV1S/mongo` | Bundled MongoDB data (config, OAuth, transcript) |
-| `~/Library/Application Support/JARV1S/credentials` | Encrypted API keys / HA_TOKEN |
+| `~/Library/Application Support/JARV1S/mongo` | Bundled MongoDB data (config, OAuth grant metadata, transcript) |
+| `~/Library/Application Support/JARV1S/credentials` | Encrypted API keys, HA_TOKEN, OAuth access/refresh tokens |
 | `~/Library/Application Support/JARV1S Backups` | Dogfood backups (`task desktop:data:backup` → `daily`) |
 | `~/Library/Application Support/JARV1S/run` | Unix socket for bundled MongoDB |
 | `~/Library/Logs/JARV1S` | Supervisor logs + diagnostics export JSON (not a backup) |

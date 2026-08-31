@@ -9,7 +9,6 @@ from core.config import settings
 
 ALLOWED_LOOSE_TOOL_RETURNS = {
     "agents.list_tasks",  # Broad task inspection should not hide stored task fields.
-    "db.get_tool_data",  # Hidden persistence escape hatch.
     "system.diagnostics",  # Bounded human-readable key/value diagnostics.
 }
 

@@ -80,6 +80,15 @@
       optional_plugins: []
       hard_negative_plugins: []
 
+- id: compound_smart_home_scheduler_delayed_lights
+  source: field_regression
+  category: compound
+  turns:
+    - user: "Jarvis, could you turn the lights on in two minutes."
+      required_plugins: ["smart_home", "scheduler"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
 - id: single_google_maps_place_search
   source: synthetic_control
   category: single_tool
@@ -230,6 +239,15 @@
   turns:
     - user: "Turn the volume down a bit."
       required_plugins: ["system"]
+      optional_plugins: []
+      hard_negative_plugins: []
+
+- id: single_db_clear_history
+  source: field_regression
+  category: single_tool
+  turns:
+    - user: "Clear the conversation history."
+      required_plugins: ["db"]
       optional_plugins: []
       hard_negative_plugins: []
 

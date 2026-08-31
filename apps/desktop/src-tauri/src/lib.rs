@@ -2,6 +2,7 @@ mod call_activity;
 mod diagnostics;
 use call_activity::{get_call_activity, shared_call_activity, start_call_activity_monitor};
 mod host_prefs;
+mod calendar;
 mod location;
 mod logs;
 mod metadata;
@@ -9,6 +10,7 @@ mod paths;
 mod reachability;
 mod runtime;
 mod services;
+mod speaker_pair;
 mod supervisor;
 
 use location::get_device_location;
@@ -24,6 +26,7 @@ use reachability::{
     HostReachabilityStatus, SpeakerReachability,
 };
 use runtime::RuntimeLayout;
+use speaker_pair::{pair_speaker as pair_speaker_on_lan, PairSpeakerResult};
 use supervisor::{
     restart_supervisor, set_managed_local_llm_enabled, shared_supervisor, start_supervisor,
     stop_supervisor, HostLaunchState, SharedSupervisor,
@@ -123,6 +126,15 @@ async fn get_host_status(
 #[tauri::command]
 async fn check_speaker_reachability(node_id: String) -> Result<SpeakerReachability, String> {
     Ok(probe_speaker_reachability(&node_id).await)
+}
+
+#[tauri::command]
+async fn pair_speaker(
+    code: String,
+    backend_url: Option<String>,
+    node_id: Option<String>,
+) -> Result<PairSpeakerResult, String> {
+    Ok(pair_speaker_on_lan(code.trim(), backend_url.as_deref(), node_id.as_deref()).await)
 }
 
 #[tauri::command]
@@ -334,6 +346,7 @@ pub fn run() {
             open_external_url,
             get_host_status,
             check_speaker_reachability,
+            pair_speaker,
             enable_host_serve_cmd,
             enable_host_funnel_cmd,
             disable_host_funnel_cmd,

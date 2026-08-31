@@ -3,8 +3,20 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.deps.device_auth import require_owner_id
-from core.presence.models import AssignNodeRoomRequest, PresenceView, RevokeDeviceResponse
-from core.presence.service import assign_node_room, build_presence_view, revoke_presence_device
+from core.presence.models import (
+    AssignNodeRoomRequest,
+    DisconnectDeviceResponse,
+    PresenceView,
+    ResumeDeviceResponse,
+    RevokeDeviceResponse,
+)
+from core.presence.service import (
+    assign_node_room,
+    build_presence_view,
+    disconnect_presence_device,
+    resume_presence_device,
+    revoke_presence_device,
+)
 from plugins.smart_home.config import resolve_ha_connection
 from plugins.smart_home.ha_client import HomeAssistantClient, HomeAssistantError
 
@@ -43,6 +55,28 @@ async def revoke_device(
     if not revoked:
         raise HTTPException(status_code=404, detail="Device not found or already revoked")
     return RevokeDeviceResponse(revoked=True)
+
+
+@router.post("/devices/{device_id}/disconnect", response_model=DisconnectDeviceResponse)
+async def disconnect_device(
+    device_id: str,
+    owner_id: str = Depends(require_owner_id),
+) -> DisconnectDeviceResponse:
+    disconnected = await disconnect_presence_device(device_id, owner_id=owner_id)
+    if not disconnected:
+        raise HTTPException(status_code=404, detail="Device not found or already revoked")
+    return DisconnectDeviceResponse(disconnected=True)
+
+
+@router.post("/devices/{device_id}/resume", response_model=ResumeDeviceResponse)
+async def resume_device(
+    device_id: str,
+    owner_id: str = Depends(require_owner_id),
+) -> ResumeDeviceResponse:
+    resumed = await resume_presence_device(device_id, owner_id=owner_id)
+    if not resumed:
+        raise HTTPException(status_code=404, detail="Device not found or not disconnected")
+    return ResumeDeviceResponse(resumed=True)
 
 
 @router.patch("/nodes/{node_id}/room", response_model=PresenceView)

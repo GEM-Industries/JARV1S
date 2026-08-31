@@ -28,6 +28,9 @@ def test_parse_duration_supports_single_and_compound_units() -> None:
     parsed = parse_duration("30 minutes from now", now=NOW_UTC)
     assert parsed == NOW_UTC + timedelta(minutes=30)
 
+    parsed = parse_duration("for 2 hours", now=NOW_UTC)
+    assert parsed == NOW_UTC + timedelta(hours=2)
+
 
 def test_parse_duration_rejects_ambiguous_clock_times() -> None:
     assert parse_duration("5pm", now=NOW_UTC) is None

@@ -1166,3 +1166,54 @@ async def test_successful_audio_turn_defers_mode_to_playback_end() -> None:
     assert "orchestrator.turn_start" in processor.sources
     assert "orchestrator.turn_finally_release" not in processor.sources
     assert "orchestrator.turn_finally_no_audio" not in processor.sources
+    voice.send_tts_end_if_ready.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_text_publishes_tts_end_after_audio() -> None:
+    class Processor:
+        def __init__(self) -> None:
+            self.mode = VoiceMode.ACTIVE_IDLE
+            self.sources: list[str] = []
+
+        def set_mode(self, mode: VoiceMode, *, source: str) -> None:
+            self.mode = mode
+            self.sources.append(source)
+
+    processor = Processor()
+    session = SimpleNamespace(
+        context={},
+        owner_id="owner-1",
+        connection_id="conn-deliver-text",
+        presence=SimpleNamespace(node_id="node-1", location=None),
+        turn_lock=asyncio.Lock(),
+        current_run_task=None,
+        processor=processor,
+    )
+    fake_manager = _manager_stub(session, send_voice_response=AsyncMock())
+    orchestrator = AssistantOrchestrator.__new__(AssistantOrchestrator)
+    orchestrator.tts = MagicMock()
+
+    voice = AsyncMock()
+    voice.first_audio_sent = True
+    voice.start = AsyncMock()
+    voice.aclose = AsyncMock()
+    voice.on_stream = AsyncMock()
+    voice.send_tts_end_if_ready = AsyncMock()
+
+    with (
+        patch("api.websockets.connection.manager", fake_manager),
+        patch("core.turns.orchestrator.VoiceDelivery", return_value=voice),
+    ):
+        await orchestrator._deliver_text(
+            "conn-deliver-text",
+            "How did you sleep last night?",
+            None,
+            persist=False,
+        )
+
+    assert processor.mode == VoiceMode.ACTIVE_AI_TURN
+    assert "orchestrator.deliver_text" in processor.sources
+    assert "orchestrator.deliver_text_finally" not in processor.sources
+    voice.send_tts_end_if_ready.assert_awaited()
+    voice.aclose.assert_awaited()

@@ -161,6 +161,14 @@ EOF
 
 cp "$ROOT/apps/desktop/THIRD_PARTY_NOTICES.md" "$DEST/THIRD_PARTY_NOTICES.md"
 
+OAUTH_SRC="${JARVIS_PRODUCT_OAUTH_FILE:-$ROOT/apps/desktop/resources/product_oauth.json}"
+if [[ -f "$OAUTH_SRC" ]]; then
+  cp "$OAUTH_SRC" "$DEST/product_oauth.json"
+  echo "Bundled product OAuth identity"
+else
+  echo "No product_oauth.json — Google connect will use Advanced until CI supplies it"
+fi
+
 echo "Building Apple Speech helper..."
 HELPER_DEST="$ROOT/apps/desktop/resources/helpers"
 rm -rf "$HELPER_DEST/JARV1SSpeechHelper.app"

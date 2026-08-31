@@ -1,6 +1,6 @@
 [package]
 name = "jarvis-desktop"
-version = "0.5.0"
+version = "0.6.0"
 description = "JARV1S Host desktop shell"
 authors = ["JARV1S"]
 edition = "2021"
@@ -22,7 +22,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros", "process", "io-util"] }
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread", "macros", "process", "io-util", "net"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
@@ -43,3 +43,6 @@ coreaudio-sys = { version = "0.2.18", default-features = false, features = ["cor
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-core-location = "0.3.2"
+objc2-event-kit = "0.3.2"
+block2 = "0.6"
+dispatch2 = "0.3"

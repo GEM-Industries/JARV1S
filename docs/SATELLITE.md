@@ -11,7 +11,7 @@ A **thin Raspberry Pi voice node** that:
 - Announces stable **presence identity** (`node_id`, capabilities, optional room refs) at connect time.
 - Reports **`audio.playback_end`** when local playback has actually drained so the backend can leave `ACTIVE_AI_TURN`.
 
-It does **not** run wake word, VAD, STT, TTS, the agent, Home Assistant Assist, or local room routing. The brain stays centralized; the Pi is a mic/speaker/display transport.
+It does **not** run VAD, STT, TTS, the agent, Home Assistant Assist, or local room routing. Wake is Host-owned by default; optional on-device PASSIVE `edge_wakeword` is documented below. The brain stays centralized; the Pi is a mic/speaker transport.
 
 ```
 ┌─────────────────────┐         WebSocket /api/v1/ws          ┌──────────────────────────┐
@@ -33,6 +33,9 @@ V1 intentionally reuses the browser protocol (JSON envelopes, base64 audio) so o
 | `satellite/src/jarvis_satellite/audio.py` | ALSA (`arecord`/`aplay`) and optional PyAudio capture/playback |
 | `satellite/src/jarvis_satellite/identity.py` | Stable `node_id`, WebSocket URL + presence query params |
 | `satellite/src/jarvis_satellite/ticket.py` | `POST /api/v1/device-auth/ws-ticket` exchange |
+| `satellite/src/jarvis_satellite/http.py` | Shared JSON POST for pair and ticket |
+| `satellite/src/jarvis_satellite/pair.py` | Consume a Rooms code and merge-write token (`POST /device-auth/pair`) |
+| `satellite/src/jarvis_satellite/setup_server.py` | LAN `:8742` listener so the Host can pair without SSH |
 | `satellite/src/jarvis_satellite/backend_url.py` | URL guardrails (`ws://` vs `wss://`) |
 | `satellite/src/jarvis_satellite/notification_audio.py` | Local `chime` / `timer` / `alarm` assets plus tool cue WAV decoding |
 | `satellite/src/jarvis_satellite/led.py` | Optional ReSpeaker XVF3800 ring LED sync |
@@ -44,11 +47,12 @@ Operational Pi setup (ALSA devices, XVF3800 channel map, LED table) lives in [`s
 
 1. **Load config** — `~/.jarvis-satellite/config.toml`, overridden by `JARVIS_SATELLITE_*` env vars and CLI flags (`--config`, `--backend-url`, etc.).
 2. **Resolve `node_id`** — from config, or `identity.json` under `state_dir`, or `hostname-<uuid>`.
-3. **Start audio** — mic chunks enqueued; playback callbacks signal drain events.
-4. **Mint ticket** — if `device_token` is set, `POST /api/v1/device-auth/ws-ticket` on the HTTP origin derived from `backend_url`.
-5. **Connect** — `websockets.connect` to `backend_url` with presence query params (`timezone`, `node_id`, `capabilities`, optional location refs, `ticket`).
-6. **Run four tasks** until one exits: receive loop, mic loop (`user_audio`), heartbeat (`system.ping` / `system.pong`), playback-drained handler.
-7. **Reconnect** — exponential backoff (`reconnect_base_delay_s` → `reconnect_max_delay_s`). Close code **4001** (`NODE_REPLACED`) means another client claimed the same `node_id`; the process stops instead of reconnecting.
+3. **Setup listener** — bind LAN `:8742` only while unpaired, or after the Host rejects the device token (Reconnect). A successful pair SIGTERMs the process so systemd reloads the token; a healthy connection closes the port.
+4. **Start audio** — mic chunks enqueued; playback callbacks signal drain events.
+5. **Mint ticket** — if `device_token` is set, `POST /api/v1/device-auth/ws-ticket` on the HTTP origin derived from `backend_url`.
+6. **Connect** — `websockets.connect` to `backend_url` with presence query params (`timezone`, `node_id`, `capabilities`, optional location refs, `ticket`).
+7. **Run four tasks** until one exits: receive loop, mic loop (`user_audio`), heartbeat (`system.ping` / `system.pong`), playback-drained handler.
+8. **Reconnect** — exponential backoff (`reconnect_base_delay_s` → `reconnect_max_delay_s`). Close code **4001** (`NODE_REPLACED`) means another client claimed the same `node_id`; the process stops instead of reconnecting.
 
 Optional **`--activate`** sends `voice.activate` once after connect (testing only). Daily use relies on backend wake word over continuous PCM.
 
@@ -110,17 +114,33 @@ At connect, the satellite appends query parameters built by `build_presence_para
 
 The backend resolves `owner_id` from the device token server-side (`backend/api/websockets/presence.py`). Never send `owner_id` from the client.
 
-**Owner voice profile:** enroll once on the Host in **Settings → Voice & Audio**. The normalized embedding gallery lives under Host `DATA_DIR` and is applied to every live session for that owner — browser and satellite alike — via Stage 2b reload (no satellite restart, no edge enrollment). Until enrollment, Stage 1 wake still runs with accept-all Stage 2b. Satellites never record enrollment audio and never store a voiceprint locally.
+**Owner voice profile:** enroll once on the Host in **Settings → Voice & Audio** (five laptop clips). The same gallery is used on this Mac and room speakers. After a satellite comes online, capture **one “Jarvis”** from that mic (`POST /api/v1/voice/speaker-profile/nodes/{node_id}/sample`); it is stored as one vector in the same `npz` and scored with max cosine against enrollment plus that node. Satellites never run their own enrollment wizard and never persist PCM or a local voiceprint. Until the Mac profile exists, Stage 1 wake still runs with accept-all Stage 2b.
 
-Provision a room-speaker credential from the Host UI (**Rooms & devices → Add room speaker**). That mints once via `POST /api/v1/device-auth/satellites` and returns `device_token` plus a canonical `backend_ws_url` (`wss://…/api/v1/ws` when private access is ready). Paste both into the Pi config, restart the service, and wait until Rooms & devices shows the speaker online.
+Add or reconnect a room speaker from **Rooms & devices**. After the Pi is deployed and running, tap **Connect speaker** (or **Reconnect**). The Host reaches that speaker on the LAN (`:8742`) and consumes the setup code. Reconnect binds the code to the existing `node_id` and keeps its room. If LAN pair fails, Rooms shows a paste-able fallback for the Pi, or from this Mac / an AI agent in the repo:
 
-CLI recovery on the brain host:
+```bash
+task sat:pair -- CODE
+```
+
+Manual fallback on the Pi:
+
+```bash
+# First time (learns Host URL + token):
+jarvis-satellite pair CODE --url wss://<host>.ts.net:8443/api/v1/ws
+
+# Reconnect (token only; URL already in config):
+jarvis-satellite pair CODE
+```
+
+`pair` POSTs `/api/v1/device-auth/pair` with this device’s stable `node_id` (`identity.json`) and `client_surface=satellite`, then merge-writes `device_token` (and `backend_url` when `--url` is passed). Restart the speaker service if it is already running. Rooms shows the existing `node_id` online — it does not mint a Host-generated satellite id.
+
+CLI recovery (paste-TOML) on the brain host:
 
 ```bash
 task devices:satellite-token -- --node-id jarvis-satellite-1 --node-label "Bedroom Satellite"
 ```
 
-Add `device_token` to `~/.jarvis-satellite/config.toml` or `JARVIS_SATELLITE_DEVICE_TOKEN`. Prefer the UI-minted `backend_ws_url` over assembling a WebSocket URL by hand. Private access (Tailscale Serve) is enabled from **Settings → Availability** — see [MULTI_DEVICE_REACHABILITY.md](./deployment/MULTI_DEVICE_REACHABILITY.md).
+Add `device_token` (and `backend_url`) to `~/.jarvis-satellite/config.toml` or `JARVIS_SATELLITE_DEVICE_TOKEN`. Prefer Host **Connect speaker** over assembling a WebSocket URL by hand. Private access (Tailscale Serve) is enabled from **Settings → Availability** — see [MULTI_DEVICE_REACHABILITY.md](./deployment/MULTI_DEVICE_REACHABILITY.md).
 
 **Turn-origin delivery:** user-initiated voice turns answer on the `connection_id` / `node_id` that asked. Kitchen speaker questions are not spoken on the browser because it connected last. Mid-turn disconnect does not reroute elsewhere.
 
@@ -198,10 +218,12 @@ Config `room_id` / `room_name` (or HA refs) seed `location_ref` at connect; dura
 | `task sat:deploy` | Rsync to Pi, install systemd user unit, restart service |
 | `task sat:logs` | Tail `~/.jarvis-satellite/satellite.log` or user journal |
 | `task be:dev:lan` | Bind backend `0.0.0.0:8000` for LAN satellites (contrib) |
-| `task devices:satellite-token` | CLI recovery: mint durable device credential (prefer Rooms & devices UI) |
+| `task sat:pair -- CODE` | SSH fallback: pair from this Mac (detects the speaker login) |
+| `jarvis-satellite pair CODE [--url]` | On the speaker: consume a Rooms setup code; first pair writes URL + token |
+| `task devices:satellite-token` | CLI recovery: mint durable device credential (prefer Rooms **Connect speaker**) |
 | `task be:latency -- --url ws://<host>:8000/api/v1/ws --device-token …` | Smoke-test WS + turn path |
 
-Deploy example (CLI recovery; dogfood prefers Host UI mint + Serve `wss://`):
+Deploy example (CLI recovery; dogfood prefers Rooms **Connect speaker**):
 
 ```bash
 task devices:satellite-token -- --node-id jarvis-satellite-1 --node-label "Bedroom Satellite"
@@ -218,7 +240,7 @@ Env overrides: `SATELLITE_HOST`, `SATELLITE_USER`, `SATELLITE_BRAIN_HOST`, `SATE
 | Thin Python client, stable `node_id`, presence params | Binary WebSocket audio frames |
 | Continuous PCM + backend-owned wake (default) **or** on-device PASSIVE `edge_wakeword` with pre-roll flush | Satellite E2E eval rung in unified `task be:eval` |
 | `audio.tts_end` + `audio.playback_end` coordination | `task sat:doctor` guided setup |
-| Device token + WS ticket auth; Host mint/pairing UI | Room onboarding checklist automation (Pi Tailscale install, etc.) |
+| Device token + WS ticket auth; Rooms **Connect speaker** (LAN pair, CLI fallback) | Room onboarding checklist automation (Pi Tailscale install, etc.) |
 | Turn-origin user replies + proactive presence resolver | |
 | Rooms & devices UI (online/offline, assign room, revoke) | |
 | XVF3800 AEC reference routing (2-ch playback) | |

@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-06-11
-**Related:** `docs/proposals/built/INTEGRATION_SETUP.md`, `docs/proposals/GUIDED_CREDENTIAL_ACQUISITION.md`, `.cursor/rules/plugin-tool-conventions.mdc`, `backend/plugins/agents/`
+**Related:** `docs/proposals/LOCAL_FIRST_INTEGRATIONS.md`, `docs/proposals/built/INTEGRATION_SETUP.md`, `docs/proposals/GUIDED_CREDENTIAL_ACQUISITION.md`, `.cursor/rules/plugin-tool-conventions.mdc`, `backend/plugins/agents/`
 
 ---
 
@@ -92,7 +92,7 @@ The foundry's DESIGN step classifies auth and picks the local-custody path:
 | Auth scheme | Path |
 |---|---|
 | API key / personal token | Credential playbook (Tier 0 of Guided Credential Acquisition) — generated as part of the foundry run |
-| Google / Microsoft OAuth | Reuse the existing ecosystem apps via `AuthManager` + `register_aux_provider_scopes()` — new scopes, not new OAuth apps |
+| Google / Microsoft OAuth | Reuse the product client via `AuthManager` + per-capability scopes — new scopes, not a new OAuth app. Advanced remains the BYO client path. |
 | Other OAuth, device-code supported | Device authorization grant through `AuthManager` (pattern already proven by the MSAL flow) |
 | Other OAuth, no device flow | Honest fallback: Composio (if operator configured it) **or** the Tier-1/2 assisted OAuth-app-creation flow — user's choice, tradeoffs stated |
 

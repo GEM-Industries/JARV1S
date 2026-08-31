@@ -105,6 +105,26 @@ async def search_catalog(q: str = Query(default="", alias="q")) -> CatalogList:
     )
 
 
+@router.post("/calendar/macos", response_model=ActionResult)
+async def authorize_macos_calendar_route() -> ActionResult:
+    from plugins.calendar.providers.eventkit import (
+        authorize_macos_calendar,
+        host_calendar_configured,
+        macos_calendar_message,
+    )
+
+    if not host_calendar_configured():
+        raise HTTPException(status_code=400, detail="Calendar on this Mac is not available.")
+    try:
+        status = await authorize_macos_calendar()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return ActionResult(
+        success=status == "authorized",
+        message=macos_calendar_message(status),
+    )
+
+
 @router.get("/{name}", response_model=IntegrationView)
 async def get_integration(name: str) -> IntegrationView:
     item = await get_integration_lifecycle(name)

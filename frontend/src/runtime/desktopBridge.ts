@@ -74,12 +74,32 @@ export interface SpeakerReachability {
   last_seen?: string | null
 }
 
+export interface PairSpeakerResult {
+  ok: boolean
+  node_id?: string | null
+  detail?: string | null
+}
+
 export async function checkSpeakerReachability(
   nodeId: string,
 ): Promise<SpeakerReachability | null> {
   const invoke = await getInvoke()
   if (!invoke) return null
   return invoke<SpeakerReachability>('check_speaker_reachability', { nodeId })
+}
+
+export async function pairSpeakerFromHost(args: {
+  code: string
+  backendUrl?: string | null
+  nodeId?: string | null
+}): Promise<PairSpeakerResult | null> {
+  const invoke = await getInvoke()
+  if (!invoke) return null
+  return invoke<PairSpeakerResult>('pair_speaker', {
+    code: args.code,
+    backendUrl: args.backendUrl ?? null,
+    nodeId: args.nodeId ?? null,
+  })
 }
 
 export async function getHostStatus(): Promise<HostReachabilityStatus | null> {

@@ -11,7 +11,7 @@ from services.database.mongodb import mongodb
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
-VALID_STATUSES = {"running", "completed", "failed"}
+VALID_STATUSES = {"running", "completed", "failed", "cancelled"}
 
 
 class TaskEvent(BaseModel):
@@ -62,6 +62,9 @@ class TaskSummary(BaseModel):
     cost_usd: float | None
     created_at: datetime
     completed_at: datetime | None
+    title: str | None = None
+    work_id: str | None = None
+    worker_kind: str | None = None
 
 
 class TaskDetail(TaskSummary):
@@ -70,6 +73,7 @@ class TaskDetail(TaskSummary):
     max_budget_usd: float
     result: str | None
     session_id: str | None
+    external_run_id: str | None = None
     duration_ms: int | None = None
     num_turns: int | None = None
     usage: dict[str, object] | None = None
@@ -81,7 +85,7 @@ class TaskDetail(TaskSummary):
 
 @router.get("/", response_model=list[TaskSummary])
 async def list_tasks(
-    status: str | None = Query(default=None, description="Filter: running, completed, or failed"),
+    status: str | None = Query(default=None, description="Filter: running, completed, failed, or cancelled"),
     owner_id: str = Depends(require_owner_id),
 ):
     """List background agent tasks for the authenticated owner, ordered newest first."""

@@ -1,7 +1,8 @@
 # Multi-Provider Calendar
 
-**Status:** Implemented (Phase 9.5)
-**Date:** 2026-03-01
+**Status:** Implemented (Phase 9.5)  
+**Date:** 2026-03-01  
+**Updated:** EventKit on this Mac is a third read provider (V0 read/search). See [LOCAL_FIRST_INTEGRATIONS.md](../LOCAL_FIRST_INTEGRATIONS.md).
 
 ---
 
@@ -25,9 +26,9 @@ CalendarPlugin                   client.py
 └──────────────┘                 │   .get_event()           │
                                  │       │                   │
                                  │   ┌───┴────────────────┐  │
+                                 │   │ EventKitProvider    │  │
                                  │   │ GoogleProvider      │  │
                                  │   │ OutlookProvider     │  │
-                                 │   │ (future: iCloud)    │  │
                                  │   └────────────────────┘  │
                                  └──────────────────────────┘
 ```
@@ -42,7 +43,7 @@ A minimal async interface each backend implements:
 
 ```python
 class CalendarProvider(Protocol):
-    name: str  # "google" | "microsoft"
+    name: str  # "macos" | "google" | "microsoft"
 
     async def list_events(self, time_min: str, time_max: str, max_results: int = 50) -> List[CalendarEvent]
     async def get_event(self, event_id: str) -> CalendarEvent
@@ -99,6 +100,10 @@ Microsoft Graph API (`https://graph.microsoft.com/v1.0/me`). Same async `httpx` 
 - **Endpoints:** `/me/calendars` (list), `/me/calendars/{id}/events`, plus direct event CRUD routes.
 - **Scope:** `Calendars.ReadWrite` (single scope covers everything including calendar discovery).
 
+### EventKitProvider
+
+Host loopback over EventKit. Read/search only in V0. No provider OAuth; macOS Calendar permission is the grant. See [LOCAL_FIRST_INTEGRATIONS.md](../LOCAL_FIRST_INTEGRATIONS.md).
+
 ### Future Providers
 
 iCloud (via CalDAV + `caldav` library), CalDAV self-hosted, etc. Each is a new `CalendarProvider` implementation — no changes to the plugin or unified client.
@@ -123,13 +128,13 @@ iCloud (via CalDAV + `caldav` library), CalDAV self-hosted, etc. Each is a new `
 
 The plugin now injects `UnifiedCalendarClient`, exposes account-aware read/write tools, and returns events stamped with `account` so follow-up mutations can route back to the provider that produced the event.
 
-Provider-specific parsing and API calls live in `providers/google.py` and `providers/outlook.py`; the plugin layer deals in normalized calendar models.
+Provider-specific parsing and API calls live in `providers/google.py`, `providers/outlook.py`, and `providers/eventkit.py`; the plugin layer deals in normalized calendar models.
 
 ---
 
 ## Setup UX
 
-Calendar uses the shared in-UI OAuth flow. Google and Microsoft provider scopes are aggregated by the Integration Gate; when both are connected, reads fan out across both providers. A single connected provider still works.
+Calendar uses the shared Apps connection flow. EventKit is the Mac default for read/search. Google and Microsoft use Direct or Advanced OAuth; when both are connected, reads fan out. A single connected provider still works.
 
 ---
 

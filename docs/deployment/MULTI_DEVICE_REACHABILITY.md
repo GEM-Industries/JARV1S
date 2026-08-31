@@ -18,7 +18,7 @@ Reachability gets clients to the backend. **Per-device WebSocket auth** is requi
 
 Each remote client needs:
 1. A durable **device token**
-   - **Room speaker:** **Rooms & devices → Add room speaker** (mints once via `POST /api/v1/device-auth/satellites` and shows a copyable `backend_ws_url` + token). CLI recovery: `task devices:satellite-token`
+   - **Room speaker:** **Rooms & devices → Connect speaker**. The Host pairs over the LAN; if that fails, Rooms shows a paste-able `jarvis-satellite pair` command. CLI recovery: `task devices:satellite-token`
    - **Browser/phone:** pair from **Rooms & devices** or **Settings → Availability** (QR / code). CLI recovery: `task devices:pair-code`
 2. A short-lived **WS ticket** minted via `POST /api/v1/device-auth/ws-ticket` before each WebSocket connect (clients do this automatically)
 
@@ -61,7 +61,7 @@ Prefer **Tailscale Serve** so browsers get trusted HTTPS without exposing a publ
 backend_url = "wss://jarvis-brain.example.ts.net:8443/api/v1/ws"
 ```
 
-When you mint a room speaker from **Rooms & devices**, the Host returns this `backend_ws_url` for you (preferring the Serve origin when private access is ready). Paste it into the Pi config with the one-time `device_token`.
+When you add a room speaker from **Rooms & devices**, tap **Connect speaker**. The Host sends the setup code (and this Serve URL) to the speaker on the LAN. If LAN pair fails, Rooms shows a paste-able command that includes the Serve URL on first setup.
 
 Tailnet IPs live in `100.64.0.0/10` (CGNAT). The satellite client rejects plaintext `ws://` to tailnet targets unless `JARVIS_SATELLITE_ALLOW_INSECURE_WS=1` is set deliberately.
 
@@ -84,13 +84,13 @@ backend_url = "ws://MacBook-Pro.local:8000/api/v1/ws"
 
 Use a raw `192.168.x.x` address only when mDNS is unavailable and the router has a DHCP reservation for the brain host.
 
-4. Prefer minting from **Rooms & devices → Add room speaker** on a running Host. CLI recovery on the brain host:
+4. Prefer pairing from **Rooms & devices → Connect speaker** on a running Host. CLI recovery on the brain host:
 
 ```bash
 task devices:satellite-token -- --node-id jarvis-satellite-1 --node-label "Bedroom Satellite"
 ```
 
-5. Add `device_token` (and the returned `backend_ws_url` when using the API/UI) to satellite config, then deploy:
+5. CLI recovery: add `device_token` (and the returned `backend_ws_url`) to satellite config, then deploy. Host **Connect speaker** (or `jarvis-satellite pair`) does this merge-write for you.
 
 ```bash
 task sat:deploy

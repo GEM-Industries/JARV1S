@@ -14,7 +14,7 @@ Weng defines a **harness** as the system around a base model that orchestrates e
 
 | Weng harness concern | JARV1S surface today |
 | :--- | :--- |
-| Agent loop | `JarvisAgent` + CodeAct (`generate → execute → observe → repeat`) via `turns/execution.py` |
+| Agent loop | `JarvisAgent` structured capability-call loop (`generate → execute → observe → repeat`) via `turns/execution.py` |
 | Tools / action interface | `jarvis.*` capabilities, `@tool` plugins, MCP adapters, `CapabilityDispatcher` |
 | Context construction | `PromptBuilder`, ToolRouter progressive disclosure, `fit_to_budget()`, history projection |
 | Persistent state | MongoDB conversations/tasks/approvals/triggers; full tool output retained while LLM sees previews |
@@ -38,11 +38,11 @@ JARV1S’s existing stance already matches the article’s strongest product les
 **For JARV1S:**
 
 - Prefer extending **capabilities, evidence contracts, consent, and durable state** over new special-case orchestration paths.
-- Keep CodeAct as the composition language for rare multi-step work; do not grow hard-coded multi-tool workflows into the agent loop.
+- Keep the capability-call loop as the composition language for rare multi-step work; do not grow hard-coded multi-tool workflows into the agent loop.
 - When adding a feature, ask: *does this belong in a plugin domain contract, durable state, or the harness gate?* If it only “works” as a one-off prompt or orchestration branch, it is probably the wrong layer.
 - Standardize protocols at boundaries we already own: capability catalog, dispatcher ledger, ToolResult/UI side channel, trigger delivery — analogous to industry tool/interface standardization in the article.
 
-**Do not:** invent a second agent architecture beside CodeAct/MCP, or encode every user routine as harness code when protocols/automations already exist as user-owned workflows.
+**Do not:** invent a second agent architecture beside `jarvis.*` / MCP, or encode every user routine as harness code when protocols/automations already exist as user-owned workflows.
 
 ---
 
@@ -181,7 +181,7 @@ When shipping long-horizon or proactive features, assume these failure modes unl
 
 | Failure mode | JARV1S countermeasure direction |
 | :--- | :--- |
-| Bias toward training-data defaults | Domain plugins own truth (IDs, scopes, provider capabilities); don’t let CodeAct invent domain semantics |
+| Bias toward training-data defaults | Domain plugins own truth (IDs, scopes, provider capabilities); don’t let the model invent domain semantics |
 | Implementation drift under pressure | Evidence contracts; refuse “success” without provider/store confirmation |
 | Memory/context degradation | Durable artifacts + recall; compaction that doesn’t silently delete the only copy of critical state |
 | Over-optimism / “eureka-ing” | Read coverage axes; mutation receipts; evals that punish false completion |
@@ -243,7 +243,7 @@ Those remain research. Our near-term RSI-shaped path is the one Weng predicts fo
 
 ## Related JARV1S docs
 
-- [`PLUGIN_ARCHITECTURE.md`](../PLUGIN_ARCHITECTURE.md) — CodeAct contract, harness responsibilities, Improvement Contract (normative).
+- [`PLUGIN_ARCHITECTURE.md`](../PLUGIN_ARCHITECTURE.md) — capability contract, harness responsibilities, Improvement Contract (normative).
 - [`ARCHITECTURE.md`](../ARCHITECTURE.md) — turn pipeline, context budget, persistence.
 - [`BACKGROUND_AGENTS.md`](../BACKGROUND_AGENTS.md) — subagent process model.
 - [`VISION.md`](../VISION.md) — latency, triage, two-tier memory, starvation-free concurrency.

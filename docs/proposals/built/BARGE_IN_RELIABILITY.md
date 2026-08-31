@@ -81,7 +81,7 @@ Relevant settings: `VoiceConfig.barge_in_min_frames`, `barge_in_candidate_min_de
 
 When an owner profile exists, ambient barge-in requires a positive speaker match (or wake/control). Identity is not addressivity: DDSD remains a later gate for “talking to Jarvis vs talking to someone else.”
 
-Echo caveat: standard TTS usually fails owner match, which helps self-cutoff. Voice-cloned TTS of the owner can still match; do not treat speaker score as an AEC replacement. Speaker scoring uses onset-forward PCM so TTS-contaminated pre-roll is excluded. Short VAD endpoints during duplex audio must not permanently discard the candidate before max-wait.
+Echo caveat: standard TTS usually fails owner match, which helps self-cutoff. Voice-cloned TTS of the owner can still match; do not treat speaker score as an AEC replacement. Speaker scoring uses the first 0.8s of onset-forward PCM (max cosine vs enrollment plus the optional per-node room vector) so the 1.5s STT wait does not mix TTS into the embedding. Empty or sub-0.4s PCM is unscorable, not a mismatch. Short VAD endpoints during duplex audio must not permanently discard the candidate before max-wait.
 
 ---
 
@@ -90,7 +90,7 @@ Echo caveat: standard TTS usually fails owner match, which helps self-cutoff. Vo
 - `backend/core/voice/processor.py` — emits `BARGE_IN_CANDIDATE_STARTED`; speech-onset peek for speaker scoring.
 - `backend/core/voice/speaker_verifier.py` — session-scoped `EnrolledSpeakerVerifier` shared by wake and barge-in, backed by a process-shared immutable extractor.
 - `backend/core/voice/wakeword/speaker_verifier.py` — thin wake Stage 2b adapter.
-- `backend/core/voice/turn_admission.py` — shared pre-agent admission policy (`decide_barge_in_admission`, fail-open `decide_followup_admission`, `Directedness` seam for future DDSD).
+- `backend/core/voice/turn_admission.py` — shared pre-agent admission policy (`decide_barge_in_admission`; `decide_followup_admission` owner-gates when enrolled, fail-opens when not enrolled or unscorable; `Directedness` seam for future DDSD).
 - `backend/api/websockets/handlers.py` — candidate lifecycle, age-gated speaker score + one rescore, commit/suppress telemetry + retract; stamps `admission_source`/`admission_reason` on wake/barge-in/PTT/follow-up.
 - `backend/api/websockets/connection.py` — session candidate + shared verifier state; `VoiceInputTurn.admission_*` fields.
 - `backend/core/voice/local_commands.py` — exact local controls and wake-prefix normalization.
@@ -106,14 +106,14 @@ Echo caveat: standard TTS usually fails owner match, which helps self-cutoff. Vo
 - `backend/tests/test_voice_processor.py`
 - `backend/tests/test_local_voice_commands.py`
 - Existing voice-turn coverage in `backend/tests/test_voice_turn_state.py`
-- Speaker-only calibration: `uv run python tools/eval_wakeword.py --speaker-only --tts-echo ...`
+- Speaker scoreboard: `uv run python tools/eval_barge_in_speaker.py --owner-id geoff`
 
 ---
 
 ## Follow-Ups
 
 - Acoustic hygiene / AEC validation — resolved for first-room V1 by routing satellite TTS as 2-channel playback so XVF3800 channel 0 carries the AEC reference.
-- Shared turn-admission seam — **shipped**: barge-in is the enforced admission context; `ACTIVE_IDLE` follow-up routes through the same module fail-open (no owner allow-list). `Directedness` is the plug-in point for DDSD.
+- Shared turn-admission seam — **shipped**: barge-in is the enforced admission context; `ACTIVE_IDLE` follow-up is owner-gated when a speaker profile exists (fail-open until enrollment, and fail-open when the clip is too short to score). `Directedness` is the plug-in point for DDSD.
 - DDSD directedness gate — classify whether speech is meant for JARV1S vs side conversation and populate `Directedness` for follow-up (then barge-in when latency allows). Identity ≠ addressivity; multi-user enrollment is separate.
 - Voice/agent eval harness — add repeatable regression coverage for barge-in, wakeword tuning, routing, and provider swaps.
 

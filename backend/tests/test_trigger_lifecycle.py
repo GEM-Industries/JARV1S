@@ -72,6 +72,26 @@ async def test_finite_pause_materializes_first_occurrence_after_pause(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_indefinite_pause_does_not_materialize(monkeypatch) -> None:
+    from core.triggers.lifecycle import INDEFINITE_PAUSE
+
+    rule = _rule().model_copy(
+        update={
+            "origin": _rule().origin.model_copy(update={"recurrence": "daily"}),
+        }
+    )
+    materialize = AsyncMock()
+    monkeypatch.setattr(
+        "core.triggers.service.trigger_service.materialize_recurring_occurrence",
+        materialize,
+    )
+
+    await materialize_after_pause(rule, INDEFINITE_PAUSE)
+
+    materialize.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_patch_rule_lifecycle_cancels_open_instances_on_disable(monkeypatch) -> None:
     collection = SimpleNamespace(
         find_one=AsyncMock(return_value=_rule().model_dump(mode="python")),

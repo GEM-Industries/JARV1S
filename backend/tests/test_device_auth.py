@@ -7,6 +7,7 @@ import pytest
 
 from core.auth.device_models import DeviceLocation, PairConsumeRequest
 from core.auth.device_service import (
+    DeviceDisconnectedError,
     InvalidDeviceTokenError,
     InvalidPairingCodeError,
     InvalidWsTicketError,
@@ -108,6 +109,8 @@ class InMemoryCollection:
     def _apply_update(self, doc: dict, update: dict) -> None:
         for key, value in update.get("$set", {}).items():
             doc[key] = value
+        for key in update.get("$unset", {}):
+            doc.pop(key, None)
         for key, value in update.get("$setOnInsert", {}).items():
             doc.setdefault(key, value)
         for key, delta in update.get("$inc", {}).items():
@@ -122,12 +125,12 @@ class InMemoryCollection:
         return doc.get(key) == value
 
     async def update_one(self, query: dict, update: dict):
-        doc = await self.find_one({k: v for k, v in query.items() if not isinstance(v, dict)})
-        if not doc:
-            return SimpleNamespace(modified_count=0)
-        for key, value in update.get("$set", {}).items():
-            doc[key] = value
-        return SimpleNamespace(modified_count=1)
+        for doc in self.docs:
+            if not self._query_matches(doc, query):
+                continue
+            self._apply_update(doc, update)
+            return SimpleNamespace(modified_count=1)
+        return SimpleNamespace(modified_count=0)
 
     async def update_many(self, query: dict, update: dict):
         modified = 0
@@ -203,6 +206,41 @@ async def test_pairing_code_consume_once(mock_device_db):
     assert first.owner_id == "owner-1"
     with pytest.raises(InvalidPairingCodeError):
         await device_auth_service.consume_pairing_code(request, client_key="127.0.0.1")
+
+
+@pytest.mark.asyncio
+async def test_pairing_code_bound_to_node_keeps_room(mock_device_db):
+    issued = await device_auth_service.issue_pairing_code(
+        owner_id="owner-1",
+        node_id="bedroom-pi",
+        location=DeviceLocation(
+            provider="home_assistant",
+            room_name="Bedroom",
+            ha_area_id="bedroom",
+        ),
+    )
+    with pytest.raises(InvalidPairingCodeError):
+        await device_auth_service.consume_pairing_code(
+            PairConsumeRequest(
+                code=issued.code,
+                node_id="kitchen-pi",
+                client_surface="satellite",
+            ),
+            client_key="127.0.0.1",
+        )
+    result = await device_auth_service.consume_pairing_code(
+        PairConsumeRequest(
+            code=issued.code,
+            node_id="bedroom-pi",
+            client_surface="satellite",
+        ),
+        client_key="127.0.0.1",
+    )
+    devices = await device_auth_service.list_devices(owner_id="owner-1")
+    paired = next(device for device in devices if device.device_id == result.device_id)
+    assert paired.node_id == "bedroom-pi"
+    assert paired.location.room_name == "Bedroom"
+    assert paired.location.ha_area_id == "bedroom"
 
 
 @pytest.mark.asyncio
@@ -351,6 +389,41 @@ async def test_revoked_device_rejected(mock_device_db):
     await device_auth_service.revoke_device(summary.device_id)
     with pytest.raises(InvalidDeviceTokenError):
         await device_auth_service.mint_ws_ticket(token)
+
+
+@pytest.mark.asyncio
+async def test_disconnected_device_cannot_mint_ticket_until_resume(mock_device_db):
+    summary, token = await device_auth_service.create_device_credential(
+        owner_id="owner-1",
+        node_id="bedroom-sat",
+        kind="satellite",
+    )
+    assert await device_auth_service.disconnect_device(summary.device_id) is True
+    listed = await device_auth_service.list_devices(owner_id="owner-1")
+    held = next(item for item in listed if item.device_id == summary.device_id)
+    assert held.revoked_at is None
+    assert held.disconnected_at is not None
+
+    with pytest.raises(DeviceDisconnectedError):
+        await device_auth_service.mint_ws_ticket(token)
+
+    assert await device_auth_service.resume_device(summary.device_id) is True
+    ticket = await device_auth_service.mint_ws_ticket(token)
+    auth = await device_auth_service.authenticate_ws_ticket(ticket.ticket)
+    assert auth.device_id == summary.device_id
+
+
+@pytest.mark.asyncio
+async def test_disconnected_device_rejects_in_flight_ticket(mock_device_db):
+    summary, token = await device_auth_service.create_device_credential(
+        owner_id="owner-1",
+        node_id="bedroom-sat",
+        kind="satellite",
+    )
+    ticket = await device_auth_service.mint_ws_ticket(token)
+    assert await device_auth_service.disconnect_device(summary.device_id) is True
+    with pytest.raises(InvalidWsTicketError, match="disconnected"):
+        await device_auth_service.authenticate_ws_ticket(ticket.ticket)
 
 
 @pytest.mark.asyncio

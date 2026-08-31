@@ -389,7 +389,7 @@ async def test_jarvis_background_approval_pauses_and_resumes(monkeypatch, fake_p
     )
     monkeypatch.setattr(plugin, "_prepare_task", fake_prepare_task)
     monkeypatch.setattr(
-        agents_mod._PromptBuilder,
+        agents_mod,
         "build_background_context",
         AsyncMock(return_value={}),
     )
@@ -494,7 +494,7 @@ async def test_dispatch_inprocess_captures_reasoning_trace(monkeypatch):
     )
     monkeypatch.setattr(plugin, "_prepare_task", fake_prepare_task)
     monkeypatch.setattr(
-        agents_mod._PromptBuilder,
+        agents_mod,
         "build_background_context",
         AsyncMock(return_value={}),
     )
@@ -581,7 +581,7 @@ async def test_dispatch_inprocess_forwards_ui_updates(monkeypatch):
     )
     monkeypatch.setattr(plugin, "_prepare_task", fake_prepare_task)
     monkeypatch.setattr(
-        agents_mod._PromptBuilder,
+        agents_mod,
         "build_background_context",
         AsyncMock(return_value={}),
     )

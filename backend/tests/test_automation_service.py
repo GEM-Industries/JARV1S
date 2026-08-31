@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pymongo.errors import DuplicateKeyError  # type: ignore[import-not-found]
 
+from core.operations.projection import ManagedSetup
 from core.triggers.models import TriggerRule
 from services.automation import (
     AutomationService,
@@ -836,3 +837,146 @@ async def test_list_available_triggers_includes_condition_fields(monkeypatch) ->
 
     assert len(results) == 1
     assert results[0].condition_fields == [{"field": "title", "type": "string"}]
+
+
+_AUTOMATION_HOLD = (
+    "External automations are globally paused. Matching rules stay active "
+    "but will not fire. Call automations.resume_all."
+)
+
+
+@pytest.mark.asyncio
+async def test_test_rule_prefixes_hold_and_still_lists_matches(monkeypatch, tool_context):
+    monkeypatch.setattr(
+        "services.automation.automation_service.test_rule",
+        AsyncMock(
+            return_value=[
+                {
+                    "title": "Standup",
+                    "fire_time": "2026-08-20T08:24:00+00:00",
+                    "seconds_until_fire": 660,
+                    "already_fired": False,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "services.automation.automation_service.pause_observation",
+        lambda now=None: _AUTOMATION_HOLD,
+    )
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(
+                find_one=AsyncMock(return_value=_trigger_rule_doc({"id": "rule-1"})),
+            )
+        )
+        with tool_context(timezone="UTC"):
+            result = await AutomationsPlugin().test_rule("rule-1")
+
+    assert result.startswith(_AUTOMATION_HOLD)
+    assert "Standup" in result
+    assert "This rule would fire for 1 event(s):" in result
+
+
+def _automation_setup(rule_id: str, name: str) -> ManagedSetup:
+    return ManagedSetup(
+        resource_ref=f"automations:automation:{rule_id}",
+        resource_id=rule_id,
+        setup_type="automation",
+        managed_by="automations",
+        kind="automation",
+        name=name,
+        rule_id=rule_id,
+        status="active",
+        trigger_label="gmail.new_email",
+        supported_actions=["pause", "resume", "delete"],
+        edit_tool="automations.update_rule",
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_rule_by_unique_name_uses_resolved_id(monkeypatch) -> None:
+    row = _automation_setup("rule-helen", "Email from Helen McCosker")
+    delete_rule = AsyncMock(return_value=object())
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=row))
+    monkeypatch.setattr("plugins.automations.delete_automation_rule", delete_rule)
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+        )
+        result = await AutomationsPlugin().delete_rule("Email from Helen McCosker")
+
+    assert "deleted" in result
+    delete_rule.assert_awaited_once_with("geoff", "rule-helen")
+
+
+@pytest.mark.asyncio
+async def test_delete_rule_ambiguous_name_does_not_write(monkeypatch) -> None:
+    rows = [
+        _automation_setup("rule-helen", "Email from Helen McCosker"),
+        _automation_setup("rule-helen-cal", "Helen calendar digest"),
+    ]
+    delete_rule = AsyncMock()
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=rows))
+    monkeypatch.setattr("plugins.automations.delete_automation_rule", delete_rule)
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+        )
+        result = await AutomationsPlugin().delete_rule("Helen")
+
+    assert "Ambiguous automation" in result
+    assert "resource_ref" in result
+    assert "setups.find" not in result
+    delete_rule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_rule_unknown_name_does_not_point_at_setups_find(monkeypatch) -> None:
+    delete_rule = AsyncMock()
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=None))
+    monkeypatch.setattr("plugins.automations.delete_automation_rule", delete_rule)
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+        )
+        result = await AutomationsPlugin().delete_rule("Email from Helen McCosker")
+
+    assert "No automation matching" in result
+    assert "setups.find" not in result
+    delete_rule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_rule_by_unique_name_uses_resolved_id(monkeypatch) -> None:
+    row = _automation_setup("rule-helen", "Email from Helen McCosker")
+    existing = _trigger_rule_doc({**_rule(), "id": "rule-helen", "name": row.name})
+    updated: dict = {}
+
+    async def update_one(_query, update):
+        updated.update(update["$set"])
+        return SimpleNamespace(matched_count=1)
+
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=row))
+    patch_lifecycle = AsyncMock()
+    monkeypatch.setattr("plugins.automations.patch_rule_lifecycle", patch_lifecycle)
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(
+                find_one=AsyncMock(side_effect=[None, existing]),
+                update_one=AsyncMock(side_effect=update_one),
+            )
+        )
+        result = await AutomationsPlugin().update_rule(
+            rule_id="Email from Helen McCosker",
+            enabled=False,
+        )
+
+    assert result == "Rule 'rule-helen' updated."
+    patch_lifecycle.assert_awaited_once()
+    mock_mongo.db.trigger_rules.update_one.assert_not_awaited()

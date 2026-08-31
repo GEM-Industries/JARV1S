@@ -11,6 +11,7 @@ from core.activity.service import RUN_STATUSES
 from core.operations.models import OperationRunDetail
 from core.operations.service import get_trigger_run_detail
 from core.scheduling import coerce_datetime_or_none
+from core.triggers.lifecycle import display_paused_until
 from core.triggers.models import TriggerRule
 from core.triggers.priority import AttentionLevel
 from core.triggers.vocabulary import humanize_failure_reason
@@ -269,7 +270,7 @@ async def list_automation_definitions(owner_id: str) -> list[AutomationDefinitio
                     "offset": rule.origin.offset_minutes,
                 },
                 decision=rule.action.decision,
-                paused_until=rule.paused_until,
+                paused_until=display_paused_until(rule.paused_until),
                 created_at=rule.created_at,
                 last_run_at=last_run_at,
                 run_count=run_count,
@@ -433,7 +434,7 @@ async def list_setups(
                 last_outcome=str(latest_doc.get("status")) if latest_doc else None,
                 latest_instance_id=str(latest_doc.get("id")) if latest_doc and latest_doc.get("id") else None,
                 decision=rule.action.decision,
-                paused_until=rule.paused_until,
+                paused_until=display_paused_until(rule.paused_until),
                 origin=rule.origin.model_dump(mode="json", exclude_none=True),
                 attention=rule.attention.model_dump(mode="json", exclude_none=True),
                 delivery=rule.delivery.model_dump(mode="json", exclude_none=True),

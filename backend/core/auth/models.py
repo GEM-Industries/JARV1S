@@ -4,8 +4,8 @@ OAuth credential models for bespoke integrations.
 ProviderConfig holds the OAuth app credentials (client_id, client_secret) for
 a provider — one document per provider in `oauth_provider_configs`.
 
-OAuthToken holds the issued token for a user account — one document per
-(provider, account_email) pair in `oauth_tokens`.
+OAuthToken is the in-memory grant. Mongo `oauth_tokens` keeps one metadata
+document per provider; access and refresh tokens live in CredentialStore.
 
 Keeping app credentials separate from tokens means changing the registered
 OAuth app never requires touching token documents.
@@ -22,15 +22,15 @@ def _utcnow() -> datetime:
 
 
 class ProviderConfig(BaseModel):
-    provider: str                        # "google" | "microsoft"
+    provider: str                        # "google" | "microsoft" | "spotify"
     client_id: str
-    client_secret: Optional[str] = None  # None for Microsoft public client (Device Code)
+    client_secret: Optional[str] = None  # None for public clients (Microsoft, Spotify PKCE)
     token_uri: str
     auth_uri: str
 
 
 class OAuthToken(BaseModel):
-    provider: str                        # "google" | "microsoft"
+    provider: str                        # "google" | "microsoft" | "spotify"
     account_email: str                   # "user@gmail.com"
     access_token: str
     refresh_token: str

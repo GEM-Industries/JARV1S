@@ -1,6 +1,6 @@
 # Release Key Custody
 
-Private beta distribution depends on two long-lived secrets.
+Private beta distribution depends on Apple signing, updater signing, and the official Google OAuth identity.
 
 ## Apple Developer ID
 
@@ -15,6 +15,12 @@ Private beta distribution depends on two long-lived secrets.
 - Private key lives only in `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PATH`
 - Losing the private key strands installed clients; back it up offline before the first private-beta invite
 - Do not commit the private key
+
+## Official Google OAuth identity
+
+- Source: gitignored [`apps/desktop/resources/product_oauth.json`](../../apps/desktop/resources/product_oauth.json) (see `.example`)
+- The Host passes its path as `JARVIS_PRODUCT_OAUTH`; do not put client id/secret in `.env`
+- Forks without that file use Apps → Advanced
 
 ## Release checklist
 

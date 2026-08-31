@@ -343,17 +343,22 @@ async def pause_checkin_plan(
     *,
     until: datetime | None = None,
 ) -> HabitCheckinPlan:
-    from core.triggers.lifecycle import cancel_open_instances_for_rule, materialize_after_pause
+    from core.triggers.lifecycle import (
+        cancel_open_instances_for_rule,
+        materialize_after_pause,
+        resolved_pause_until,
+    )
     from core.triggers.models import TriggerRule
 
     plan = await get_checkin_plan(owner_id, plan_id)
     if plan is None:
         raise ValueError("Check-in plan not found")
     now = datetime.now(timezone.utc)
+    paused_until = resolved_pause_until(until)
     if plan.rule_id:
         update: dict[str, object] = {
-            "enabled": until is not None,
-            "paused_until": until,
+            "enabled": True,
+            "paused_until": paused_until,
             "updated_at": now,
         }
         await mongodb.db.trigger_rules.update_one(
@@ -365,24 +370,23 @@ async def pause_checkin_plan(
             plan.rule_id,
             reason="parent_rule_paused_or_disabled",
         )
-        if until is not None:
-            rule_doc = await mongodb.db.trigger_rules.find_one(
-                {"owner_id": owner_id, "id": plan.rule_id},
-                {"_id": 0},
+        rule_doc = await mongodb.db.trigger_rules.find_one(
+            {"owner_id": owner_id, "id": plan.rule_id},
+            {"_id": 0},
+        )
+        if rule_doc:
+            await materialize_after_pause(
+                TriggerRule.model_validate(rule_doc),
+                paused_until,
             )
-            if rule_doc:
-                await materialize_after_pause(
-                    TriggerRule.model_validate(rule_doc),
-                    until,
-                )
-    plan.active = until is not None
-    plan.paused_until = until
+    plan.active = True
+    plan.paused_until = paused_until
     plan.updated_at = now
     await mongodb.db[HABIT_CHECKIN_PLANS_COLLECTION].update_one(
         {"owner_id": owner_id, "id": plan.id},
         {"$set": {
-            "active": plan.active,
-            "paused_until": until,
+            "active": True,
+            "paused_until": paused_until,
             "updated_at": now,
         }},
     )

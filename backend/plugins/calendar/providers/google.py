@@ -222,9 +222,10 @@ class GoogleProvider(_ProviderBase):
 
     name: str = "google"
 
-    def __init__(self, client: httpx.AsyncClient, account: Optional[str] = None):
-        super().__init__(client, account)
+    def __init__(self, client: httpx.AsyncClient):
+        super().__init__(client)
         self._calendar_ids_cache: Optional[List[str]] = None
+        self._calendar_names: Dict[str, str] = {}
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         resp = await self._client.request(method, url, **kwargs)
@@ -247,12 +248,15 @@ class GoogleProvider(_ProviderBase):
             resp = await self._request(
                 "GET",
                 "/users/me/calendarList",
-                params={"fields": "items(id,selected)"},
+                params={"fields": "items(id,selected,summary)"},
             )
             items = resp.json().get("items", [])
-            self._calendar_ids_cache = [
-                item["id"] for item in items if item.get("selected", True)
-            ]
+            self._calendar_names = {
+                item["id"]: (item.get("summary") or item["id"])
+                for item in items
+                if item.get("id") and item.get("selected", True)
+            }
+            self._calendar_ids_cache = list(self._calendar_names)
             logger.info("Discovered %d Google calendars", len(self._calendar_ids_cache))
             return self._calendar_ids_cache
         except httpx.HTTPStatusError as e:
@@ -263,12 +267,16 @@ class GoogleProvider(_ProviderBase):
                 )
             else:
                 logger.warning("calendarList failed (%s), falling back to primary", e)
-            return ["primary"]
+            self._calendar_names = {"primary": "primary"}
+            self._calendar_ids_cache = ["primary"]
+            return self._calendar_ids_cache
         except NeedsReauth:
             raise
         except Exception as e:
             logger.warning("calendarList failed, falling back to primary: %s", e)
-            return ["primary"]
+            self._calendar_names = {"primary": "primary"}
+            self._calendar_ids_cache = ["primary"]
+            return self._calendar_ids_cache
 
     async def list_events(
         self,
@@ -292,7 +300,12 @@ class GoogleProvider(_ProviderBase):
                     "fields": _EVENT_FIELDS,
                 },
             )
-            return [_parse_event(i) for i in resp.json().get("items", []) if _is_relevant(i)]
+            title = self._calendar_names.get(cal_id)
+            return [
+                self._stamp(_parse_event(i), calendar=title)
+                for i in resp.json().get("items", [])
+                if _is_relevant(i)
+            ]
 
         results = await asyncio.gather(
             *[_query(cid) for cid in cal_ids], return_exceptions=True,
@@ -313,7 +326,7 @@ class GoogleProvider(_ProviderBase):
         unique = [ev for ev in all_events if ev.id not in seen and not seen.add(ev.id)]
         unique.sort(key=lambda e: e.start)
         return ProviderEventBatch(
-            events=[self._stamp(e) for e in unique[:max_results]],
+            events=unique[:max_results],
             incomplete=bool(errors),
         )
 
@@ -334,7 +347,10 @@ class GoogleProvider(_ProviderBase):
                     f"/calendars/{_urlquote(cid, safe='')}/events/{_urlquote(event_id, safe='')}",
                     params={"fields": _SINGLE_EVENT_FIELDS},
                 )
-                return self._stamp(_parse_event(resp.json()))
+                return self._stamp(
+                    _parse_event(resp.json()),
+                    calendar=self._calendar_names.get(cid),
+                )
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     last_exc = e
@@ -405,7 +421,7 @@ class GoogleProvider(_ProviderBase):
         )
         return _confirmation_from_google_item(
             response.json(),
-            account=self._account,
+            account=self.name,
             fallback_title=title,
             fallback_start=start_iso,
             fallback_end=end_iso,
@@ -481,7 +497,7 @@ class GoogleProvider(_ProviderBase):
 
         if not body:
             return EventConfirmation(
-                id=event_id, title="(no changes)", start="", end="", account=self._account,
+                id=event_id, title="(no changes)", start="", end="", account=self.name,
             )
 
         params: Dict[str, Any] = {}
@@ -496,7 +512,7 @@ class GoogleProvider(_ProviderBase):
             json=body,
             params=params or None,
         )
-        return _confirmation_from_google_item(resp.json(), account=self._account)
+        return _confirmation_from_google_item(resp.json(), account=self.name)
 
     async def search_events(
         self,
@@ -522,7 +538,12 @@ class GoogleProvider(_ProviderBase):
                     "fields": _EVENT_FIELDS,
                 },
             )
-            return [_parse_event(i) for i in resp.json().get("items", []) if _is_relevant(i)]
+            title = self._calendar_names.get(cal_id)
+            return [
+                self._stamp(_parse_event(i), calendar=title)
+                for i in resp.json().get("items", [])
+                if _is_relevant(i)
+            ]
 
         results = await asyncio.gather(
             *[_query(cid) for cid in cal_ids], return_exceptions=True,
@@ -546,7 +567,7 @@ class GoogleProvider(_ProviderBase):
         unique = [ev for ev in all_events if ev.id not in seen and not seen.add(ev.id)]
         unique.sort(key=lambda e: e.start)
         return ProviderEventBatch(
-            events=[self._stamp(e) for e in unique[:max_results]],
+            events=unique[:max_results],
             incomplete=bool(errors),
         )
 

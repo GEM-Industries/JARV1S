@@ -57,7 +57,11 @@ tool_cues_enabled = true
 # led_brightness = 80
 ```
 
-**Dogfood (recommended):** on the Mac Host, finish **Settings → Availability → Enable private access**, then mint from **Rooms & devices → Add room speaker** and paste the returned `backend_ws_url` (`wss://…ts.net/api/v1/ws`) plus `device_token` into this config.
+**Dogfood (recommended):** on the Mac Host, finish **Settings → Availability → Enable private access**, deploy the speaker (`task sat:deploy`), then **Rooms & devices → Connect speaker**. The Host pairs over the LAN. If that fails, Rooms shows a paste-able command for the Pi, or from this Mac:
+
+```bash
+task sat:pair -- CODE
+```
 
 **Contributor LAN:** run `task be:dev:lan` so the backend listens on `0.0.0.0:8000`, then point `backend_url` at `ws://<brain-hostname>.local:8000/api/v1/ws`. Prefer the `.local` hostname over a raw LAN IP so DHCP lease changes do not break the satellite. Tailnet / public: [docs/deployment/MULTI_DEVICE_REACHABILITY.md](../docs/deployment/MULTI_DEVICE_REACHABILITY.md).
 
@@ -74,6 +78,12 @@ List audio devices:
 uv run python -m jarvis_satellite --list-devices
 ```
 
+Pair with a Rooms setup code (fallback if Host LAN pair is unavailable):
+
+```bash
+uv run python -m jarvis_satellite pair CODE --url wss://<host>.ts.net:8443/api/v1/ws
+```
+
 Dry-run microphone capture:
 
 ```bash
@@ -84,7 +94,7 @@ uv run python -m jarvis_satellite --dry-run-audio
 
 For XVF3800 echo cancellation, keep TTS playback as a 2-channel stream. The chip uses playback channel 0 as the far-end AEC reference; mono host playback can leave the reference path ambiguous even when audio is audible from the connected speaker.
 
-Prefer minting from the Host (**Rooms & devices → Add room speaker**). CLI recovery on the brain host:
+Prefer pairing from the Host (**Rooms & devices → Connect speaker**). CLI recovery on the brain host:
 
 ```bash
 task devices:satellite-token -- --node-id jarvis-satellite-1 --node-label "Bedroom Satellite"

@@ -12,7 +12,8 @@ import {
 } from '@phosphor-icons/react';
 import { cn } from '../../../utils/cn';
 import { Button } from '../../ui/Button';
-import { OAuthApiError, oauthApi } from '../../../client/oauthApi';
+import { oauthApi, OAuthApiError } from '../../../client/oauthApi';
+import { oauthRedirectUri } from '../integrations/connections';
 import { isDesktopApp } from '../../../runtime/clientSurface';
 import { WidgetDefinition, BaseWidgetProps } from './types';
 import {
@@ -101,6 +102,26 @@ const PROVIDER_CONFIG = {
       } satisfies SetupStep,
     ],
   },
+  spotify: {
+    displayName: 'Spotify',
+    requiresSecret: false,
+    secretLabel: null,
+    setupSteps: [
+      {
+        title: 'Create a Spotify app',
+        description: 'Open the Spotify Developer Dashboard and create an app with Web API access. Development mode allows 5 users.',
+        url: 'https://developer.spotify.com/dashboard',
+        cta: 'Open Dashboard',
+      },
+      {
+        title: 'Add the redirect URI',
+        description: 'In app settings, add this exact URI including the port. Spotify rejects localhost and portless http://127.0.0.1.',
+        url: 'https://developer.spotify.com/dashboard',
+        cta: 'Open Dashboard',
+        showRedirectUri: true,
+      },
+    ],
+  },
 } satisfies Record<string, { displayName: string; requiresSecret: boolean; secretLabel: string | null; setupSteps: SetupStep[] }>
 
 type Provider = keyof typeof PROVIDER_CONFIG
@@ -109,6 +130,7 @@ type OAuthPhase = 'connected' | 'error'
 
 interface OAuthWidgetData {
   provider: string
+  plugin?: string
   phase?: OAuthPhase
   missing_scopes?: string[]
   account_email?: string
@@ -138,8 +160,8 @@ const StepDots: React.FC<{ total: number; current: number }> = ({ total, current
 // Copyable redirect URI
 // ---------------------------------------------------------------------------
 
-const CopyableUri: React.FC = () => {
-  const uri = `${window.location.origin}/api/v1/auth/oauth/callback`
+const CopyableUri: React.FC<{ provider: Provider }> = ({ provider }) => {
+  const uri = oauthRedirectUri(provider)
   const [copied, setCopied] = useState(false)
 
   const handleCopy = async () => {
@@ -316,7 +338,7 @@ const NeedsConfigPhase: React.FC<{
           </ol>
         )}
 
-        {step.showRedirectUri && <CopyableUri />}
+        {step.showRedirectUri && <CopyableUri provider={provider} />}
 
         <a
           href={step.url}
@@ -366,10 +388,11 @@ const NeedsConfigPhase: React.FC<{
 
 const ConnectPhase: React.FC<{
   provider: Provider
+  plugin?: string
   missingScopes?: string[]
   onConnected: (email: string) => void
   onAdvancedSetup: () => void
-}> = ({ provider, missingScopes, onConnected, onAdvancedSetup }) => {
+}> = ({ provider, plugin, missingScopes, onConnected, onAdvancedSetup }) => {
   const cfg = PROVIDER_CONFIG[provider]
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -389,7 +412,10 @@ const ConnectPhase: React.FC<{
     setError(null)
 
     try {
-      const { authorize_url } = await oauthApi.authorize(provider, window.location.origin)
+      const { authorize_url } = await oauthApi.authorize(provider, window.location.origin, {
+        plugin,
+        scopes: missingScopes,
+      })
       const launch = await beginOAuthAuthorization(`Connect ${cfg.displayName}`, authorize_url)
       popupRef.current = launch.popup ?? null
 
@@ -458,8 +484,8 @@ const ConnectPhase: React.FC<{
           </p>
         )}
         {provider === 'google' && (
-          <p className="text-[10px] font-mono text-foreground-disabled/50 leading-relaxed">
-            You may see &quot;Google hasn&apos;t verified this app&quot; — click Advanced to continue. This is normal for personal apps.
+          <p className="type-meta text-foreground-subtle leading-relaxed">
+            If Google says this app isn&apos;t verified, continue to JARV1S on that page. Expected in this beta.
           </p>
         )}
       </div>
@@ -488,7 +514,7 @@ const ConnectPhase: React.FC<{
         onClick={onAdvancedSetup}
         className="text-[10px] font-mono text-foreground-disabled/50 hover:text-foreground-subtle transition-colors text-center"
       >
-        Use your own OAuth app instead
+        {provider === 'google' ? 'Use your own Google Cloud app' : 'Use your own OAuth app instead'}
       </button>
     </div>
   )
@@ -557,6 +583,7 @@ const ConnectedPhase: React.FC<{
 
 const OAuthHero: React.FC<OAuthWidgetData & BaseWidgetProps> = ({
   provider: providerRaw,
+  plugin,
   phase,
   missing_scopes,
   account_email,
@@ -634,6 +661,7 @@ const OAuthHero: React.FC<OAuthWidgetData & BaseWidgetProps> = ({
         ) : (
           <ConnectPhase
             provider={provider}
+            plugin={plugin}
             missingScopes={missing_scopes}
             onConnected={handleConnected}
             onAdvancedSetup={() => setShowAdvancedSetup(true)}

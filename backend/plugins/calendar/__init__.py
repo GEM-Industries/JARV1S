@@ -1,14 +1,13 @@
 """
 Calendar Plugin for JARV1S.
 
-Multi-provider aware: injects a UnifiedCalendarClient that wraps Google Calendar
-and/or Microsoft Graph under one interface. The LLM sees a single calendar;
-writes are routed to a specific provider via the `account` label
-("personal" | "work"), resolved through settings.ACCOUNT_PROVIDERS.
+Multi-provider aware: injects a UnifiedCalendarClient that wraps EventKit on
+this Mac and/or Google Calendar and Microsoft Graph. The LLM sees a single
+calendar; writes are routed by connection name (`google` | `microsoft` |
+`macos`). EventKit is read-only in V0.
 
 Provider-specific parsing, URL shaping, and Meet/Teams payload construction live
-inside plugins/calendar/providers/{google,outlook}.py behind the CalendarProvider
-Protocol. This module stays channel-agnostic.
+inside plugins/calendar/providers/ behind the CalendarProvider Protocol.
 """
 
 import logging
@@ -249,7 +248,7 @@ class CalendarPlugin(JarvisPlugin):
         version="2.0.0",
         description=(
             "Calendar: schedule queries, event CRUD, attendees, conferencing links "
-            "(Meet/Teams), free-time discovery. Multi-provider — personal Google + work Outlook."
+            "(Meet/Teams), free-time discovery. Connections: this Mac, Google, Microsoft."
         ),
         dependencies=["httpx"],
         utterances=[
@@ -321,13 +320,13 @@ class CalendarPlugin(JarvisPlugin):
         Get calendar events for a date range. Dates accept ISO or natural dates like "tomorrow".
         Defaults to today if no dates given. If only start_date given, returns that single day.
         Returns events from ALL connected calendars merged together — each event carries an
-        `account` field ("personal" or "work") so you know which calendar it came from.
+        `account` field (`google`, `microsoft`, or `macos`) so you can pass it back for mutations.
         ALWAYS resolve day names using "Week Dates" from the system prompt context — never compute offsets manually.
         Query multiple days in one call rather than asking the user to pick one day at a time.
         VOICE: Narrate events as flowing prose, not a list. Weave them together with commas and connectors.
         Naturalize event titles — use the person or purpose as the anchor, drop formulaic prefixes like "Weekly" or "Q2".
         Use spoken times — never read ISO timestamps. Use natural forms like "half six" or "quarter past two".
-        Do NOT mention the account ("personal" / "work") unless the user asks — just answer the question.
+        Do NOT mention the connection (`google` / `microsoft` / `macos`) unless the user asks — just answer the question.
         Zero events: say the day is clear. One event: name it naturally with the time.
         Several: combine into one flowing sentence. Do not enumerate or number them.
         Multi-day: group by day with natural transitions between them.
@@ -367,8 +366,8 @@ class CalendarPlugin(JarvisPlugin):
         Use when get_events() returns attendees=[] for a meeting — this fetches the
         canonical record which may include attendee data unavailable in list results.
         event_id comes from the id field of a CalendarEvent returned by get_events().
-        account: Optional "personal" or "work" — pass through the `account` field from
-        the CalendarEvent you read. Omit only if you don't know which calendar it's on
+        account: Pass through the `account` field from the CalendarEvent (`google`, `microsoft`, or `macos`).
+        Omit only if you don't know which connection it's on
         (we'll try each connected calendar in turn, slower).
         If attendees is still empty after calling this, tell the user rather than guessing.
         VOICE: Speak the attendees naturally by first name. If none, say you can't see who's invited.
@@ -392,15 +391,14 @@ class CalendarPlugin(JarvisPlugin):
         recurrence: Optional[CalendarRecurrence] = None,
         account: Optional[str] = None,
         calendar: UnifiedCalendarClient = None,
-    ) -> EventConfirmation:
+    ) -> EventConfirmation | CapabilityErrorDetail:
         """
         Create a calendar event. start accepts ISO or natural local time like "tomorrow 3pm" (date for all_day=true).
         end defaults to start + duration_minutes (30, "90m", or "1.5h"). attendees is a list of email addresses.
-        add_meet=true generates a video meeting link (Google Meet on personal, Teams on work).
+        add_meet=true generates a video meeting link (Google Meet on google, Teams on microsoft).
         all_day=true creates an all-day event.
-        account: Which calendar to write to. "personal" or "work". Default is the user's
-        primary (personal) calendar unless only one account is connected. Use "work" when
-        the user says "put it on my work calendar", "book a work meeting", etc.
+        account: Connection to write to (`google` or `microsoft`). Default is the sole writable
+        connection when only one of those is connected. macos cannot create events.
         REQUIRED: Always ask for a title first — never invent one. Always ask for email addresses before adding attendees.
         If changing a just-created event, use update_event with the returned id; do not call create_event again.
         If this returns an existing same-title overlapping event, treat it as a likely duplicate and ask/update instead of creating another.
@@ -494,6 +492,8 @@ class CalendarPlugin(JarvisPlugin):
             tz_name=tz_name,
             account=account,
         )
+        if isinstance(confirmation, CapabilityErrorDetail):
+            return confirmation
         confirmation = confirmation.model_copy(update={"conflicts": conflicts})
         push_content(
             title="Calendar Event Created",
@@ -515,7 +515,7 @@ class CalendarPlugin(JarvisPlugin):
         """
         Delete a calendar event by ID. Has built-in approval — call immediately, do NOT ask first.
         Get the event_id from get_events() first if the user refers to an event by name.
-        account: Pass through the `account` field from the CalendarEvent you read ("personal" or "work").
+        account: Pass through the `account` field from the CalendarEvent you read (`google`, `microsoft`, or `macos`).
         Omit only if exactly one calendar account is connected.
         For risky follow-up deletes, pass expected_title / expected_start / expected_account from the event you meant to delete; the tool refuses if the fetched target differs.
         """
@@ -580,14 +580,14 @@ class CalendarPlugin(JarvisPlugin):
         """
         Update an existing calendar event (PATCH — only supplied fields change).
         Get event_id from get_events() first if the user refers to an event by name.
-        account: Pass through the `account` field from the CalendarEvent you read ("personal" or "work").
-        Do not guess — the event lives on one calendar, pass the account it came from.
+        account: Pass through the `account` field from the CalendarEvent you read (`google`, `microsoft`, or `macos`).
+        Do not guess — the event lives on one connection, pass the account it came from.
         Pass expected_title / expected_start / expected_account when the ID comes from a prior lookup; the tool refuses if the fetched target differs.
         Recurring targets require explicit scope='occurrence' or scope='series'. Changing recurrence requires scope='series'.
         attendees replaces the full list — include ALL desired attendees, not just new ones.
         REQUIRED: Always ask for email addresses before adding attendees. Never guess or use placeholders.
         duration_minutes alone changes length while keeping the original start time; accepts minutes or durations like "90m".
-        add_meet=true attaches a video meeting link (Google Meet on personal, Teams on work).
+        add_meet=true attaches a video meeting link (Google Meet on google, Teams on microsoft).
         VOICE: Confirm the change briefly.
         """
         tz = _tz()
@@ -646,6 +646,8 @@ class CalendarPlugin(JarvisPlugin):
             recurrence=recurrence,
             tz_name=tz_name,
         )
+        if isinstance(confirmation, CapabilityErrorDetail):
+            return confirmation
         confirmation = confirmation.model_copy(update={
             "scope": scope or confirmation.scope or target.scope,
             "series_id": confirmation.series_id or target.series_id,
@@ -722,7 +724,9 @@ class CalendarPlugin(JarvisPlugin):
         now = datetime.now(tz)
         window_end = now + timedelta(days=7)
 
-        events = await calendar.list_events(now.isoformat(), window_end.isoformat())
+        events = await calendar.list_events(
+            now.isoformat(), window_end.isoformat(), max_results=200,
+        )
         timed = [e for e in _query_events(events) if not e.is_all_day]
         if not timed:
             return None
@@ -741,7 +745,7 @@ class CalendarPlugin(JarvisPlugin):
         """
         Find free slots across a date or date range (ISO or natural date like "tomorrow").
         end_date is inclusive — set it to find a free slot "sometime this week".
-        Searches across ALL connected calendars so work + personal commitments both count as busy.
+        Searches across ALL connected calendars so every connection counts as busy.
         Searches between start_hour and end_hour (default 8am–10pm).
         For evening: start_hour=18. For full day: start_hour=0, end_hour=24.
         VOICE: Offer the best 1–2 slots naturally as prose. Never list raw time ranges.

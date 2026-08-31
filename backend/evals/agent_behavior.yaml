@@ -210,9 +210,9 @@ cases:
     arguments:
       event_id: evt-1
       recurrence: yearly
-      account: personal
+      account: google
   - type: tool_output
-    content: '{"id":"evt-1","title":"Annual review","start":"2026-03-20","end":"2026-03-21","account":"personal","scope":"series","recurrence":"yearly"}'
+    content: '{"id":"evt-1","title":"Annual review","start":"2026-03-20","end":"2026-03-21","account":"google","scope":"series","recurrence":"yearly"}'
   - type: text
     content: Done — that event now repeats yearly.
   assert:
@@ -323,6 +323,28 @@ cases:
     - scheduler.remind
     - scheduler.add_timer
     - smart_home.control_devices
+    max_tool_calls: 2
+- id: probe_fade_lights_now_uses_control_lights
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - smart_home.control_lights
+  - scheduler.remind
+  - scheduler.defer
+  input: Fade the bedroom lights on over 15 minutes.
+  live_tool_output: 'Home Assistant reports Bedroom Lights on (light.bedroom). Requested brightness_pct=100, transition=900.'
+  assert:
+    tools_called:
+    - smart_home.control_lights
+    tools_forbidden:
+    - scheduler.remind
+    - scheduler.defer
+    expected_arguments:
+      transition: regex:"(15 minutes|15m|15 min|900)"
     max_tool_calls: 2
 - id: scheduler_defer_conditional_check
   priority: P0
@@ -925,13 +947,15 @@ cases:
   tier: mock
   source: user
   text_input: true
-  input: In the background, refactor the auth middleware tests and run pytest on that folder.
+  input: In the background, in ~/dev/shop, refactor the auth middleware tests and run pytest on that folder. Call it the auth test refactor.
   script:
   - type: tool_call
     capability: agents.dispatch
     arguments:
       prompt: Refactor auth middleware tests and run pytest for that folder.
       mode: code
+      title: auth test refactor
+      cwd: ~/dev/shop
   - type: text
     content: I've kicked off a code-mode background agent for the refactor and test run.
   assert:
@@ -940,6 +964,29 @@ cases:
     response_contains:
     - background
     max_tool_calls: 2
+- id: named_work_status_by_title
+  priority: P1
+  category: background
+  tier: mock
+  source: user
+  text_input: true
+  input: what's happening with the 2713 review?
+  script:
+  - type: tool_call
+    capability: agents.get_status
+    arguments:
+      target: 2713 review
+  - type: text
+    content: The 2713 review is still open. Last run finished; resume if you want to continue.
+  assert:
+    tools_called:
+    - agents.get_status
+    tools_forbidden:
+    - profile.recall
+    - agents.dispatch
+    response_contains:
+    - 2713
+    max_tool_calls: 2
 - id: ordinary_direct_turn_no_dispatch
   priority: P1
   category: background
@@ -947,6 +994,13 @@ cases:
   source: user
   text_input: true
   input: What's on my calendar this afternoon?
+  script:
+  - type: tool_call
+    capability: calendar.get_events
+    arguments:
+      period: this afternoon
+  - type: text
+    content: You have a 2pm design review and a 4pm 1:1.
   live_tool_output: You have a 2pm design review and a 4pm 1:1.
   assert:
     tools_called:
@@ -967,6 +1021,7 @@ cases:
     - scheduler.remind
     tools_forbidden:
     - todo
+    - profile.remember
     max_tool_calls: 2
 - id: live_evaluate_offtopic_no_reply
   priority: P0
@@ -1263,10 +1318,27 @@ cases:
   text_input: false
   runs: 3
   input: Clear the conversation history.
-  live_tool_output: 'Deleted 42 messages.'
+  live_tool_output: 'Started a fresh conversation on this device. Earlier chat is still saved.'
   assert:
     tools_called:
-    - db.clear_conversation_history
+    - db.reset_conversation_window
+    response_must_not_contain:
+    - permission
+    - approval
+    - error
+    max_tool_calls: 1
+- id: live_start_fresh_not_forget_memory
+  priority: P1
+  category: tool_selection
+  tier: live
+  source: user
+  text_input: false
+  runs: 3
+  input: Forget what we were just talking about.
+  live_tool_output: 'Started a fresh conversation on this device. Earlier chat is still saved.'
+  assert:
+    tools_called:
+    - db.reset_conversation_window
     response_must_not_contain:
     - permission
     - approval
@@ -1377,6 +1449,116 @@ cases:
     - spotify.skip
     expect_pre_tool_speech: none
     max_tool_calls: 2
+- id: spotify_named_playlist_plays_without_listing
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - spotify.play
+  - spotify.get_my_playlists
+  - spotify.search
+  input: Play my sleep playlist.
+  live_tool_output: '{"success":true,"message":"Now playing: sleep (playlist)"}'
+  assert:
+    tools_called:
+    - spotify.play
+    tools_forbidden:
+    - spotify.get_my_playlists
+    - spotify.search
+    expected_arguments:
+      type: playlist
+      name: regex:"(?i)sleep"
+    max_tool_calls: 1
+- id: spotify_radio_plays_without_searching
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - spotify.play
+  - spotify.get_my_playlists
+  - spotify.search
+  - spotify.get_playing
+  input: Play Drake radio.
+  live_tool_output: '{"success":true,"message":"Now playing: Drake (artist). Not a Radio station."}'
+  assert:
+    tools_called:
+    - spotify.play
+    tools_forbidden:
+    - spotify.get_my_playlists
+    - spotify.search
+    - spotify.get_playing
+    expected_arguments:
+      name: regex:"(?i)drake"
+    max_tool_calls: 1
+- id: spotify_save_current_without_lookup
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - spotify.save_track
+  - spotify.get_playing
+  - spotify.search
+  input: Save this song.
+  live_tool_output: '{"success":true,"message":"Saved Oh Yeah by Steve Lacy."}'
+  assert:
+    tools_called:
+    - spotify.save_track
+    tools_forbidden:
+    - spotify.get_playing
+    - spotify.search
+    max_tool_calls: 1
+- id: spotify_add_to_named_playlist_without_listing
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - spotify.add_to_playlist
+  - spotify.get_my_playlists
+  - spotify.get_playing
+  - spotify.search
+  input: Add this to my sleep playlist.
+  live_tool_output: '{"success":true,"message":"Added Oh Yeah by Steve Lacy to sleep."}'
+  assert:
+    tools_called:
+    - spotify.add_to_playlist
+    tools_forbidden:
+    - spotify.get_my_playlists
+    - spotify.get_playing
+    - spotify.search
+    expected_arguments:
+      playlist: regex:"(?i)sleep"
+    max_tool_calls: 1
+- id: spotify_list_playlists_is_not_play
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - spotify.play
+  - spotify.get_my_playlists
+  - spotify.search
+  input: What playlists do I have on Spotify?
+  live_tool_output: '{"type":"playlist","results":[{"type":"playlist","id":"1","name":"sleep","uri":"spotify:playlist:1"}]}'
+  assert:
+    tools_called:
+    - spotify.get_my_playlists
+    tools_forbidden:
+    - spotify.play
+    max_tool_calls: 1
 - id: probe_web_search_emits_tool_call
   priority: P0
   category: tool_selection
@@ -1662,6 +1844,55 @@ cases:
       series_id: rule-morning
       instructions: warm
     max_tool_calls: 3
+- id: probe_edit_existing_setup_uses_named_tool_not_create
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - setups.get
+  - setups.delete
+  - scheduler.remind
+  input: Change the Morning Wakeup Lights so they fade in over 5 minutes.
+  live_tool_outputs:
+  - '{"resource_ref":"scheduler:schedule:rule-morning","resource_id":"rule-morning","name":"Morning
+    Wakeup Lights","setup_type":"schedule","managed_by":"scheduler","scope":"definition","status":"active","supported_actions":["pause","resume","delete"],"edit_tool":"scheduler.replace_alert","kind":"deferred_instruction","series_id":"rule-morning"}'
+  - 'Series updated. Series ID: rule-morning. Next occurrence 7:30 AM.'
+  assert:
+    tools_called:
+    - setups.get
+    - scheduler.replace_alert
+    tools_forbidden:
+    - scheduler.remind
+    - setups.delete
+    expected_arguments:
+      series_id: rule-morning
+    max_tool_calls: 3
+- id: probe_inspect_existing_automations_uses_setups
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - setups.find
+  - automations.list_available_triggers
+  - automations.create_rule
+  - search.web
+  - activity.recent
+  input: Why don't my meeting automations work?
+  live_tool_output: '{"setups":[],"match_status":"none","coverage":"complete"}'
+  assert:
+    tools_called:
+    - setups.find
+    tools_forbidden:
+    - search.web
+    - activity.recent
+    - automations.list_available_triggers
+    max_tool_calls: 2
 - id: probe_lookup_external_slack_automation_uses_setups
   priority: P0
   category: tool_selection
@@ -1684,6 +1915,30 @@ cases:
       setup_type: automation
       target: regex:"target"
       until: regex:"until"
+    max_tool_calls: 3
+- id: probe_pause_matching_light_setups_not_pause_all
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - setups.find
+  - setups.pause
+  - automations.pause_all
+  - automations.resume_all
+  - scheduler.pause_series
+  input: Pause all the light automations until Monday.
+  live_tool_output: '{"setups":[{"resource_ref":"scheduler:schedule:rule-morning","name":"Morning Wakeup Lights","setup_type":"schedule","managed_by":"scheduler","status":"active","supported_actions":["pause","resume","delete"]}],"match_status":"single","coverage":"complete"}'
+  assert:
+    tools_called:
+    - setups.pause
+    tools_forbidden:
+    - automations.pause_all
+    - automations.resume_all
+    expected_arguments:
+      until: regex:".+"
     max_tool_calls: 3
 - id: probe_lookup_broad_inventory_uses_setups
   priority: P0
@@ -1782,6 +2037,171 @@ cases:
     tools_forbidden:
     - system.exec
     max_tool_calls: 4
+- id: probe_durable_decision_stores_now
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - profile.remember
+  - profile.add_memory
+  - scheduler.remind
+  input: We agreed the short job starts this week. The original proposal stays as the official submission.
+  live_tool_output: Remembered the short job starts this week; the original proposal remains the official submission.
+  assert:
+    tools_called:
+    - profile.remember
+    tools_forbidden:
+    - scheduler.remind
+    expect_pre_tool_speech: none
+    max_tool_calls: 2
+- id: probe_explicit_stable_preference_is_stored
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - profile.add_memory
+  - profile.remember
+  input: For future travel planning, I prefer direct flights even when they cost a little more.
+  live_tool_output: Stored 'Prefers direct flights even when they cost a little more'.
+  assert:
+    tools_called:
+    - profile.add_memory
+    tools_forbidden:
+    - profile.remember
+    expect_pre_tool_speech: none
+    max_tool_calls: 1
+- id: probe_temporary_state_is_not_stored
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - profile.add_memory
+  - profile.remember
+  - profile.update_memory
+  input: I slept badly last night, so keep this answer short.
+  assert:
+    tools_forbidden:
+    - profile.add_memory
+    - profile.remember
+    - profile.update_memory
+    max_tool_calls: 0
+- id: probe_third_party_story_is_not_user_memory
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - profile.add_memory
+  - profile.remember
+  - profile.update_memory
+  input: My colleague came off his bike yesterday. I watched the ambulance take him away.
+  assert:
+    tools_forbidden:
+    - profile.add_memory
+    - profile.remember
+    - profile.update_memory
+    max_tool_calls: 0
+- id: probe_recall_does_not_reconstruct_memory
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - profile.recall
+  - profile.remember
+  - profile.add_memory
+  input: What did I tell you about the cycling accident last month?
+  live_tool_output: '[{"event":"You said you witnessed a cyclist being injured.","context":"user turn in conversation","created_at":"2026-07-18T09:30:00+00:00","expires_at":null}]'
+  assert:
+    tools_called:
+    - profile.recall
+    tools_forbidden:
+    - profile.remember
+    - profile.add_memory
+    max_tool_calls: 2
+- id: probe_wait_for_user_is_not_a_job
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - smart_home.control_lights
+  - scheduler.defer
+  - automations.create_rule
+  input: Don't do it yet. I'll tell you when, then turn the lights off.
+  assert:
+    expect_no_reply: false
+    tools_forbidden:
+    - smart_home.control_lights
+    - scheduler.defer
+    - automations.create_rule
+    max_tool_calls: 0
+- id: probe_ack_does_not_promise_work
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - profile.remember
+  - smart_home.control_lights
+  - activity.recent
+  history:
+  - role: user
+    content: Why is the status wrong?
+  - role: assistant
+    content: The service may be offline.
+    metadata:
+      turn_type: text_only
+  input: No, it is responding. The cache timeout is just too short.
+  assert:
+    expect_no_reply: false
+    response_must_not_contain:
+    - I'll
+    - I will
+    - Let me
+    - I'm going to
+    max_tool_calls: 0
+- id: probe_durable_fact_correction_stores_now
+  priority: P1
+  category: tool_selection
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - profile.update_memory
+  - profile.remember
+  history:
+  - role: assistant
+    content: You still live in Melbourne.
+    metadata:
+      turn_type: text_only
+  input: No, the move happened last month. I live in Sydney now.
+  live_tool_output: Stored 'Lives in Sydney'.
+  assert:
+    tools_called:
+    - profile.update_memory
+    tools_forbidden:
+    - profile.remember
+    expect_pre_tool_speech: none
+    max_tool_calls: 2
 - id: probe_snooze_fired_alarm_uses_snooze_alert
   priority: P0
   category: tool_selection
@@ -1811,6 +2231,25 @@ cases:
     - scheduler.add_alarm
     expected_arguments:
       duration: regex:"(1h|1 h|an hour|1 hour|one hour|60m)"
+    max_tool_calls: 2
+- id: probe_wake_me_up_uses_add_alarm
+  priority: P0
+  category: tool_selection
+  tier: probe
+  source: field_regression
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - scheduler.add_alarm
+  - scheduler.remind
+  - scheduler.add_timer
+  input: Wake me up at 7am.
+  live_tool_output: 'Alarm set for 7:00 AM (12 hours from now). ID: trg-wake'
+  assert:
+    tools_called:
+    - scheduler.add_alarm
+    tools_forbidden:
+    - scheduler.remind
     max_tool_calls: 2
 - id: probe_remind_in_an_hour_is_not_snooze
   priority: P0
@@ -1920,4 +2359,141 @@ cases:
     - weather.get_weather
     response_contains:
     - drizzle
+    max_tool_calls: 0
+- id: probe_personality_closer_stays_silent
+  priority: P1
+  category: personality
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  input: Gotcha, gotcha.
+  assert:
+    expect_no_reply: true
+    max_tool_calls: 0
+- id: probe_personality_pushback_does_not_retreat
+  priority: P1
+  category: personality
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  history:
+  - role: user
+    content: You're being weirdly smug today.
+  - role: assistant
+    content: The apple doesn't fall far from the tree, sir.
+    metadata:
+      turn_type: text_only
+  input: Oi, no need to call me out like that.
+  assert:
+    expect_no_reply: false
+    response_must_not_contain:
+    - apolog
+    - dial it back
+    - keep the observations
+    - keep my observations
+    max_tool_calls: 0
+- id: probe_personality_presence_is_unremarkable
+  priority: P1
+  category: personality
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  input: Jarvis, you awake?
+  assert:
+    expect_no_reply: false
+    response_must_not_contain:
+    - always
+    - functioning
+    - parameters
+    - operational
+    max_tool_calls: 0
+- id: probe_personality_presence_does_not_repeat
+  priority: P1
+  category: personality
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  history:
+  - role: user
+    content: Are you there?
+  - role: assistant
+    content: I'm here.
+    metadata:
+      turn_type: text_only
+  input: Still with me?
+  assert:
+    expect_no_reply: false
+    response_must_not_contain:
+    - I'm here
+    - always
+    - functioning
+    - parameters
+    - operational
+    max_tool_calls: 0
+- id: probe_personality_research_answer_does_not_recap
+  priority: P1
+  category: personality
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools:
+  - search.web
+  input: Could you research whether morning or evening strength training is generally better and give me your view?
+  live_tool_output: '[{"title":"Training time and strength adaptation","url":"https://example.com/study","content":"Reviews find similar long-term strength gains when training is consistent. Performance is often slightly higher later in the day, while training at a fixed time improves time-specific performance. Adherence is the strongest practical factor."}]'
+  assert:
+    tools_called:
+    - search.web
+    response_must_not_contain:
+    - in short
+    - essentially
+    - to sum
+    - bottom line
+    max_tool_calls: 2
+- id: probe_personality_wit_does_not_copy_history
+  priority: P1
+  category: personality
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  history:
+  - role: user
+    content: Do you think that meeting will run late?
+  - role: assistant
+    content: I suspect it will. They brought a deck with forty slides.
+    metadata:
+      turn_type: text_only
+  input: And if we ever open a restaurant, which of us is handling the customers?
+  assert:
+    expect_no_reply: false
+    response_must_not_contain:
+    - I suspect
+    - I imagine
+    - I must admit
+    max_tool_calls: 0
+- id: probe_personality_greeting_avoids_diagnostic
+  priority: P1
+  category: personality
+  tier: probe
+  source: user
+  text_input: false
+  pin_manifest: true
+  routed_tools: []
+  input: Good morning, Jarvis. How are you?
+  assert:
+    expect_no_reply: false
+    response_must_not_contain:
+    - functioning
+    - parameters
+    - operational
     max_tool_calls: 0

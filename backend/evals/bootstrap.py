@@ -16,7 +16,7 @@ from typing import Any
 from core.config import settings
 from core.integrations.mcp.bridge import generate_utterances
 from core.integrations.mcp.cache import load_cached_schema
-from core.integrations.mcp.config import load_mcp_config
+from core.integrations.mcp.config import MCPConfigError, load_mcp_config
 from core.plugins.registry import registry
 from core.plugins.types import JarvisPlugin, PluginMetadata
 
@@ -141,9 +141,13 @@ def _register_eval_mcp_plugin(
 def _load_cached_mcp_plugins_for_eval() -> None:
     """Register cached MCP/Composio schemas so offline routing sees connected namespaces."""
     loaded: set[str] = set()
+    try:
+        declared = load_mcp_config(settings.MCP_SERVERS_CONFIG)
+    except MCPConfigError:
+        declared = []
     config_by_name = {
         config.name: config
-        for config in load_mcp_config(settings.MCP_SERVERS_CONFIG)
+        for config in declared
         if config.type == "composio"
     }
 

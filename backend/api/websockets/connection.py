@@ -20,7 +20,7 @@ from core.plugins.widget_snapshots import collect_widget_snapshots
 from core.voice.vad_service import TenVADService
 from core.voice.wakeword_service import WakeWordService
 from core.voice.processor import SpeechProcessor
-from core.voice.speaker_verifier import EnrolledSpeakerVerifier, SpeakerEvidence
+from core.voice.speaker_verifier import SAMPLE_RATE, EnrolledSpeakerVerifier, SpeakerEvidence
 from core.voice.turn_admission import AdmissionSource
 
 if TYPE_CHECKING:
@@ -32,6 +32,17 @@ logger = logging.getLogger(__name__)
 
 NODE_REPLACED_CLOSE_CODE = 4001
 DEVICE_REVOKED_CLOSE_CODE = 4002
+DEVICE_DISCONNECTED_CLOSE_CODE = 4003
+VOICE_SAMPLE_DURATION_S = 2.2
+VOICE_SAMPLE_TIMEOUT_S = 10.0
+
+
+class VoiceSampleCaptureError(Exception):
+    """Live PCM capture for a room-speaker voice sample failed."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
 
 
 def attention_state_payload(state: Any) -> Dict[str, Any]:
@@ -73,7 +84,7 @@ class VoiceInputTurn:
     continue_count: int = 0
     awaiting_stt_count: int = 0
     vad_endpoint_count: int = 0
-    # Verified owner identity for barge-in commits only; not presence identity.
+    # Verified owner identity for barge-in and follow-up commits; not presence identity.
     speaker_id: Optional[str] = None
     speaker_confidence: Optional[float] = None
     speaker_source: Optional[str] = None
@@ -132,10 +143,33 @@ class Session:
     barge_in_speaker_attempts: int = 0                     # at most two inferences per candidate
     # Shared enrolled-speaker verifier for wake Stage 2b and barge-in.
     speaker_verifier: Optional[EnrolledSpeakerVerifier] = None
+    # Bounded PCM capture for room-speaker voice samples (Say Jarvis).
+    voice_sample_buffer: Optional[bytearray] = None
+    voice_sample_needed: int = 0
+    voice_sample_done: Optional[asyncio.Future] = None
     
     # --- Context (Dynamic, can be updated by client) ---
     # Initialization params (like timezone) are stored here on connect
     context: Dict[str, Any] = field(default_factory=dict)
+
+    def ingest_voice_sample(self, pcm: bytes) -> None:
+        """Accumulate live PCM while a room-speaker sample capture is open."""
+        if self.voice_sample_buffer is None or self.voice_sample_needed <= 0:
+            return
+        self.voice_sample_buffer.extend(pcm)
+        if len(self.voice_sample_buffer) < self.voice_sample_needed:
+            return
+        done = self.voice_sample_done
+        if done is not None and not done.done():
+            done.set_result(bytes(self.voice_sample_buffer[: self.voice_sample_needed]))
+
+    def abort_voice_sample(self, reason: str, message: str) -> None:
+        done = self.voice_sample_done
+        if done is not None and not done.done():
+            done.set_exception(VoiceSampleCaptureError(reason, message))
+        self.voice_sample_buffer = None
+        self.voice_sample_needed = 0
+        self.voice_sample_done = None
 
     def touch(self) -> None:
         """Record that the client is actively talking to the backend."""
@@ -350,6 +384,52 @@ class ConnectionManager:
     def list_owner_sessions(self, owner_id: str) -> list[Session]:
         return [session for session in self.sessions.values() if session.owner_id == owner_id]
 
+    async def capture_node_pcm(
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        duration_s: float = VOICE_SAMPLE_DURATION_S,
+    ) -> bytes:
+        """Capture one utterance of live PCM from a connected node's mic."""
+        node = (node_id or "").strip()
+        if not node:
+            raise VoiceSampleCaptureError("processing_failed", "node_id is required")
+        sessions = [
+            session
+            for session in self.list_owner_sessions(owner_id)
+            if session.presence.node_id == node
+        ]
+        if not sessions:
+            raise VoiceSampleCaptureError(
+                "node_offline",
+                "That room speaker is not connected",
+            )
+        session = max(sessions, key=lambda item: item.last_seen_at)
+        if session.voice_sample_done is not None and not session.voice_sample_done.done():
+            raise VoiceSampleCaptureError("busy", "A voice sample is already in progress")
+
+        needed = int(duration_s * SAMPLE_RATE) * 2
+        if needed <= 0:
+            raise VoiceSampleCaptureError("processing_failed", "Capture duration is invalid")
+        loop = asyncio.get_running_loop()
+        done: asyncio.Future[bytes] = loop.create_future()
+        session.voice_sample_buffer = bytearray()
+        session.voice_sample_needed = needed
+        session.voice_sample_done = done
+        try:
+            return await asyncio.wait_for(done, timeout=duration_s + VOICE_SAMPLE_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise VoiceSampleCaptureError(
+                "capture_timeout",
+                "Did not hear enough audio from that speaker",
+            ) from exc
+        finally:
+            if session.voice_sample_done is done:
+                session.voice_sample_buffer = None
+                session.voice_sample_needed = 0
+                session.voice_sample_done = None
+
     def record_user_turn_activity(self, connection_id: str) -> None:
         session = self.sessions.get(connection_id)
         if session is not None:
@@ -442,7 +522,10 @@ class ConnectionManager:
         # Note: These MUST be per-session because they maintain internal state/buffers
         # for their respective audio streams.
         vad = TenVADService(threshold=settings.VOICE.vad_threshold)
-        speaker_verifier = EnrolledSpeakerVerifier(owner_id=presence.owner_id)
+        speaker_verifier = EnrolledSpeakerVerifier(
+            owner_id=presence.owner_id,
+            node_id=presence.node_id,
+        )
         wakeword = WakeWordService(
             owner_id=presence.owner_id,
             speaker_verifier=speaker_verifier,
@@ -585,6 +668,7 @@ class ConnectionManager:
                 logger.debug(f"Ignoring disconnect for replaced session: {connection_id}")
                 return
 
+            session.abort_voice_sample("node_offline", "Room speaker disconnected")
             try:
                 if session.accepted_input_task is not None and not session.accepted_input_task.done():
                     session.accepted_input_task.cancel("disconnect")

@@ -5,6 +5,7 @@ Durable state backed up:
   credentials/       — encrypted API keys, HA_TOKEN, provider secrets
   host-prefs.json    — launch / availability preferences
   voice/             — speaker enrollment profiles
+  home/              — Agent Home overlays, skills, and mcp.json
 
 Not backed up (large or ephemeral): models/, cache/, valkey/, run/, logs.
 
@@ -42,7 +43,7 @@ APP_TCP_URL = "mongodb://127.0.0.1:27018"
 APP_BACKUPS = APP_SUPPORT.parent / "JARV1S Backups"
 MANIFEST_NAME = "manifest.json"
 BACKUP_FORMAT_VERSION = 2
-DURABLE_ENTRIES = ("mongo", "credentials", "host-prefs.json", "voice")
+DURABLE_ENTRIES = ("mongo", "credentials", "host-prefs.json", "voice", "home")
 FACTORY_WIPE_ENTRIES = ("mongo", "credentials", "voice")
 DEFAULT_BACKUP_NAME = "daily"
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
@@ -364,7 +365,7 @@ def cmd_backup(out: Path | None, name: str | None = None) -> int:
     print(f"Dogfood backup saved: {destination}")
     print(f"  size:    {_format_bytes(total)}")
     print(f"  entries: {', '.join(entries)}")
-    print("  includes: Mongo config + encrypted keys + host prefs + voice profiles")
+    print("  includes: Mongo config + encrypted keys + host prefs + voice profiles + home")
     print("  excludes: models/, cache/, valkey/, run/ (ephemeral or re-downloadable)")
     return 0
 
@@ -387,10 +388,13 @@ def cmd_restore(source: Path | None, *, yes: bool) -> int:
         _verify_backup(stage, manifest)
 
         previous.mkdir(parents=True)
-        # Swap only durable entries — keep models/, cache/, valkey/, run/ in place.
+        # Swap only durable entries present in this backup — keep models/,
+        # cache/, valkey/, run/, and newer entries the backup predates.
         for name in DURABLE_ENTRIES:
             live = APP_SUPPORT / name
             staged = stage / name
+            if name not in manifest["entries"] and not staged.exists():
+                continue
             if live.exists():
                 live.rename(previous / name)
             if staged.exists():

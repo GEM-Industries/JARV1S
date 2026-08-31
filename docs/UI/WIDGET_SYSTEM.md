@@ -71,7 +71,7 @@ Widget-level polling is avoided. If a future data source truly needs polling, th
 
 ### E. Receipt / Content / Pinned Visualization
 *   **Review Rail:** Compact cards overlaid on the right of the stage (absolute; centre projection stays viewport-centered) for glanceable confirmations and long-running work progress. Backend tools use `push_receipt(...)` / `receipt_envelope(...)` for one-shot confirmations, or `progress_receipt_envelope(...)` for stable upsertable progress receipts. Both emit a `ContentWidget` with `data.display = "receipt"`. Progress receipts may include `receipt_kind`, `status`, `attention`, and an `action` object that tells the frontend what click should do.
-*   **Receipt actions:** Generic click routing lives in receipt `data.action`, not in canvas-specific task logic. Current action types: `activate_widget` (open an existing widget by `widget_id`) and `open_background_task` (fetch task detail and open `BackgroundTaskWidget`). New long-running domains should reuse `progress_receipt_envelope(...)` rather than inventing a new rail component.
+*   **Background task review:** `BackgroundTaskWidget` leads with the result, then changed files as the actionable list (open in the editor). The work log is supporting detail, grouped into replies and tool batches — not a raw stream.
 *   **Dynamic live stage:** The centre shows exactly one foreground subject. Voice phases (`Detected`, `Listening`, `Transcribing`, `Thinking`, `Executing`, `Speaking`) own a stable projection slot. After playback ends, the latest finalized response settles without live motion for an adaptive 5–15 second reading dwell, then fades to the ambient indicator. A newer turn, content widget, or foreground `PendingInputWidget` replaces it immediately. Blocking consent outranks stale widget selection; background completions stay in the receipt rail and never auto-steal the centre.
 *   **Pinned support:** Pinning keeps a widget available in a quiet supporting shelf beneath the stage. Pinning is durable main-canvas availability, not movement into the receipt rail.
 *   **No Push:** Sensory or self-evident actions such as volume, playback, lights, or tiny list changes should not create widgets.
@@ -138,7 +138,6 @@ The frontend uses a **Typed Registry** pattern. All widgets register a `WidgetDe
 **Contract (`types.ts`):**
 ```typescript
 export interface BaseWidgetProps {
-  mode: 'hero' | 'compressed';
   widgetId: string;
 }
 export interface WidgetDefinition<T = any> {
@@ -155,6 +154,8 @@ export interface WidgetDefinition<T = any> {
   };
 }
 ```
+
+Hero receives envelope `data` plus `widgetId`. Layout `mode` (`hero` | `compressed`) stays on `WidgetWrapper` and is not injected into Hero — that key collides with domain fields such as background-task `mode`.
 
 **Receipt rail helpers (`widgetRail.ts`, `PrimaryCanvas.tsx`):**
 - `isReceiptRailWidget()` — filters compressed review-rail cards

@@ -131,7 +131,7 @@ async def compact_history(
     history: list[dict],
     system_prompt: str | SystemPrompt,
     llm_service: Optional[object] = None,
-    session_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
 ) -> tuple[list[dict], dict]:
     """
     Two-phase context compaction: offload tool results, then summarize + trim.
@@ -140,9 +140,9 @@ async def compact_history(
     an LLM service is provided, the oldest messages are summarized into a compact
     block before the newest-first fill. Otherwise falls back to truncation only.
 
-    When messages are dropped and session_id is provided, a background task
+    When messages are dropped and owner_id is provided, a background task
     backfills embeddings for any un-indexed messages so they remain searchable
-    via recall_conversation.
+    via recall().
 
     Returns (compacted_history, stats).
     """
@@ -193,8 +193,8 @@ async def compact_history(
             dropped, used, budget, summarized,
         )
         # Background-backfill embeddings for dropped messages so they stay searchable
-        if session_id:
-            _schedule_embedding_backfill(session_id)
+        if owner_id:
+            _schedule_embedding_backfill(owner_id)
     else:
         logger.debug(
             "Context budget: %d tokens used / %d budget (%d messages, summarized=%s)",
@@ -271,12 +271,12 @@ async def _summarize_and_compact(
     return True
 
 
-def _schedule_embedding_backfill(session_id: str) -> None:
+def _schedule_embedding_backfill(owner_id: str) -> None:
     """Fire-and-forget: backfill embeddings for conversation messages missing them."""
     async def _run() -> None:
         try:
             from services.database.mongodb import mongodb
-            await mongodb.backfill_conversation_embeddings(session_id, limit=50)
+            await mongodb.backfill_conversation_embeddings(owner_id, limit=50)
         except Exception as e:
             logger.warning("Embedding backfill task failed: %s", e)
 

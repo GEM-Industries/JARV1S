@@ -16,6 +16,7 @@ share one source of truth.
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from collections.abc import Callable
@@ -66,10 +67,15 @@ def _is_routable(plugin) -> bool:
     return plugin.metadata.routable
 
 
+# Offer a capability on every turn only when routing cannot see the intent:
+# 1. the discovery escape hatch
+# 2. an unroutable computer/presentation primitive
+# 3. a model-initiated action the user often does not name (memory writes,
+#    web search, shell, named-work verbs whose roster is already in the prompt)
+# Routable domain create/edit tools stay off this list. Routing, search_tools,
+# and edit_tool promotion cover those.
 ALWAYS_ON_FQNS: frozenset[str] = frozenset({
-    "agents.dispatch",
-    "automations.create_rule",
-    "db.clear_conversation_history",
+    "system.search_tools",
     "display.push_content",
     "files.delete",
     "files.edit",
@@ -78,13 +84,16 @@ ALWAYS_ON_FQNS: frozenset[str] = frozenset({
     "files.move",
     "files.read",
     "files.write",
+    "system.exec",
+    "search.web",
     "profile.add_memory",
     "profile.remember",
     "profile.update_memory",
-    "scheduler.remind",
-    "search.web",
-    "system.exec",
-    "system.search_tools",
+    "agents.dispatch",
+    "agents.resume",
+    "agents.get_status",
+    "agents.cancel_task",
+    "agents.close",
 })
 
 
@@ -98,29 +107,79 @@ def always_on_fqns() -> Set[str]:
     return enabled
 
 
-def active_tool_fqns(routed: Set[str] | None = None) -> Set[str]:
+_ACT_HIDDEN_FQNS = frozenset({"scheduler.remind"})
+_BACKGROUND_HIDDEN_FQNS = frozenset({"agents.dispatch"})
+
+
+def active_tool_fqns(
+    routed: Set[str] | None = None,
+    *,
+    trigger_decision: str | None = None,
+    source: str | None = None,
+) -> Set[str]:
     """Per-iteration tools= set: semantic matches plus always-on capabilities."""
-    return set(routed or ()) | always_on_fqns()
+    fqns = set(routed or ()) | always_on_fqns()
+    if trigger_decision == "act":
+        fqns -= _ACT_HIDDEN_FQNS
+    if source == "background":
+        fqns -= _BACKGROUND_HIDDEN_FQNS
+    return fqns
+
+
+_NAMED_FQN_KEYS = ("fqn", "edit_tool")
+_MAX_DISCOVERY_DEPTH = 6
+
+
+def _looks_like_fqn(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    fqn = value.strip()
+    if "." not in fqn or " " in fqn:
+        return None
+    return fqn
+
+
+def _collect_named_fqns(data: object, found: Set[str], *, depth: int = 0) -> None:
+    if data is None or depth > _MAX_DISCOVERY_DEPTH:
+        return
+    if isinstance(data, str):
+        text = data.strip()
+        if text[:1] in "{[":
+            try:
+                _collect_named_fqns(json.loads(text), found, depth=depth + 1)
+            except (TypeError, ValueError):
+                return
+        return
+    dump = getattr(data, "model_dump", None)
+    if callable(dump):
+        data = dump(mode="json", exclude_none=True)
+    if isinstance(data, dict):
+        for key in _NAMED_FQN_KEYS:
+            fqn = _looks_like_fqn(data.get(key))
+            if fqn:
+                found.add(fqn)
+        for value in data.values():
+            _collect_named_fqns(value, found, depth=depth + 1)
+        return
+    if isinstance(data, (list, tuple)):
+        for item in data:
+            _collect_named_fqns(item, found, depth=depth + 1)
+
+
+def discovered_fqns(data: object) -> Set[str]:
+    """Catalog FQNs named in a tool result that should be offered next iteration.
+
+    Covers ``system.search_tools`` ``fqn`` cards and setups ``edit_tool`` pointers.
+    Unknown names are ignored so a result cannot invent a capability.
+    """
+    found: Set[str] = set()
+    _collect_named_fqns(data, found)
+    return {fqn for fqn in found if registry.get_capability(fqn) is not None}
 
 
 def search_result_fqns(data: object) -> Set[str]:
     """Extract discovered FQNs from a typed system.search_tools result."""
-    tools: list[object]
-    if isinstance(data, dict):
-        tools = list(data.get("tools") or [])
-    elif isinstance(data, list):
-        tools = data
-    else:
-        tools = []
-    found: Set[str] = set()
-    for item in tools:
-        if isinstance(item, dict) and item.get("fqn"):
-            found.add(str(item["fqn"]))
-            continue
-        fqn = getattr(item, "fqn", None)
-        if fqn:
-            found.add(str(fqn))
-    return found
+    return discovered_fqns(data)
 
 
 class ToolRouter:
@@ -276,7 +335,7 @@ class ToolRouter:
                     matched, raw_scores, resolved_policy, focus_plugins
                 )
             ):
-                focused_matched = self._fit_plugins_to_budget(
+                focused_matched = self._select_matched_plugins(
                     self._focus_ranked_candidates(matched, focus_plugins, raw_scores),
                     resolved_policy,
                 )
@@ -286,7 +345,7 @@ class ToolRouter:
                     match_mode = "tool_focus"
         except Exception as e:
             logger.warning("ToolRouter embed failed: %s", e)
-            matched = self._fit_plugins_to_budget(
+            matched = self._select_matched_plugins(
                 [(name, 1.0) for name in sorted(focus_plugins | carryover_plugins)],
                 resolved_policy,
             )
@@ -322,7 +381,7 @@ class ToolRouter:
                 )
                 for name in matched | carryover_plugins
             ]
-            carried_matched = self._fit_plugins_to_budget(ranked, resolved_policy)
+            carried_matched = self._select_matched_plugins(ranked, resolved_policy)
             used_session_carryover = bool(carried_matched & carryover_plugins)
             if carried_matched != matched:
                 matched = carried_matched
@@ -423,11 +482,11 @@ class ToolRouter:
         ranked = sorted(adjusted, key=lambda x: x[1], reverse=True)
         over_threshold = [p for p in ranked if p[1] >= policy.threshold]
         if over_threshold:
-            return self._fit_plugins_to_budget(over_threshold, policy), "threshold"
+            return self._select_matched_plugins(over_threshold, policy), "threshold"
 
         fallback = [p for p in ranked if p[1] >= policy.fallback_threshold][:policy.fallback_top_k]
         if fallback:
-            return self._fit_plugins_to_budget(fallback, policy), "fallback_topk"
+            return self._select_matched_plugins(fallback, policy), "fallback_topk"
 
         return set(), "none"
 
@@ -478,14 +537,14 @@ class ToolRouter:
                 candidate_scores[name] = max(candidate_scores.get(name, 0.0), best_adjusted[name])
         candidates = sorted(candidate_scores.items(), key=lambda x: x[1], reverse=True)
         if candidates:
-            return self._fit_plugins_to_budget(candidates, policy), "multi_intent", raw_scores, adjusted, segment_matches
+            return self._select_matched_plugins(candidates, policy), "multi_intent", raw_scores, adjusted, segment_matches
 
         fallback = [p for p in adjusted if p[1] >= policy.fallback_threshold][:policy.fallback_top_k]
         if fallback:
-            return self._fit_plugins_to_budget(fallback, policy), "fallback_topk", raw_scores, adjusted, segment_matches
+            return self._select_matched_plugins(fallback, policy), "fallback_topk", raw_scores, adjusted, segment_matches
         return set(), "none", raw_scores, adjusted, segment_matches
 
-    def _fit_plugins_to_budget(
+    def _select_matched_plugins(
         self,
         candidates: list[tuple[str, float]],
         policy: RoutingPolicy,
@@ -498,11 +557,7 @@ class ToolRouter:
             seen.add(name)
             if len(selected) >= policy.max_matched:
                 break
-
-            trial = set(selected) | {name}
-            schema_chars, _ = self._schema_stats(self._expand_to_fqns(trial))
-            if policy.schema_char_budget is None or schema_chars <= policy.schema_char_budget or not selected:
-                selected.append(name)
+            selected.append(name)
         return set(selected)
 
     def _schema_stats(self, routed_tools: Set[str]) -> tuple[int, int]:
@@ -512,7 +567,7 @@ class ToolRouter:
         try:
             return registry.estimate_schema_stats(active)
         except Exception as e:
-            logger.debug("ToolRouter: schema budget sizing failed: %s", e)
+            logger.debug("ToolRouter: schema sizing failed: %s", e)
             return 0, 0
 
     def _record_diagnostics(

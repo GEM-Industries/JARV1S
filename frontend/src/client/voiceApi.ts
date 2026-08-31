@@ -120,6 +120,7 @@ export interface LocalVoicePreview {
 export interface SpeakerProfileStatus {
   status: SpeakerProfileStatusValue
   updated_at: string | null
+  node_ids?: string[]
 }
 
 export interface UpsertSpeakerProfileRequest {
@@ -158,6 +159,11 @@ export const voiceApi = {
       clips: body.clips.map(bytesToBase64),
     }),
   deleteSpeakerProfile: () => request<SpeakerProfileStatus>('DELETE', '/speaker-profile'),
+  captureNodeSpeakerSample: (nodeId: string) =>
+    request<SpeakerProfileStatus>(
+      'POST',
+      `/speaker-profile/nodes/${encodeURIComponent(nodeId)}/sample`,
+    ),
   checkWakePhrase: (clip: Uint8Array) =>
     request<WakeCheckResult>('POST', '/wake-check', { clip: bytesToBase64(clip) }),
 }

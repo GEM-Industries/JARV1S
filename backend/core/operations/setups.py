@@ -12,6 +12,7 @@ from core.triggers.lifecycle import (
     cancel_open_instances_for_rule,
     is_scheduler_managed,
     materialize_after_pause,
+    resolved_pause_until,
     rule_allows_dispatch,
     rule_management,
 )
@@ -26,6 +27,11 @@ class SetupPatch(BaseModel):
 
 class SetupMutationError(ValueError):
     pass
+
+
+def definition_pause_patch(until: datetime | None = None) -> SetupPatch:
+    """Pause a definition without disabling it. Omit until for indefinite."""
+    return SetupPatch(enabled=True, paused_until=resolved_pause_until(until))
 
 
 def _rule_id_from_setup_id(setup_id: str) -> str:

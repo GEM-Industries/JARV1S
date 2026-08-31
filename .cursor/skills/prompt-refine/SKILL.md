@@ -1,6 +1,6 @@
 ---
 name: prompt-refine
-description: Review and refine JARV1S prompts, agent instructions, tool docstrings, Cursor rules, and skills. Use when a prompt change is requested, an LLM behavior failure needs diagnosis, or work touches backend/core/prompts, PromptBuilder, system turn messages, tool descriptions, or SKILL.md files. Focuses on root-cause framing, eval/regression thinking, and avoiding hard-coded counterexamples.
+description: Review and refine JARV1S prompts, agent instructions, tool docstrings, Cursor rules, and skills. Use when a prompt change is requested, an LLM behavior failure needs diagnosis, or work touches backend/core/prompts, PromptBuilder, system turn messages, tool descriptions, or SKILL.md files. Focuses on root-cause framing, eval/regression thinking, and avoiding hard-coded counterexamples. Do not use for product architecture or implementation plans; use shape-feature.
 license: MIT
 metadata:
   author: roy-songzhe-li
@@ -11,7 +11,7 @@ metadata:
 
 # Prompt Refine
 
-Use this skill to improve existing JARV1S prompts without overfitting to one bad transcript.
+Use this skill to improve existing JARV1S prompts without overfitting to one bad transcript. Product jobs, new modules, and implementation plans belong in `shape-feature`, not here.
 
 ## Core Rule
 
@@ -29,19 +29,15 @@ If you cannot state the invariant, do not edit the prompt yet. Ask for the trans
 
 Read the relevant files before editing. The current prompt architecture is split across these surfaces:
 
-- `backend/core/prompts/builder.py`: `PromptBuilder` assembles a cacheable static prefix plus a dynamic per-turn tail. It also owns `PromptMode.FULL`, `PromptMode.BACKGROUND`, and `build_subprocess_prompt()`.
-- `backend/core/prompts/persona/identity.yaml`: stable assistant identity and global voice constraints.
-- `backend/core/prompts/persona/style.yaml`: personality range, dry wit, brevity, and response-pattern guidance.
-- `backend/core/prompts/persona/voice.yaml`: TTS/spoken-output rules, speech formatting, alert phrasing, and tool-result invisibility.
-- `backend/core/prompts/persona/examples.yaml`: few-shot tone and brevity anchors. These demonstrate style, not exact wording.
-- `backend/core/prompts/persona/protocols.yaml`: capability-call interface, pacing, approval flow, tool chaining, live-data rules, and operational constraints.
-- `backend/core/prompts/capabilities/reasoning.yaml`: reasoning examples and tool-use patterns for normal turns.
-- `backend/core/prompts/persona/background.yaml` and `capabilities/reasoning_background.yaml`: in-process background agent behavior.
+- `backend/core/prompts/SYSTEM.md`: consolidated product-owned grounding, tool-use, reliability, and delivery contract.
+- `backend/core/prompts/BACKGROUND.md` and `background.py`: focused in-process worker contract and operational context; no Home personality or interactive delivery rules.
+- `backend/core/home.py` and `$JARVIS_DATA_DIR/home/PROMPT.md`: user-owned identity, personality, tone, and stable working preferences.
+- `backend/core/prompts/builder.py`: `PromptBuilder` assembles the cacheable product prefix plus Home, profile, skills, and runtime context. It also owns `build_subprocess_prompt()`.
 - `backend/core/prompts/system_turn_context.py`: user-message builder for system turns, automations, protocol runs, alerts, and task-result delivery.
 - `backend/core/prompts/protocol_context.py`: protocol-specific run context.
 - `backend/plugins/**/*.py`: tool docstrings are part of the prompt surface. For tool selection, arguments, return handling, and policy local to one tool, edit the tool docstring before adding global prompt rules.
 
-Static prompt sections must stay stable where possible. Dynamic facts such as time, timezone, source, modality, or user/session data belong in runtime context or system-turn messages, not static YAML. Offered tool names and argument schemas are sent separately via provider `tools=`.
+The static product prompt must stay stable where possible. Dynamic facts such as time, timezone, source, modality, or user/session data belong in runtime context or system-turn messages, not `SYSTEM.md`. Offered tool names and argument schemas are sent separately via provider `tools=`.
 
 For current-turn voice pacing, prompt placement matters as much as wording. If prior turns are bleeding into the current response, prefer a concise runtime-context rule near the end of the dynamic prompt over adding more static persona prose or tool-docstring policy.
 
@@ -52,7 +48,7 @@ For current-turn voice pacing, prompt placement matters as much as wording. If p
 Before proposing or making changes:
 
 - Read the entire relevant prompt section and adjacent sections that may conflict with it.
-- Identify the execution mode: `FULL` voice/text, `BACKGROUND` in-process, subprocess coding agent, system turn, protocol run, or tool docstring.
+- Identify the execution path: direct voice/text, in-process background, subprocess coding agent, system turn, protocol run, or tool docstring.
 - If available, inspect the failure transcript, assembled prompt, tool results, and expected behavior.
 - If the only evidence is "the model once did X", treat nondeterminism as a live possibility. Prefer a small eval or multiple trial checks before a broad prompt change.
 - For subjective prompt tuning, use `tier: probe` cases as measurement, not regression gates. Run a baseline first, then compare after edits.
@@ -75,15 +71,18 @@ If classification is uncertain, state the uncertainty and gather more evidence i
 
 Use this routing guide:
 
-- Tone, identity, "sir", wit, warmth: `identity.yaml`, `style.yaml`, or `examples.yaml`.
-- Spoken output, TTS pacing, markdown suppression, alert phrasing: `voice.yaml`.
-- Capability calls, live data, preambles, approval flow, chaining, tool recovery: `protocols.yaml` or `reasoning.yaml`.
-- Background/headless behavior: `background.yaml`, `reasoning_background.yaml`, or `build_subprocess_prompt()`.
+- Tone, identity, "sir", wit, warmth: Agent Home `PROMPT.md`.
+- Cross-cutting direct-assistant grounding, tool use, and voice/text delivery: `SYSTEM.md`.
+- In-process delegated-worker behavior: `BACKGROUND.md`.
+- Current-turn modality, time, history, location, or source reminders: `builder.py`.
+- Background coding-worker behavior: `build_subprocess_prompt()`.
 - System-trigger behavior, `NO_REPLY`, event classification, task-result delivery: `system_turn_context.py` or `protocol_context.py`.
 - Tool choice, parameters, output shape, tool-local policy: the plugin tool docstring or return schema.
 - Prompt assembly, static/dynamic placement, mode inclusion, and current-turn runtime reminders: `builder.py`.
 
 Do not add a global rule when a narrower prompt surface can solve the invariant.
+
+Product/architecture plans, new modules, collections, or coordinators: `shape-feature`, not this skill.
 
 ### 4. Design The Change
 
@@ -103,7 +102,7 @@ Avoid these anti-patterns:
 - Adding the failed user phrase as a special case.
 - Adding a catchphrase the model may repeat every time.
 - Adding `ALWAYS` rules that silently affect voice, text, background, and system turns differently.
-- Moving dynamic facts into static prompt YAML.
+- Moving dynamic facts into `SYSTEM.md`.
 - Adding examples that teach wording rather than behavior.
 
 ### 5. Check Adjacent Regressions

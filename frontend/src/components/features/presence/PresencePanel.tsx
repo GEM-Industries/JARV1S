@@ -1,425 +1,46 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BroadcastIcon,
   CaretLeftIcon,
-  CopyIcon,
-  DesktopIcon,
-  DeviceMobileIcon,
-  MapPinIcon,
   PlusIcon,
-  PulseIcon,
-  RadioIcon,
-  SpinnerIcon,
   WarningIcon,
 } from '@phosphor-icons/react'
 import {
   presenceApi,
-  type DeviceKind,
   type PresenceNode,
   type PresenceView,
 } from '../../../client/presenceApi'
 import { smartHomeApi, type RoomSummary } from '../../../client/smartHomeApi'
 import { jarvisClient } from '../../../client/JarvisClient'
+import { voiceApi, type SpeakerProfileStatus } from '../../../client/voiceApi'
 import { isDesktopApp } from '../../../runtime/clientSurface'
 import {
   checkSpeakerReachability,
   getHostStatus,
   wsUrlFromHostOrigin,
-  type HostReachabilityStatus,
-  type SpeakerReachability,
 } from '../../../runtime/desktopBridge'
 import { useJarvisStore } from '../../../store/useJarvisStore'
 import { Button } from '../../ui/Button'
 import { Placeholder } from '../../ui/Placeholder'
-import { Select } from '../../ui/Select'
 import { StatusBarWorkspaceHeader } from '../../ui/StatusBarWorkspaceHeader'
-import { StatusPill } from '../../ui/StatusPill'
 import { HostSettings } from '../settings/HostSettings'
 import { AddRoomSpeakerCard } from './AddRoomSpeakerCard'
-
-type PrivateAccess = 'unknown' | 'ready' | 'needs_setup'
+import { connectRoomSpeaker } from './connectSpeaker'
+import { DeviceRow } from './DeviceRow'
+import {
+  displayNameForNode,
+  groupNodes,
+  speakerDiagnosisMessage,
+  type PrivateAccess,
+  type SpeakerDiagnosis,
+  type SpeakerReconnect,
+} from './deviceDisplay'
+import { SPEAKER_CONNECT_WAIT_MS } from './pairing'
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error'
 type FetchMode = 'load' | 'background'
 
 function errMsg(e: unknown, fb: string) {
   return e instanceof Error ? e.message : fb
-}
-
-function labelForKind(kind: DeviceKind): string {
-  switch (kind) {
-    case 'browser':
-      return 'Browser'
-    case 'desktop':
-      return 'Desktop app'
-    case 'phone':
-      return 'Phone'
-    case 'satellite':
-      return 'Room speaker'
-    default:
-      return 'Device'
-  }
-}
-
-function titleCase(value: string): string {
-  return value
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ')
-}
-
-function displayNameForNode(node: PresenceNode, thisDevice: boolean): string {
-  const explicit = node.node_label?.trim()
-  if (explicit) return explicit
-  if (thisDevice && (node.kind === 'browser' || node.kind === 'desktop')) return 'This Mac'
-  if (thisDevice && node.kind === 'phone') return 'This phone'
-  if (node.kind === 'browser') return 'Browser'
-  if (node.kind === 'desktop') return 'Desktop app'
-  if (node.kind === 'phone') return 'Phone'
-  if (node.kind === 'satellite') return titleCase(node.node_id)
-  return titleCase(node.node_id) || 'Device'
-}
-
-const KindIcon: React.FC<{ kind: DeviceKind; size?: number }> = ({ kind, size = 18 }) => {
-  switch (kind) {
-    case 'browser':
-    case 'desktop':
-      return <DesktopIcon size={size} className="text-brand shrink-0" />
-    case 'phone':
-      return <DeviceMobileIcon size={size} className="text-brand shrink-0" />
-    case 'satellite':
-      return <RadioIcon size={size} className="text-brand shrink-0" />
-    default:
-      return <BroadcastIcon size={size} className="text-brand shrink-0" />
-  }
-}
-
-function toneForStatus(status: PresenceNode['status']): 'success' | 'warning' | 'error' | 'neutral' {
-  switch (status) {
-    case 'online':
-      return 'success'
-    case 'offline':
-      return 'warning'
-  }
-}
-
-function statusLabel(status: PresenceNode['status']): string {
-  switch (status) {
-    case 'online':
-      return 'Online'
-    case 'offline':
-      return 'Offline'
-  }
-}
-
-function labelForCapability(cap: string): string {
-  switch (cap) {
-    case 'mic':
-      return 'Mic'
-    case 'speaker':
-      return 'Speaker'
-    case 'display':
-      return 'Display'
-    default:
-      return titleCase(cap)
-  }
-}
-
-function formatLastSeen(iso?: string | null): string | null {
-  if (!iso) return null
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return null
-  const diffMs = Date.now() - date.getTime()
-  if (diffMs < 60_000) return 'just now'
-  const mins = Math.floor(diffMs / 60_000)
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
-
-function contextForNode(node: PresenceNode, privateAccess: PrivateAccess): string | null {
-  if (node.status === 'online') return null
-  const lastSeen = formatLastSeen(node.last_seen_at)
-  if (node.kind === 'satellite') {
-    if (privateAccess === 'needs_setup') {
-      return lastSeen
-        ? `Last seen ${lastSeen} · turn on private access on this Mac`
-        : 'Offline · turn on private access on this Mac'
-    }
-    if (privateAccess === 'ready') {
-      return lastSeen
-        ? `Last seen ${lastSeen} · speaker is not reaching this Mac`
-        : 'Offline · speaker is not reaching this Mac'
-    }
-    return lastSeen
-      ? `Last seen ${lastSeen} · check private access and restart the speaker`
-      : 'Offline · check private access and restart the speaker'
-  }
-  return lastSeen ? `Last seen ${lastSeen} · reconnects when reopened` : 'Offline · reconnects when reopened'
-}
-
-type SpeakerDiagnosis = { checking: boolean; message: string | null }
-
-function speakerDiagnosisMessage(
-  host: HostReachabilityStatus | null,
-  speaker: SpeakerReachability | null,
-): string {
-  if (!host?.backend_healthy) {
-    return 'JARV1S on this Mac is not running — restart it, then check again.'
-  }
-  if (host.remote_healthy !== true) {
-    return 'This Mac’s private access is not working — review setup below, then restart the speaker.'
-  }
-  if (!speaker || speaker.network === 'unavailable') {
-    return 'Could not check the speaker — Tailscale is not responding on this Mac.'
-  }
-  if (speaker.network === 'not_found' || speaker.network === 'offline') {
-    const seen = speaker.network === 'offline' ? formatLastSeen(speaker.last_seen) : null
-    return `This Mac is fine — the speaker is not on your private network${seen ? ` (last seen ${seen})` : ''}. Check that it is powered on and connected to Wi-Fi. Its address and access are still valid, so no re-pairing is needed.`
-  }
-  return 'This Mac is fine and the speaker is on the network, but its JARV1S service is not connecting. Restart the speaker; if it stays offline, copy the address below and update its config.'
-}
-
-function groupNodes(nodes: PresenceNode[]): { title: string; nodes: PresenceNode[] }[] {
-  const online = nodes.filter((n) => n.status === 'online')
-  const offline = nodes.filter((n) => n.status === 'offline')
-  const groups: { title: string; nodes: PresenceNode[] }[] = []
-  if (online.length) groups.push({ title: 'Online', nodes: online })
-  if (offline.length) groups.push({ title: 'Offline', nodes: offline })
-  return groups
-}
-
-function roomOptions(rooms: RoomSummary[]) {
-  return [
-    { value: '', label: 'No room' },
-    ...rooms
-      .filter((room) => room.exists_in_ha)
-      .map((room) => ({ value: room.area_id, label: room.name })),
-  ]
-}
-
-const NodeRow: React.FC<{
-  node: PresenceNode
-  thisDevice: boolean
-  rooms: RoomSummary[]
-  privateAccess: PrivateAccess
-  speakerWsUrl: string | null
-  addressCopied: boolean
-  revoking: boolean
-  confirmId: string | null
-  assigning: boolean
-  selectedAreaId: string
-  assignBusy: boolean
-  onSelectedAreaChange: (areaId: string) => void
-  onBeginAssign: (node: PresenceNode) => void
-  onSubmitAssign: (node: PresenceNode) => void
-  onCancelAssign: () => void
-  onRevokeClick: (node: PresenceNode) => void
-  onConfirmRevoke: (node: PresenceNode) => void
-  onCancelRevoke: () => void
-  diagnosis?: SpeakerDiagnosis
-  onCheckSpeaker?: (node: PresenceNode) => void
-  onCopySpeakerAddress?: () => void
-  onOpenPrivateAccess?: () => void
-  onViewTurns?: (node: PresenceNode) => void
-}> = ({
-  node,
-  thisDevice,
-  rooms,
-  privateAccess,
-  speakerWsUrl,
-  addressCopied,
-  revoking,
-  confirmId,
-  assigning,
-  selectedAreaId,
-  assignBusy,
-  onSelectedAreaChange,
-  onBeginAssign,
-  onSubmitAssign,
-  onCancelAssign,
-  onRevokeClick,
-  onConfirmRevoke,
-  onCancelRevoke,
-  diagnosis,
-  onCheckSpeaker,
-  onCopySpeakerAddress,
-  onOpenPrivateAccess,
-  onViewTurns,
-}) => {
-  const displayName = displayNameForNode(node, thisDevice)
-  const diagnosisMessage =
-    node.kind === 'satellite' && node.status === 'offline' ? diagnosis?.message : null
-  const context = diagnosisMessage ?? contextForNode(node, privateAccess)
-  const canRevoke = !thisDevice && Boolean(node.device_id) && !revoking
-  const confirming = Boolean(node.device_id) && confirmId === node.device_id
-  const showViewTurns = Boolean(onViewTurns) && node.kind === 'satellite'
-  const canAssign = Boolean(node.device_id)
-  const showThisDeviceTag = thisDevice
-  const offlineSatellite = node.kind === 'satellite' && node.status === 'offline'
-  const showCheckSpeaker = offlineSatellite && Boolean(onCheckSpeaker)
-  const showCopyAddress =
-    offlineSatellite && privateAccess === 'ready' && Boolean(speakerWsUrl) && Boolean(onCopySpeakerAddress)
-  const showPrivateAccess =
-    offlineSatellite && privateAccess === 'needs_setup' && Boolean(onOpenPrivateAccess)
-
-  const metaParts = [labelForKind(node.kind)]
-  if (node.capabilities.length > 0) {
-    metaParts.push(node.capabilities.map(labelForCapability).join(' · '))
-  }
-
-  if (confirming) {
-    return (
-      <div className="flex flex-col gap-3 bg-status-danger/10 px-4 py-3">
-        <div className="min-w-0">
-          <p className="type-label text-foreground">Remove access for {displayName}?</p>
-          <p className="mt-1 type-body text-foreground-muted">
-            This device will need to pair again to reconnect.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button
-            color="critical"
-            size="xs"
-            disabled={revoking}
-            icon={revoking ? <SpinnerIcon className="animate-spin" size={12} /> : undefined}
-            onClick={() => onConfirmRevoke(node)}
-          >
-            {revoking ? 'Removing…' : 'Remove access'}
-          </Button>
-          <Button
-            variant="ghost"
-            color="neutral"
-            size="xs"
-            disabled={revoking}
-            onClick={onCancelRevoke}
-          >
-            Cancel
-          </Button>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex items-start gap-3 px-4 py-3">
-      <KindIcon kind={node.kind} size={16} />
-      <div className="min-w-0 flex-1 flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-3">
-          <p className="min-w-0 truncate type-label text-foreground">{displayName}</p>
-          <StatusPill tone={toneForStatus(node.status)}>{statusLabel(node.status)}</StatusPill>
-        </div>
-
-        <div className="min-w-0">
-          <p className="truncate type-meta text-foreground-subtle">
-            {metaParts.join(' · ')}
-            {showThisDeviceTag ? ' · This device' : ''}
-          </p>
-          {(node.room_name?.trim() || canAssign) && (
-            <p className="mt-0.5 truncate type-meta text-foreground-subtle">
-              {node.room_name?.trim() || 'No room assigned'}
-            </p>
-          )}
-          {context && <p className="mt-1 type-meta text-foreground-muted">{context}</p>}
-          {showCopyAddress && speakerWsUrl && (
-            <p className="mt-1 break-all font-mono type-meta text-foreground-subtle">{speakerWsUrl}</p>
-          )}
-        </div>
-
-        {assigning ? (
-          <div className="flex flex-col gap-3 pt-1">
-            <Select
-              value={selectedAreaId}
-              onChange={onSelectedAreaChange}
-              options={roomOptions(rooms)}
-              aria-label={`Room for ${displayName}`}
-            />
-            <div className="flex gap-2">
-              <Button
-                color="brand"
-                size="xs"
-                disabled={assignBusy}
-                icon={assignBusy ? <SpinnerIcon className="animate-spin" size={12} /> : undefined}
-                onClick={() => onSubmitAssign(node)}
-              >
-                {assignBusy ? 'Saving…' : 'Save'}
-              </Button>
-              <Button
-                variant="ghost"
-                color="neutral"
-                size="xs"
-                disabled={assignBusy}
-                onClick={onCancelAssign}
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            {canAssign && (
-              <Button
-                size="xs"
-                variant="ghost"
-                color="subtle"
-                icon={<MapPinIcon size={12} />}
-                onClick={() => onBeginAssign(node)}
-              >
-                {node.ha_area_id ? 'Change room' : 'Assign room'}
-              </Button>
-            )}
-            {showCheckSpeaker && (
-              <Button
-                size="xs"
-                variant="ghost"
-                color="action"
-                disabled={diagnosis?.checking}
-                icon={
-                  diagnosis?.checking ? (
-                    <SpinnerIcon className="animate-spin" size={12} />
-                  ) : (
-                    <PulseIcon size={12} />
-                  )
-                }
-                onClick={() => onCheckSpeaker?.(node)}
-              >
-                {diagnosis?.checking ? 'Checking…' : 'Check speaker'}
-              </Button>
-            )}
-            {showCopyAddress && (
-              <Button
-                size="xs"
-                variant="ghost"
-                color="action"
-                icon={<CopyIcon size={12} />}
-                onClick={onCopySpeakerAddress}
-              >
-                {addressCopied ? 'Copied address' : 'Copy address'}
-              </Button>
-            )}
-            {showPrivateAccess && (
-              <Button size="xs" variant="ghost" color="action" onClick={onOpenPrivateAccess}>
-                Review private access
-              </Button>
-            )}
-            {showViewTurns && (
-              <Button size="xs" variant="ghost" color="neutral" onClick={() => onViewTurns?.(node)}>
-                Activity
-              </Button>
-            )}
-            {canRevoke && (
-              <Button size="xs" variant="ghost" color="danger" onClick={() => onRevokeClick(node)}>
-                Remove access
-              </Button>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  )
 }
 
 export const PresencePanelContent: React.FC = () => {
@@ -434,6 +55,7 @@ export const PresencePanelContent: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [revokingId, setRevokingId] = useState<string | null>(null)
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null)
+  const [holdBusyId, setHoldBusyId] = useState<string | null>(null)
   const [assigningNodeId, setAssigningNodeId] = useState<string | null>(null)
   const [selectedAreaId, setSelectedAreaId] = useState('')
   const [assignBusy, setAssignBusy] = useState(false)
@@ -443,6 +65,10 @@ export const PresencePanelContent: React.FC = () => {
   const [speakerWsUrl, setSpeakerWsUrl] = useState<string | null>(null)
   const [addressCopied, setAddressCopied] = useState(false)
   const [diagnoses, setDiagnoses] = useState<Record<string, SpeakerDiagnosis>>({})
+  const [voiceProfile, setVoiceProfile] = useState<SpeakerProfileStatus | null>(null)
+  const [reconnect, setReconnect] = useState<(SpeakerReconnect & { nodeId: string }) | null>(null)
+  const [reconnectBusyId, setReconnectBusyId] = useState<string | null>(null)
+  const [reconnectWaiting, setReconnectWaiting] = useState(false)
   const accessSetupRef = useRef<HTMLDivElement>(null)
 
   const thisNodeId = useMemo(() => jarvisClient.getNodeId(), [])
@@ -489,10 +115,59 @@ export const PresencePanelContent: React.FC = () => {
   }, [fetchPresence])
 
   useEffect(() => {
+    let active = true
+    void voiceApi
+      .getSpeakerProfile()
+      .then((status) => {
+        if (active) setVoiceProfile(status)
+      })
+      .catch(() => {
+        if (active) setVoiceProfile(null)
+      })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
     if (presenceVersion === seenPresenceVersion.current) return
     seenPresenceVersion.current = presenceVersion
     void fetchPresence('background')
   }, [presenceVersion, fetchPresence])
+
+  useEffect(() => {
+    if (!reconnect || !view) return
+    const node = view.nodes.find((item) => item.node_id === reconnect.nodeId)
+    if (node?.status === 'online') {
+      setReconnect(null)
+    }
+  }, [view, reconnect])
+
+  useEffect(() => {
+    if (!reconnect) {
+      setReconnectWaiting(false)
+      return
+    }
+    setReconnectWaiting(true)
+    const timeout = window.setTimeout(() => setReconnectWaiting(false), SPEAKER_CONNECT_WAIT_MS)
+    return () => window.clearTimeout(timeout)
+  }, [reconnect?.nodeId, reconnect?.expiresAt])
+
+  const handleCheckSpeaker = useCallback(async (node: PresenceNode) => {
+    setDiagnoses((prev) => ({ ...prev, [node.node_id]: { checking: true, message: null } }))
+    try {
+      const [host, speaker] = await Promise.all([
+        getHostStatus(),
+        checkSpeakerReachability(node.node_id),
+      ])
+      setDiagnoses((prev) => ({
+        ...prev,
+        [node.node_id]: { checking: false, message: speakerDiagnosisMessage(host, speaker) },
+      }))
+    } catch {
+      setDiagnoses((prev) => ({ ...prev, [node.node_id]: { checking: false, message: null } }))
+    }
+  }, [])
 
   const groups = useMemo(() => groupNodes(view?.nodes ?? []), [view?.nodes])
   const onlineCount = view?.nodes.filter((n) => n.status === 'online').length ?? 0
@@ -519,17 +194,45 @@ export const PresencePanelContent: React.FC = () => {
     }
   }
 
+  const handleDisconnect = async (node: PresenceNode) => {
+    if (!node.device_id) return
+    setHoldBusyId(node.device_id)
+    setError(null)
+    try {
+      await presenceApi.disconnectDevice(node.device_id)
+      await fetchPresence('background')
+    } catch (e) {
+      setError(errMsg(e, 'Could not disconnect device.'))
+    } finally {
+      setHoldBusyId(null)
+    }
+  }
+
+  const handleResume = async (node: PresenceNode) => {
+    if (!node.device_id) return
+    setHoldBusyId(node.device_id)
+    setError(null)
+    try {
+      await presenceApi.resumeDevice(node.device_id)
+      await fetchPresence('background')
+    } catch (e) {
+      setError(errMsg(e, 'Could not resume device.'))
+    } finally {
+      setHoldBusyId(null)
+    }
+  }
+
   const beginAssign = (node: PresenceNode) => {
     setAssigningNodeId(node.node_id)
     setSelectedAreaId(node.ha_area_id || '')
     setConfirmRevokeId(null)
   }
 
-  const submitAssign = async (node: PresenceNode) => {
+  const submitAssign = async (node: PresenceNode, areaId: string) => {
     setAssignBusy(true)
     setError(null)
     try {
-      setView(await presenceApi.assignNodeRoom(node.node_id, selectedAreaId || null))
+      setView(await presenceApi.assignNodeRoom(node.node_id, areaId || null))
       setAssigningNodeId(null)
     } catch (e) {
       setError(errMsg(e, 'Could not assign room.'))
@@ -546,27 +249,46 @@ export const PresencePanelContent: React.FC = () => {
     })
   }, [openOverlay, thisNodeId])
 
-  const handleCheckSpeaker = useCallback(async (node: PresenceNode) => {
-    setDiagnoses((prev) => ({ ...prev, [node.node_id]: { checking: true, message: null } }))
-    let message: string
-    try {
-      const [host, speaker] = await Promise.all([
-        getHostStatus(),
-        checkSpeakerReachability(node.node_id),
-      ])
-      message = speakerDiagnosisMessage(host, speaker)
-    } catch {
-      message = 'Could not run the check — try again.'
-    }
-    setDiagnoses((prev) => ({ ...prev, [node.node_id]: { checking: false, message } }))
-  }, [])
-
   const handleCopySpeakerAddress = useCallback(async () => {
     if (!speakerWsUrl) return
     await navigator.clipboard.writeText(speakerWsUrl)
     setAddressCopied(true)
     window.setTimeout(() => setAddressCopied(false), 2000)
   }, [speakerWsUrl])
+
+  const handleReconnect = useCallback(async (node: PresenceNode) => {
+    setReconnectBusyId(node.node_id)
+    if (reconnect?.nodeId !== node.node_id) setReconnect(null)
+    setError(null)
+    try {
+      const setup = await connectRoomSpeaker(
+        {
+          nodeLabel: displayNameForNode(node, false),
+          nodeId: node.node_id,
+          roomName: node.room_name || undefined,
+          haAreaId: node.ha_area_id || undefined,
+          backendUrl: speakerWsUrl,
+        },
+        (issued) => {
+          setReconnect({
+            nodeId: node.node_id,
+            command: issued.command,
+            expiresAt: issued.expiresAt,
+            lanStatus: isDesktopApp() ? 'connecting' : 'skipped',
+          })
+        },
+      )
+      setReconnect((current) =>
+        current?.nodeId === node.node_id
+          ? { ...current, command: setup.command, expiresAt: setup.expiresAt, lanStatus: setup.lanStatus }
+          : current,
+      )
+    } catch (e) {
+      setError(errMsg(e, 'Could not reconnect the speaker.'))
+    } finally {
+      setReconnectBusyId(null)
+    }
+  }, [reconnect, speakerWsUrl])
 
   const handleOpenPrivateAccess = useCallback(() => {
     accessSetupRef.current?.scrollIntoView({ block: 'start' })
@@ -635,7 +357,7 @@ export const PresencePanelContent: React.FC = () => {
                 </div>
                 <div className="ui-surface-group">
                   {group.nodes.map((node) => (
-                    <NodeRow
+                    <DeviceRow
                       key={node.node_id}
                       node={node}
                       thisDevice={node.node_id === thisNodeId}
@@ -650,11 +372,14 @@ export const PresencePanelContent: React.FC = () => {
                       assignBusy={assignBusy}
                       onSelectedAreaChange={setSelectedAreaId}
                       onBeginAssign={beginAssign}
-                      onSubmitAssign={(n) => void submitAssign(n)}
+                      onSubmitAssign={(n, areaId) => void submitAssign(n, areaId)}
                       onCancelAssign={() => setAssigningNodeId(null)}
                       onRevokeClick={handleRevokeClick}
                       onConfirmRevoke={handleConfirmRevoke}
                       onCancelRevoke={() => setConfirmRevokeId(null)}
+                      holdBusy={Boolean(node.device_id) && holdBusyId === node.device_id}
+                      onDisconnect={(n) => void handleDisconnect(n)}
+                      onResume={(n) => void handleResume(n)}
                       diagnosis={diagnoses[node.node_id]}
                       onCheckSpeaker={
                         isDesktopApp() ? (n) => void handleCheckSpeaker(n) : undefined
@@ -662,6 +387,12 @@ export const PresencePanelContent: React.FC = () => {
                       onCopySpeakerAddress={() => void handleCopySpeakerAddress()}
                       onOpenPrivateAccess={handleOpenPrivateAccess}
                       onViewTurns={handleViewTurns}
+                      voiceProfile={voiceProfile}
+                      onVoiceSampleCaptured={setVoiceProfile}
+                      reconnect={reconnect?.nodeId === node.node_id ? reconnect : null}
+                      reconnectBusy={reconnectBusyId === node.node_id}
+                      reconnectWaiting={reconnect?.nodeId === node.node_id && reconnectWaiting}
+                      onReconnect={(n) => void handleReconnect(n)}
                     />
                   ))}
                 </div>

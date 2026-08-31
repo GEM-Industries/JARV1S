@@ -221,7 +221,7 @@ async def test_create_event_yearly_recurrence_payload_and_confirmation():
         },
     })
     client = SimpleNamespace(post=AsyncMock(return_value=created))
-    provider = OutlookProvider(client, account="work")
+    provider = OutlookProvider(client)
 
     confirmation = await provider.create_event(
         title="Annual review",
@@ -267,7 +267,7 @@ async def test_update_event_yearly_recurrence_payload():
         get=AsyncMock(return_value=existing),
         patch=AsyncMock(return_value=patched),
     )
-    provider = OutlookProvider(client, account="work")
+    provider = OutlookProvider(client)
 
     confirmation = await provider.update_event(
         "evt-1",

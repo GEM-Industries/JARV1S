@@ -124,6 +124,9 @@ async def test_discovery_promotes_fqns_into_active_set():
         seen_tools.append(set(fqns))
         return [{"type": "function"}]
 
+    def get_capability(fqn: str):
+        return SimpleNamespace(fqn=fqn) if fqn == "gmail.search" else None
+
     agent = JarvisAgent(llm)
     agent.prompt_builder.build = MagicMock(return_value="")
 
@@ -132,9 +135,10 @@ async def test_discovery_promotes_fqns_into_active_set():
         patch("core.agent.agent.dispatcher.dispatch", side_effect=fake_dispatch),
         patch("core.agent.agent.registry.resolve_provider_name", side_effect=resolve),
         patch("core.agent.agent.registry.provider_tools", side_effect=provider_tools),
+        patch("core.tool_router.registry.get_capability", side_effect=get_capability),
         patch(
             "core.agent.agent.active_tool_fqns",
-            side_effect=lambda routed: set(routed or ()) | {"system.search_tools"},
+            side_effect=lambda routed, **_: set(routed or ()) | {"system.search_tools"},
         ),
     ):
         events = [
@@ -151,6 +155,130 @@ async def test_discovery_promotes_fqns_into_active_set():
     assert any("system.search_tools" in fqns for fqns in seen_tools)
     assert any(event.capability == "gmail.search" for event in events if event.type == AgentEventType.TOOL_CALL)
     assert any("gmail.search" in fqns for fqns in seen_tools[1:])
+
+
+@pytest.mark.asyncio
+async def test_background_execution_never_offers_discovered_dispatch():
+    llm = ScriptedLLM([
+        [ToolCallEvent(call_id="s", name="system__search_tools", arguments={"query": "delegate"})],
+        [TextEvent(text="Done.")],
+    ])
+    seen_tools: list[set[str]] = []
+
+    async def fake_dispatch(call: CapabilityCall) -> CapabilityOutcome:
+        return _outcome(call, {"tools": [{"fqn": "agents.dispatch"}]})
+
+    def get_capability(fqn: str):
+        if fqn in {"system.search_tools", "agents.dispatch"}:
+            return SimpleNamespace(fqn=fqn, enabled=True)
+        return None
+
+    def provider_tools(fqns):
+        seen_tools.append(set(fqns))
+        return [{"type": "function"}]
+
+    agent = JarvisAgent(llm)
+    agent.prompt_builder.build = MagicMock(return_value="")
+
+    with (
+        patch("core.agent.agent.compact_history", AsyncMock(return_value=([], {}))),
+        patch("core.agent.agent.dispatcher.dispatch", side_effect=fake_dispatch),
+        patch(
+            "core.agent.agent.registry.resolve_provider_name",
+            return_value=SimpleNamespace(fqn="system.search_tools"),
+        ),
+        patch("core.agent.agent.registry.provider_tools", side_effect=provider_tools),
+        patch("core.tool_router.registry.get_capability", side_effect=get_capability),
+    ):
+        events = [
+            event
+            async for event in agent.process_stream(
+                "delegate this",
+                [],
+                "conn-1",
+                context={
+                    "owner_id": "geoff",
+                    "source": "background",
+                    "routed_tools": {"system.search_tools"},
+                },
+                max_iterations=2,
+            )
+        ]
+
+    assert len(seen_tools) == 2
+    assert all("agents.dispatch" not in fqns for fqns in seen_tools)
+    assert any(event.type == AgentEventType.TEXT for event in events)
+
+
+@pytest.mark.asyncio
+async def test_edit_tool_promotes_fqn_into_active_set():
+    llm = ScriptedLLM([
+        [ToolCallEvent(call_id="g", name="setups__get", arguments={"target": "Morning Wakeup Lights"})],
+        [ToolCallEvent(
+            call_id="r",
+            name="scheduler__replace_alert",
+            arguments={"series_id": "rule-morning", "instructions": "Fade in over 5 minutes."},
+        )],
+        [TextEvent(text="Updated.")],
+    ])
+    seen_tools: list = []
+
+    async def fake_dispatch(call: CapabilityCall) -> CapabilityOutcome:
+        if call.capability == "setups.get":
+            return _outcome(
+                call,
+                {
+                    "name": "Morning Wakeup Lights",
+                    "series_id": "rule-morning",
+                    "edit_tool": "scheduler.replace_alert",
+                },
+            )
+        return _outcome(call, "ok")
+
+    def resolve(name: str):
+        return SimpleNamespace(fqn=name.replace("__", "."))
+
+    def provider_tools(fqns):
+        seen_tools.append(set(fqns))
+        return [{"type": "function"}]
+
+    def get_capability(fqn: str):
+        return SimpleNamespace(fqn=fqn) if fqn == "scheduler.replace_alert" else None
+
+    agent = JarvisAgent(llm)
+    agent.prompt_builder.build = MagicMock(return_value="")
+
+    with (
+        patch("core.agent.agent.compact_history", AsyncMock(return_value=([], {}))),
+        patch("core.agent.agent.dispatcher.dispatch", side_effect=fake_dispatch),
+        patch("core.agent.agent.registry.resolve_provider_name", side_effect=resolve),
+        patch("core.agent.agent.registry.provider_tools", side_effect=provider_tools),
+        patch("core.tool_router.registry.get_capability", side_effect=get_capability),
+        patch(
+            "core.agent.agent.active_tool_fqns",
+            side_effect=lambda routed, **_: set(routed or ()) | {
+                "setups.get",
+                "scheduler.remind",
+            },
+        ),
+    ):
+        events = [
+            event
+            async for event in agent.process_stream(
+                "make the morning lights a five minute fade",
+                [],
+                "conn-1",
+                context={"owner_id": "geoff", "routed_tools": set()},
+                max_iterations=4,
+            )
+        ]
+
+    assert any("scheduler.replace_alert" in fqns for fqns in seen_tools[1:])
+    assert any(
+        event.capability == "scheduler.replace_alert"
+        for event in events
+        if event.type == AgentEventType.TOOL_CALL
+    )
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import pytest
 from api.routes.tasks import TaskDetail
 from core.plugins.consent import _consent_resolver, require_consent
 from plugins.agents import client
+from plugins.agents.workers import claude as claude_worker
 from plugins.agents.task_review import (
     append_trace,
     activity_from_tool_output,
@@ -20,7 +21,7 @@ from plugins.agents.task_review import (
 @pytest.fixture(autouse=True)
 def _configured_anthropic_key(monkeypatch):
     monkeypatch.setattr(
-        client.credential_store,
+        claude_worker.credential_store,
         "get_stored_secret",
         lambda name: "test-key" if name == "ANTHROPIC_API_KEY" else None,
     )
@@ -89,6 +90,7 @@ def test_trace_helpers_cap_previews_without_regex_inference():
 @pytest.mark.asyncio
 async def test_code_runtime_captures_and_verifies_sdk_file_artifacts(tmp_path: Path, monkeypatch):
     artifact_path = tmp_path / "app.html"
+    captured_options: dict = {}
 
     class FakeToolUseBlock:
         id = "tool-use-write"
@@ -110,6 +112,7 @@ async def test_code_runtime_captures_and_verifies_sdk_file_artifacts(tmp_path: P
     class FakeSDKClient:
         def __init__(self, options):
             self.options = options
+            captured_options.update(options)
 
         async def connect(self):
             return None
@@ -126,11 +129,11 @@ async def test_code_runtime_captures_and_verifies_sdk_file_artifacts(tmp_path: P
             return None
 
     collection = SimpleNamespace(update_one=AsyncMock())
-    monkeypatch.setattr(client, "SDKClient", FakeSDKClient)
-    monkeypatch.setattr(client, "AgentOptions", lambda **kwargs: kwargs)
-    monkeypatch.setattr(client, "ToolUseBlock", FakeToolUseBlock)
-    monkeypatch.setattr(client, "AssistantMessage", FakeAssistantMessage)
-    monkeypatch.setattr(client, "ResultMessage", FakeResultMessage)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "AgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(claude_worker, "ToolUseBlock", FakeToolUseBlock)
+    monkeypatch.setattr(claude_worker, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(claude_worker, "ResultMessage", FakeResultMessage)
     monkeypatch.setattr(client.mongodb, "get_collection", lambda name: collection)
     monkeypatch.setattr(client, "_push_task_event", AsyncMock())
     complete = AsyncMock()
@@ -144,6 +147,7 @@ async def test_code_runtime_captures_and_verifies_sdk_file_artifacts(tmp_path: P
         max_turns=5,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     artifact_update = next(
@@ -161,6 +165,7 @@ async def test_code_runtime_captures_and_verifies_sdk_file_artifacts(tmp_path: P
     assert artifact_update[0]["changed"] is True
     assert any(item["kind"] == "tool_call" and item["tool"].startswith("Write:") for item in trace_update)
     assert complete.await_args.kwargs["result"] != "(no output)"
+    assert captured_options["setting_sources"] == ["user", "project"]
 
 
 @pytest.mark.asyncio
@@ -212,11 +217,11 @@ async def test_multi_edit_edits_paths_are_captured_as_artifacts(tmp_path: Path, 
             return None
 
     collection = SimpleNamespace(update_one=AsyncMock())
-    monkeypatch.setattr(client, "SDKClient", FakeSDKClient)
-    monkeypatch.setattr(client, "AgentOptions", lambda **kwargs: kwargs)
-    monkeypatch.setattr(client, "ToolUseBlock", FakeToolUseBlock)
-    monkeypatch.setattr(client, "AssistantMessage", FakeAssistantMessage)
-    monkeypatch.setattr(client, "ResultMessage", FakeResultMessage)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "AgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(claude_worker, "ToolUseBlock", FakeToolUseBlock)
+    monkeypatch.setattr(claude_worker, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(claude_worker, "ResultMessage", FakeResultMessage)
     monkeypatch.setattr(client.mongodb, "get_collection", lambda name: collection)
     monkeypatch.setattr(client, "_push_task_event", AsyncMock())
     monkeypatch.setattr(client, "_complete_task", AsyncMock())
@@ -229,6 +234,7 @@ async def test_multi_edit_edits_paths_are_captured_as_artifacts(tmp_path: Path, 
         max_turns=5,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     artifact_update = next(
@@ -280,11 +286,11 @@ async def test_unchanged_write_is_not_persisted_as_artifact(tmp_path: Path, monk
             return None
 
     collection = SimpleNamespace(update_one=AsyncMock())
-    monkeypatch.setattr(client, "SDKClient", FakeSDKClient)
-    monkeypatch.setattr(client, "AgentOptions", lambda **kwargs: kwargs)
-    monkeypatch.setattr(client, "ToolUseBlock", FakeToolUseBlock)
-    monkeypatch.setattr(client, "AssistantMessage", FakeAssistantMessage)
-    monkeypatch.setattr(client, "ResultMessage", FakeResultMessage)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "AgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(claude_worker, "ToolUseBlock", FakeToolUseBlock)
+    monkeypatch.setattr(claude_worker, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(claude_worker, "ResultMessage", FakeResultMessage)
     monkeypatch.setattr(client.mongodb, "get_collection", lambda name: collection)
     monkeypatch.setattr(client, "_push_task_event", AsyncMock())
     monkeypatch.setattr(client, "_complete_task", AsyncMock())
@@ -297,6 +303,7 @@ async def test_unchanged_write_is_not_persisted_as_artifact(tmp_path: Path, monk
         max_turns=5,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     artifact_updates = [
@@ -339,10 +346,10 @@ async def test_code_runtime_uses_result_message_result(tmp_path: Path, monkeypat
             return None
 
     collection = SimpleNamespace(update_one=AsyncMock())
-    monkeypatch.setattr(client, "SDKClient", FakeSDKClient)
-    monkeypatch.setattr(client, "AgentOptions", lambda **kwargs: kwargs)
-    monkeypatch.setattr(client, "AssistantMessage", FakeAssistantMessage)
-    monkeypatch.setattr(client, "ResultMessage", FakeResultMessage)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "AgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(claude_worker, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(claude_worker, "ResultMessage", FakeResultMessage)
     monkeypatch.setattr(client.mongodb, "get_collection", lambda name: collection)
     monkeypatch.setattr(client, "_push_task_event", AsyncMock())
     complete = AsyncMock()
@@ -356,6 +363,7 @@ async def test_code_runtime_uses_result_message_result(tmp_path: Path, monkeypat
         max_turns=5,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     assert complete.await_args.kwargs["result"] == "Audit complete: modular architecture is sound."
@@ -404,11 +412,11 @@ async def test_read_only_tool_produces_no_artifacts(tmp_path: Path, monkeypatch)
             return None
 
     collection = SimpleNamespace(update_one=AsyncMock())
-    monkeypatch.setattr(client, "SDKClient", FakeSDKClient)
-    monkeypatch.setattr(client, "AgentOptions", lambda **kwargs: kwargs)
-    monkeypatch.setattr(client, "ToolUseBlock", FakeToolUseBlock)
-    monkeypatch.setattr(client, "AssistantMessage", FakeAssistantMessage)
-    monkeypatch.setattr(client, "ResultMessage", FakeResultMessage)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "AgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(claude_worker, "ToolUseBlock", FakeToolUseBlock)
+    monkeypatch.setattr(claude_worker, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(claude_worker, "ResultMessage", FakeResultMessage)
     monkeypatch.setattr(client.mongodb, "get_collection", lambda name: collection)
     monkeypatch.setattr(client, "_push_task_event", AsyncMock())
     complete = AsyncMock()
@@ -422,6 +430,7 @@ async def test_read_only_tool_produces_no_artifacts(tmp_path: Path, monkeypatch)
         max_turns=5,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     artifact_updates = [
@@ -470,11 +479,11 @@ async def test_bash_with_git_revision_syntax_produces_no_artifacts(tmp_path: Pat
             return None
 
     collection = SimpleNamespace(update_one=AsyncMock())
-    monkeypatch.setattr(client, "SDKClient", FakeSDKClient)
-    monkeypatch.setattr(client, "AgentOptions", lambda **kwargs: kwargs)
-    monkeypatch.setattr(client, "ToolUseBlock", FakeToolUseBlock)
-    monkeypatch.setattr(client, "AssistantMessage", FakeAssistantMessage)
-    monkeypatch.setattr(client, "ResultMessage", FakeResultMessage)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "AgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(claude_worker, "ToolUseBlock", FakeToolUseBlock)
+    monkeypatch.setattr(claude_worker, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(claude_worker, "ResultMessage", FakeResultMessage)
     monkeypatch.setattr(client.mongodb, "get_collection", lambda name: collection)
     monkeypatch.setattr(client, "_push_task_event", AsyncMock())
     complete = AsyncMock()
@@ -488,6 +497,7 @@ async def test_bash_with_git_revision_syntax_produces_no_artifacts(tmp_path: Pat
         max_turns=5,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     artifact_updates = [
@@ -546,13 +556,13 @@ async def test_user_message_tool_result_recorded_in_trace(tmp_path: Path, monkey
             return None
 
     collection = SimpleNamespace(update_one=AsyncMock())
-    monkeypatch.setattr(client, "SDKClient", FakeSDKClient)
-    monkeypatch.setattr(client, "AgentOptions", lambda **kwargs: kwargs)
-    monkeypatch.setattr(client, "ToolUseBlock", FakeToolUseBlock)
-    monkeypatch.setattr(client, "ToolResultBlock", FakeToolResultBlock)
-    monkeypatch.setattr(client, "UserMessage", FakeUserMessage)
-    monkeypatch.setattr(client, "AssistantMessage", FakeAssistantMessage)
-    monkeypatch.setattr(client, "ResultMessage", FakeResultMessage)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "AgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(claude_worker, "ToolUseBlock", FakeToolUseBlock)
+    monkeypatch.setattr(claude_worker, "ToolResultBlock", FakeToolResultBlock)
+    monkeypatch.setattr(claude_worker, "UserMessage", FakeUserMessage)
+    monkeypatch.setattr(claude_worker, "AssistantMessage", FakeAssistantMessage)
+    monkeypatch.setattr(claude_worker, "ResultMessage", FakeResultMessage)
     monkeypatch.setattr(client.mongodb, "get_collection", lambda name: collection)
     monkeypatch.setattr(client, "_push_task_event", AsyncMock())
     monkeypatch.setattr(client, "_complete_task", AsyncMock())
@@ -565,6 +575,7 @@ async def test_user_message_tool_result_recorded_in_trace(tmp_path: Path, monkey
         max_turns=5,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     trace_updates = [

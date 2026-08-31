@@ -1,7 +1,7 @@
 # Phase 7.5b: In-Process Agent Runtime
 
 **Status:** Built  
-**Superseded by:** [`docs/BACKGROUND_AGENTS.md`](../../BACKGROUND_AGENTS.md) — the current reference for execution paths, `dispatch()` mode selection, PromptMode gating, context injection, and routed_tools handling for background agents.  
+**Superseded by:** [`docs/BACKGROUND_AGENTS.md`](../../BACKGROUND_AGENTS.md) — the current reference for execution paths, `dispatch()` mode selection, context injection, and routed-tools handling for background agents.
 **Also superseded:** Implicit pre-turn model routing (`TurnRouter` / `_COMPLEX_EXEMPLARS`) was removed. Direct turns always use the configured assistant model; depth uses explicit `dispatch(mode="jarvis"|"code")` on the shared `BACKGROUND_AGENT_*` / `ANTHROPIC_API_KEY` contract.  
 **Current deviations:** `reason()` mid-turn tool removed. Provider reasoning uses per-turn `resolve_reasoning_effort()` + LiteLLM adapter capability detection (`core/llm/adapters/litellm.py`), not model-name equality to a reasoning-tier setting.  
 **Date:** 2026-03-29

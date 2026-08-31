@@ -5,7 +5,7 @@ export interface PairDeviceRequest {
   node_id: string
   node_label?: string
   capabilities?: string
-  client_surface?: 'browser' | 'desktop_app' | 'phone'
+  client_surface?: 'browser' | 'desktop_app' | 'phone' | 'satellite'
   room_id?: string
   room_name?: string
   location_provider?: string
@@ -55,6 +55,8 @@ export interface IssuePairingCodeRequest {
   node_label?: string
   capabilities?: string[]
   room_name?: string
+  node_id?: string
+  ha_area_id?: string
 }
 
 export interface IssuePairingCodeResponse {
@@ -68,31 +70,6 @@ export async function issuePairingCode(
   body: IssuePairingCodeRequest = {},
 ): Promise<IssuePairingCodeResponse> {
   return authorizedJson<IssuePairingCodeResponse>('/api/v1/device-auth/pairing-codes', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
-}
-
-export interface CreateSatelliteCredentialRequest {
-  node_label?: string
-  node_id?: string
-  ha_area_id?: string | null
-  room_name?: string | null
-  capabilities?: string[]
-}
-
-export interface CreateSatelliteCredentialResponse {
-  device_id: string
-  node_id: string
-  node_label?: string | null
-  device_token: string
-  backend_ws_url: string
-}
-
-export async function createSatelliteCredential(
-  body: CreateSatelliteCredentialRequest = {},
-): Promise<CreateSatelliteCredentialResponse> {
-  return authorizedJson<CreateSatelliteCredentialResponse>('/api/v1/device-auth/satellites', {
     method: 'POST',
     body: JSON.stringify(body),
   })

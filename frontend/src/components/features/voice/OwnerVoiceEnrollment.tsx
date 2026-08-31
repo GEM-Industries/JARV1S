@@ -123,8 +123,8 @@ export const OwnerVoiceEnrollment: React.FC<OwnerVoiceEnrollmentProps> = ({
     }
     if (phase === 'enrolled') {
       return isSetup
-        ? 'Wake and interrupt checks will prefer your voice. You can re-record later in Settings.'
-        : 'Wake and interrupt checks prefer your voice. Re-record anytime if recognition drifts.'
+        ? 'Wake and interrupt checks will prefer your voice on this Mac and room speakers. You can re-record later in Settings.'
+        : 'Wake and interrupt checks prefer your voice on this Mac and room speakers. Re-record anytime if recognition drifts.'
     }
     if (clips.length > 0) {
       return profile?.status === 'enrolled'
@@ -132,8 +132,8 @@ export const OwnerVoiceEnrollment: React.FC<OwnerVoiceEnrollmentProps> = ({
         : promptGuidance(currentPrompt.text, muted)
     }
     return isSetup
-      ? 'About a minute. Three short “Jarvis” samples, then two natural requests. A mathematical profile stays on this Mac; recordings are discarded after saving.'
-      : 'Optional and separate from voice cloning. Three short “Jarvis” samples, then two natural requests. Until then, the wake word may respond to other voices.'
+      ? 'About a minute. Three short “Jarvis” samples, then two natural requests. The profile is for you — used on this Mac and room speakers. Recordings are discarded after saving.'
+      : 'Optional and separate from voice cloning. Three short “Jarvis” samples, then two natural requests. Used on this Mac and room speakers. Until then, the wake word may respond to other voices.'
   }, [clips.length, currentPrompt.text, isSetup, muted, phase, profile?.status])
 
   const startRecording = async () => {
@@ -316,7 +316,7 @@ export const OwnerVoiceEnrollment: React.FC<OwnerVoiceEnrollmentProps> = ({
 
       {phase === 'enrolled' && isSetup && (
         <p className="mt-3 type-meta text-foreground-subtle" role="status">
-          Voice profile saved on this Mac.
+          Voice profile ready for this Mac and room speakers.
         </p>
       )}
 

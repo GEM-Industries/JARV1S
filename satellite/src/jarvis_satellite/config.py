@@ -259,3 +259,34 @@ def load_config(args: argparse.Namespace) -> SatelliteConfig:
     }
     clean_cli = {key: value for key, value in cli_values.items() if value is not None}
     return replace(config, **clean_cli)
+
+
+def _toml_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def merge_config_keys(path: Path, updates: dict[str, str]) -> None:
+    """Insert or replace top-level string keys without rewriting other config."""
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = existing.splitlines()
+    remaining = dict(updates)
+    merged: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        replaced = False
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            name = stripped.split("=", 1)[0].strip()
+            if name in remaining:
+                merged.append(f"{name} = {_toml_string(remaining.pop(name))}")
+                replaced = True
+        if not replaced:
+            merged.append(line)
+    if remaining:
+        if merged and merged[-1] != "":
+            merged.append("")
+        for key, value in remaining.items():
+            merged.append(f"{key} = {_toml_string(value)}")
+    path.write_text("\n".join(merged) + "\n", encoding="utf-8")

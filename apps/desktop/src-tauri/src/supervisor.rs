@@ -1,3 +1,4 @@
+use crate::calendar::{self, HostCalendarServer};
 use crate::host_prefs::{load_host_prefs, save_host_prefs};
 use crate::logs::LogStore;
 use crate::paths::{ensure_dir, HostPaths};
@@ -147,6 +148,7 @@ pub struct HostSupervisor {
     speech_helper: Option<SpeechHelperProcess>,
     tts_helper: Option<TTSHelperProcess>,
     ollama: Option<OllamaSidecarProcess>,
+    calendar: Option<HostCalendarServer>,
     service_kind: ServiceProviderKind,
     services: ActiveServices,
     service_env: BackendServiceEnv,
@@ -173,6 +175,7 @@ impl HostSupervisor {
             speech_helper: None,
             tts_helper: None,
             ollama: None,
+            calendar: None,
             service_kind,
             services: ActiveServices::None,
             service_env: BackendServiceEnv { mongodb_url: None },
@@ -281,7 +284,7 @@ pub async fn restart_supervisor(
 }
 
 pub async fn stop_supervisor(supervisor: SharedSupervisor) {
-    let (backend, speech_helper, tts_helper, ollama, mut services) = {
+        let (backend, speech_helper, tts_helper, ollama, calendar, mut services) = {
         let mut guard = supervisor.lock().await;
         guard.running = false;
         guard.watchdog_generation = guard.watchdog_generation.wrapping_add(1);
@@ -290,6 +293,7 @@ pub async fn stop_supervisor(supervisor: SharedSupervisor) {
             guard.speech_helper.take(),
             guard.tts_helper.take(),
             guard.ollama.take(),
+            guard.calendar.take(),
             std::mem::replace(&mut guard.services, ActiveServices::None),
         )
     };
@@ -305,6 +309,9 @@ pub async fn stop_supervisor(supervisor: SharedSupervisor) {
     }
     if let Some(mut ollama) = ollama {
         kill_process_tree(ollama.pid, &mut ollama.child).await;
+    }
+    if let Some(mut calendar) = calendar {
+        calendar.shutdown();
     }
     {
         let paths = supervisor.lock().await.paths.clone();
@@ -604,6 +611,7 @@ async fn phase_start_backend(supervisor: SharedSupervisor, app: &AppHandle) -> R
         existing_speech,
         existing_tts,
         existing_ollama,
+        existing_calendar,
         layout,
         paths,
         log_store,
@@ -615,11 +623,13 @@ async fn phase_start_backend(supervisor: SharedSupervisor, app: &AppHandle) -> R
         let existing_speech = guard.speech_helper.take();
         let existing_tts = guard.tts_helper.take();
         let existing_ollama = guard.ollama.take();
+        let existing_calendar = guard.calendar.take();
         (
             existing,
             existing_speech,
             existing_tts,
             existing_ollama,
+            existing_calendar,
             guard.layout.clone(),
             guard.paths.clone(),
             guard.log_store.clone(),
@@ -638,6 +648,9 @@ async fn phase_start_backend(supervisor: SharedSupervisor, app: &AppHandle) -> R
     }
     if let Some(mut ollama) = existing_ollama {
         kill_process_tree(ollama.pid, &mut ollama.child).await;
+    }
+    if let Some(mut calendar) = existing_calendar {
+        calendar.shutdown();
     }
 
     ensure_dir(&paths.data_dir)?;
@@ -739,6 +752,10 @@ async fn phase_start_backend(supervisor: SharedSupervisor, app: &AppHandle) -> R
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    if let Some(oauth_path) = product_oauth_path(&layout) {
+        cmd.env("JARVIS_PRODUCT_OAUTH", oauth_path);
+    }
+
     if let Some(url) = &service_env.mongodb_url {
         cmd.env("MONGODB_URL", url);
     }
@@ -762,6 +779,14 @@ async fn phase_start_backend(supervisor: SharedSupervisor, app: &AppHandle) -> R
     } else {
         cmd.env("VOICE__local_tts_url", "");
         cmd.env("VOICE__local_tts_token", "");
+    }
+    let calendar = calendar::start().await;
+    if let Some(server) = &calendar {
+        cmd.env("HOST_CALENDAR_URL", &server.handle.url);
+        cmd.env("HOST_CALENDAR_TOKEN", &server.handle.token);
+    } else {
+        cmd.env("HOST_CALENDAR_URL", "");
+        cmd.env("HOST_CALENDAR_TOKEN", "");
     }
     if let Some(process) = &ollama {
         cmd.env(
@@ -800,6 +825,7 @@ async fn phase_start_backend(supervisor: SharedSupervisor, app: &AppHandle) -> R
         guard.speech_helper = speech_helper;
         guard.tts_helper = tts_helper;
         guard.ollama = ollama;
+        guard.calendar = calendar;
     }
     Ok(())
 }
@@ -1739,6 +1765,21 @@ fn resolve_command(name: &str) -> Option<std::path::PathBuf> {
 
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
+}
+
+fn product_oauth_path(layout: &RuntimeLayout) -> Option<PathBuf> {
+    let candidates = match layout.mode {
+        RuntimeMode::PackagedRuntime => vec![layout.host_root.join("product_oauth.json")],
+        RuntimeMode::DevRepo => vec![
+            layout
+                .host_root
+                .join("apps/desktop/resources/product_oauth.json"),
+            layout
+                .host_root
+                .join("apps/desktop/resources/host/product_oauth.json"),
+        ],
+    };
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn pick_backend_port(preferred: u16) -> Result<u16, String> {

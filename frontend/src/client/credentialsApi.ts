@@ -40,6 +40,8 @@ export interface CredentialCard {
   masked_suffix?: string | null
   next_action?: string | null
   detail?: string | null
+  docs_url?: string | null
+  docs_label?: string | null
 }
 
 export interface ExternalTriggersStatus {

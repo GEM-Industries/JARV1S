@@ -98,7 +98,7 @@ The first satellite is not complete until wake reliability, echo behavior, and s
 ## Follow-ups before room two
 
 - Reachable backend — implemented; see [MULTI_DEVICE_REACHABILITY.md](../../deployment/MULTI_DEVICE_REACHABILITY.md). Host **Availability** enables Tailscale Serve in-app.
-- Device authentication — implemented via owner-bearing device credentials, Host UI mint/pairing (`POST /device-auth/satellites`, pairing codes), CLI recovery (`task devices:*`), and REST ws-ticket exchange before connect. Revocation is in **Rooms & devices** (`PresencePanel`).
+- Device authentication — implemented via owner-bearing device credentials, Rooms **Connect speaker** (Host LAN pair; `jarvis-satellite pair` fallback), CLI recovery (`task devices:*` / `POST /device-auth/satellites`), and REST ws-ticket exchange before connect. Revocation is in **Rooms & devices** (`PresencePanel`).
 - Turn-origin output — implemented; user turns answer on the originating `connection_id` / `node_id`. Mid-turn disconnect does not fan out to another node. Background `run_protocol` omits bogus `connection_id` and falls back to owner-default. Proactive delivery uses the presence endpoint router.
 - Local wakeword in PASSIVE — implemented behind satellite `edge_wakeword`: idle rooms run openWakeWord on-device and send no `user_audio` until wake (or while the Host session is already active for barge-in). Active rooms continue streaming for backend VAD/STT/barge-in. Default remains continuous Host-owned wake for bring-up; the live edge wake → STT → TTS gate is still pending.
 - Protocol framing — keep JSON/base64 for the first room because it reuses the browser contract, but move audio to binary WebSocket frames before adding multiple active satellites.

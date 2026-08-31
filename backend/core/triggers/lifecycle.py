@@ -8,6 +8,21 @@ from core.triggers.models import ManagementOwnership, TriggerRule
 from services.database.mongodb import mongodb
 
 OPEN_INSTANCE_STATUSES = ("pending", "awaiting_delivery")
+INDEFINITE_PAUSE = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def is_indefinite_pause(paused_until: datetime | None) -> bool:
+    return paused_until is not None and paused_until >= INDEFINITE_PAUSE
+
+
+def resolved_pause_until(until: datetime | None) -> datetime:
+    return until or INDEFINITE_PAUSE
+
+
+def display_paused_until(paused_until: datetime | None) -> datetime | None:
+    if is_indefinite_pause(paused_until):
+        return None
+    return paused_until
 
 
 def rule_allows_dispatch(rule: TriggerRule, *, now: datetime | None = None) -> bool:
@@ -79,7 +94,7 @@ async def cancel_open_instances_for_rule(
 
 async def materialize_after_pause(rule: TriggerRule, paused_until: datetime) -> None:
     """Materialize the first recurring occurrence after a finite pause."""
-    if not rule.origin.recurrence:
+    if is_indefinite_pause(paused_until) or not rule.origin.recurrence:
         return
     from core.scheduling import next_occurrence, recurrence_rule_from_origin
     from core.triggers.service import trigger_service

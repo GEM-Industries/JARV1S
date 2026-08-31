@@ -1,14 +1,19 @@
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from plugins.agents import client as agents_client
+from plugins.agents.workers import claude as claude_worker
 
 
 @pytest.mark.asyncio
 async def test_run_agent_sets_anthropic_key_from_credential_store(monkeypatch):
     class FakeCollection:
+        async def find_one(self, *_args, **_kwargs):
+            return None
+
         async def update_one(self, *_args, **_kwargs):
             return None
 
@@ -37,10 +42,10 @@ async def test_run_agent_sets_anthropic_key_from_credential_store(monkeypatch):
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(agents_client, "mongodb", FakeMongo())
-    monkeypatch.setattr(agents_client, "SDKClient", FakeSDKClient)
+    monkeypatch.setattr(claude_worker, "SDKClient", FakeSDKClient)
     monkeypatch.setattr(agents_client, "_complete_task", AsyncMock())
     monkeypatch.setattr(
-        agents_client.credential_store,
+        claude_worker.credential_store,
         "get_stored_secret",
         lambda name: "sk-ant-background" if name == "ANTHROPIC_API_KEY" else None,
     )
@@ -53,6 +58,7 @@ async def test_run_agent_sets_anthropic_key_from_credential_store(monkeypatch):
         max_turns=1,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     agents_client._complete_task.assert_awaited_once()
@@ -62,15 +68,15 @@ async def test_run_agent_sets_anthropic_key_from_credential_store(monkeypatch):
 async def test_run_agent_fails_without_stored_anthropic_key(monkeypatch):
     class FakeMongo:
         def get_collection(self, _name):
-            return object()
+            return SimpleNamespace(find_one=AsyncMock(return_value=None))
 
     sdk_client = AsyncMock()
     fail_task = AsyncMock()
     monkeypatch.setattr(agents_client, "mongodb", FakeMongo())
-    monkeypatch.setattr(agents_client, "SDKClient", sdk_client)
+    monkeypatch.setattr(claude_worker, "SDKClient", sdk_client)
     monkeypatch.setattr(agents_client, "_fail_task", fail_task)
     monkeypatch.setattr(
-        agents_client.credential_store,
+        claude_worker.credential_store,
         "get_stored_secret",
         lambda _name: None,
     )
@@ -83,6 +89,7 @@ async def test_run_agent_fails_without_stored_anthropic_key(monkeypatch):
         max_turns=1,
         mcp_servers=[],
         system_prompt="system",
+        worker_kind="claude_code",
     )
 
     fail_task.assert_awaited_once_with(

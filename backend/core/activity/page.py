@@ -392,20 +392,31 @@ async def _task_page(
         query["$and"] = query.get("$and", []) + [
             {
                 "$or": [
+                    {"title": {"$regex": escaped, "$options": "i"}},
                     {"progress_summary": {"$regex": escaped, "$options": "i"}},
                     {"prompt": {"$regex": escaped, "$options": "i"}},
                 ]
             }
         ]
     _apply_time(query, "created_at", request)
+    fetch_limit = max(limit * 4, limit + 1)
     docs = await (
         mongodb.db.background_tasks.find(query, {"_id": 0, "events": 0, "trace": 0})
         .sort([("created_at", -1), ("task_id", -1)])
-        .limit(limit + 1)
-        .to_list(length=limit + 1)
+        .limit(fetch_limit)
+        .to_list(length=fetch_limit)
     )
+    collapsed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for doc in docs:
+        key = str(doc.get("work_id") or doc.get("task_id") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        collapsed.append(doc)
+    page_docs = collapsed[:limit]
     items: list[ActivityEntry] = []
-    for doc in docs[:limit]:
+    for doc in page_docs:
         task_id = str(doc.get("task_id", ""))
         status = str(doc.get("status", "running"))
         outcome: ActivityPageOutcome = (
@@ -415,6 +426,12 @@ async def _task_page(
             "succeeded"
         )
         source = str(doc.get("source") or doc.get("mode") or "agent")
+        title = str(
+            doc.get("title")
+            or doc.get("progress_summary")
+            or doc.get("prompt")
+            or "Working"
+        )[:180]
         items.append(
             ActivityEntry(
                 activity_id=f"task:{task_id}",
@@ -422,14 +439,14 @@ async def _task_page(
                 occurred_at=doc.get("created_at") or datetime.now(timezone.utc),
                 updated_at=doc.get("completed_at"),
                 outcome=outcome,
-                title=str(doc.get("progress_summary") or doc.get("prompt") or "Background task")[:180],
+                title=title,
                 source_key=_source_key(source) or "agent",
                 source_label=_source_label(source, "Agent"),
                 detail_ref=ActivityDetailRef(kind="background_task", id=task_id),
                 task_id=task_id,
             )
         )
-    return _SourcePage("task", items, len(docs) > limit)
+    return _SourcePage("task", items, len(collapsed) > limit)
 
 
 async def _system_page(

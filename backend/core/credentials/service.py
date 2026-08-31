@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 import httpx
@@ -30,6 +31,8 @@ class _CredentialSpec:
     secret_name: str
     missing_action: str
     stored_detail: str | None = None
+    docs_url: str | None = None
+    docs_label: str | None = None
 
 
 _PRODUCT_CREDENTIALS: tuple[_CredentialSpec, ...] = (
@@ -60,10 +63,20 @@ _PRODUCT_CREDENTIALS: tuple[_CredentialSpec, ...] = (
     _CredentialSpec(
         id="background_agents",
         label="Background agents",
-        description="Delegated research, integration scans, and code-mode agents",
+        description="Delegated research, integration scans, and jarvis-mode reasoning",
         secret_name="ANTHROPIC_API_KEY",
-        missing_action="Paste your Anthropic API key to enable background agents.",
+        missing_action="Paste your Anthropic API key to enable jarvis-mode background agents.",
         stored_detail="Background agent runtime is available.",
+    ),
+    _CredentialSpec(
+        id="cursor_coding",
+        label="Cursor coding",
+        description="Use your Cursor plan for delegated coding on this Mac. New code work will use Cursor.",
+        secret_name="CURSOR_API_KEY",
+        missing_action="Paste a Cursor API key. New code work will use Cursor.",
+        stored_detail="New local code work uses your Cursor plan.",
+        docs_url="https://cursor.com/dashboard/integrations",
+        docs_label="Create API key",
     ),
 )
 
@@ -118,6 +131,8 @@ def _build_card(spec: _CredentialSpec) -> CredentialCard:
         masked_suffix=masked,
         next_action=next_action,
         detail=detail,
+        docs_url=spec.docs_url,
+        docs_label=spec.docs_label,
     )
 
 
@@ -183,7 +198,7 @@ async def save_credential(credential_id: str, value: str) -> CredentialActionRes
         raise ValueError("API key is required.")
     if is_placeholder_api_key(stripped):
         raise ValueError("That value looks like a placeholder.")
-    if credential_id == "cartesia":
+    if credential_id in {"cartesia", "cursor_coding"}:
         validation = await validate_credential(credential_id, stripped)
         if not validation.ok:
             raise ValueError(validation.message)
@@ -246,4 +261,21 @@ async def validate_credential(
         return CredentialValidationResult(
             ok=True, message="Cartesia API key validated."
         )
+    if credential_id == "cursor_coding":
+        try:
+            from plugins.agents.workers.cursor import probe_cursor_account
+
+            await asyncio.to_thread(probe_cursor_account, stripped)
+        except ImportError:
+            return CredentialValidationResult(
+                ok=False,
+                message="Cursor SDK is not available in this install.",
+            )
+        except Exception as exc:
+            message = str(exc) or "Cursor rejected this API key."
+            lowered = message.lower()
+            if any(token in lowered for token in ("401", "403", "unauthor", "invalid")):
+                return CredentialValidationResult(ok=False, message="Cursor rejected this API key.")
+            return CredentialValidationResult(ok=False, message=message)
+        return CredentialValidationResult(ok=True, message="Cursor API key validated.")
     return CredentialValidationResult(ok=True, message=f"{spec.label} key format looks valid.")

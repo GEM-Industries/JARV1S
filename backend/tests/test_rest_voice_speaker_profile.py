@@ -45,7 +45,7 @@ def test_get_speaker_profile_not_enrolled(client: TestClient) -> None:
     ):
         response = client.get("/api/v1/voice/speaker-profile")
     assert response.status_code == 200
-    assert response.json() == {"status": "not_enrolled", "updated_at": None}
+    assert response.json() == {"status": "not_enrolled", "updated_at": None, "node_ids": []}
 
 
 def test_put_speaker_profile_success(client: TestClient) -> None:
@@ -131,6 +131,85 @@ def test_delete_speaker_profile(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "not_enrolled"
     reload_mock.assert_awaited_once_with("owner-a")
+
+
+def test_capture_node_sample_success(client: TestClient) -> None:
+    updated = datetime(2026, 8, 26, tzinfo=timezone.utc)
+    with (
+        patch.object(
+            voice_routes,
+            "get_profile_status",
+            return_value=SpeakerProfileStatus(status="enrolled", updated_at=updated),
+        ),
+        patch.object(
+            voice_routes,
+            "append_node_clip",
+            return_value=SpeakerProfileStatus(
+                status="enrolled",
+                updated_at=updated,
+                node_ids=("sat-1",),
+            ),
+        ) as append_mock,
+        patch.object(
+            voice_routes,
+            "_reload_owner_verifiers",
+            new=AsyncMock(return_value=1),
+        ),
+        patch("api.websockets.connection.manager") as manager,
+    ):
+        manager.capture_node_pcm = AsyncMock(return_value=b"\x00\x01" * 16000)
+        response = client.post("/api/v1/voice/speaker-profile/nodes/sat-1/sample")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "enrolled"
+    assert body["node_ids"] == ["sat-1"]
+    append_mock.assert_called_once()
+
+
+def test_capture_node_sample_requires_enrollment(client: TestClient) -> None:
+    with patch.object(
+        voice_routes,
+        "get_profile_status",
+        return_value=SpeakerProfileStatus(status="not_enrolled"),
+    ):
+        response = client.post("/api/v1/voice/speaker-profile/nodes/sat-1/sample")
+    assert response.status_code == 400
+    assert response.json()["detail"]["reason"] == "not_enrolled"
+
+
+def test_capture_node_sample_offline_node(client: TestClient) -> None:
+    from api.websockets.connection import VoiceSampleCaptureError
+
+    updated = datetime(2026, 8, 26, tzinfo=timezone.utc)
+    with (
+        patch.object(
+            voice_routes,
+            "get_profile_status",
+            return_value=SpeakerProfileStatus(status="enrolled", updated_at=updated),
+        ),
+        patch("api.websockets.connection.manager") as manager,
+    ):
+        manager.capture_node_pcm = AsyncMock(
+            side_effect=VoiceSampleCaptureError(
+                "node_offline",
+                "That room speaker is not connected",
+            )
+        )
+        response = client.post("/api/v1/voice/speaker-profile/nodes/sat-1/sample")
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "node_offline"
+
+
+def test_capture_node_pcm_returns_wav(client: TestClient) -> None:
+    pcm = b"\x00\x01" * 16000
+    with patch("api.websockets.connection.manager") as manager:
+        manager.capture_node_pcm = AsyncMock(return_value=pcm)
+        response = client.post("/api/v1/voice/nodes/sat-1/pcm")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/wav")
+    assert response.content[:4] == b"RIFF"
+    manager.capture_node_pcm.assert_awaited_once()
 
 
 def test_speaker_profile_requires_auth(monkeypatch) -> None:

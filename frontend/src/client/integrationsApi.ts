@@ -95,4 +95,8 @@ export const integrationsApi = {
   toggle(name: string, enabled: boolean): Promise<ActionResult> {
     return request<ActionResult>('PATCH', `/${name}/toggle`, { enabled })
   },
+
+  authorizeMacosCalendar(): Promise<ActionResult> {
+    return request<ActionResult>('POST', '/calendar/macos')
+  },
 }

@@ -1,32 +1,18 @@
 """
-Agents Plugin — SDK interaction layer.
+Agents Plugin — task lifecycle and worker orchestration.
 
-All opencode/claude-agent-sdk calls live here.
-Nothing else in JARV1S should import the SDK directly.
+Vendor SDK connect/stream/dispose lives in `workers/`. This module owns Mongo
+settlement, receipts, artifacts, and triggers.
 """
 
 import asyncio
 import logging
-import os
-import signal
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from pymongo import ReturnDocument  # type: ignore[import]
 
-from core.agent.sdk import (
-    SDKClient,
-    AgentOptions,
-    ResultMessage,
-    AssistantMessage,
-    UserMessage,
-    TextBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-)
-from core.config import settings
-from core.credentials.store import credential_store
 from core.plugins.widget_snapshots import register_widget_snapshot_provider
 from core.plugins.types import UIEnvelope, WidgetLayout, WidgetSize
 from core.plugins.ui import progress_receipt_envelope
@@ -51,12 +37,20 @@ from plugins.agents.task_review import (
     task_trace_item,
     verify_file_artifact,
 )
+from plugins.agents.workers import (
+    CodeWorkSpec,
+    WorkerEvent,
+    WorkerKind,
+    WorkerRunError,
+    WorkerStartupError,
+    lineage_worker_kind,
+    worker_for_kind,
+)
 from services.database.mongodb import mongodb
 from services.events import event_bus, Event, EventType
 
 logger = logging.getLogger(__name__)
 
-SDK_CLEANUP_TIMEOUT = 5.0  # seconds to wait for subprocess teardown
 TASK_RECEIPT_THROTTLE_SEC = 2.0
 TASK_RECEIPT_TERMINAL_TTL_MS = 45 * 1000
 _last_task_receipt_push: dict[str, float] = {}
@@ -84,10 +78,11 @@ def task_progress_receipt_envelope(task_id: str, task_doc: dict) -> UIEnvelope:
     )
     pending = task_doc.get("pending_input") if isinstance(task_doc.get("pending_input"), dict) else None
 
+    named = str(task_doc.get("title") or "").strip()
     if attention == "approval":
         title = "Needs approval"
         line = str((pending or {}).get("prompt") or live)[:96]
-        sublabel = "Waiting on you"
+        sublabel = named or "Waiting on you"
         widget_id = (pending or {}).get("widget_id")
         action = (
             {"type": "activate_widget", "widget_id": widget_id, "task_id": task_id}
@@ -95,22 +90,27 @@ def task_progress_receipt_envelope(task_id: str, task_doc: dict) -> UIEnvelope:
             else {"type": "open_background_task", "task_id": task_id}
         )
     elif status == "completed":
-        title = "Task complete"
+        title = named or "Task complete"
         line = str(task_doc.get("result") or live)[:96]
         sublabel = "Done"
         action = {"type": "open_background_task", "task_id": task_id}
     elif status == "failed":
-        title = "Task failed"
+        title = named or "Task failed"
         line = str(task_doc.get("result") or live)[:96]
         sublabel = "Needs review"
         action = {"type": "open_background_task", "task_id": task_id}
+    elif status == "cancelled":
+        title = named or "Task cancelled"
+        line = str(task_doc.get("result") or "Cancelled")[:96]
+        sublabel = "Cancelled"
+        action = {"type": "open_background_task", "task_id": task_id}
     else:
-        title = "Working"
+        title = named or "Working"
         line = str(live)[:96]
         sublabel = "Running"
         action = {"type": "open_background_task", "task_id": task_id}
 
-    ttl_ms = TASK_RECEIPT_TERMINAL_TTL_MS if status in {"completed", "failed"} else None
+    ttl_ms = TASK_RECEIPT_TERMINAL_TTL_MS if status in {"completed", "failed", "cancelled"} else None
     return progress_receipt_envelope(
         widget_id=f"task-receipt-{task_id}",
         title=title,
@@ -126,54 +126,20 @@ def task_progress_receipt_envelope(task_id: str, task_doc: dict) -> UIEnvelope:
     )
 
 
-def _extract_pid(client: SDKClient) -> int | None:
-    """Best-effort extraction of the underlying subprocess PID from the SDK."""
-    try:
-        proc = getattr(client, "_transport", None)
-        proc = getattr(proc, "_process", None)
-        return proc.pid if proc is not None else None
-    except Exception:
-        return None
-
-
 def _mutating_tool_paths(tool_name: str, inp: dict[str, Any]) -> list[str]:
     """Return file paths from SDK tools that can mutate files."""
-    if tool_name not in ("Write", "Edit", "MultiEdit"):
-        return []
     paths: list[str] = []
-    if inp.get("file_path"):
-        paths.append(str(inp["file_path"]))
-    for edit in inp.get("edits") or []:
-        if isinstance(edit, dict) and edit.get("file_path"):
-            paths.append(str(edit["file_path"]))
+    if tool_name in ("Write", "Edit", "MultiEdit"):
+        if inp.get("file_path"):
+            paths.append(str(inp["file_path"]))
+        for edit in inp.get("edits") or []:
+            if isinstance(edit, dict) and edit.get("file_path"):
+                paths.append(str(edit["file_path"]))
+        return list(dict.fromkeys(paths))
+    for key in ("file_path", "path", "target_file"):
+        if inp.get(key):
+            paths.append(str(inp[key]))
     return list(dict.fromkeys(paths))
-
-
-async def _graceful_kill_pid(pid: int) -> None:
-    """Two-phase kill: SIGTERM → 1s grace period → SIGKILL → verify dead."""
-    try:
-        os.kill(pid, signal.SIGTERM)
-        logger.debug("Sent SIGTERM to subprocess pid=%d", pid)
-    except ProcessLookupError:
-        return
-    except Exception as exc:
-        logger.debug("SIGTERM pid=%d failed: %s", pid, exc)
-        return
-
-    await asyncio.sleep(1)
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return
-
-    try:
-        os.kill(pid, signal.SIGKILL)
-        logger.warning("SIGKILL required for subprocess pid=%d (did not exit after SIGTERM)", pid)
-    except ProcessLookupError:
-        pass
-    except Exception as exc:
-        logger.debug("SIGKILL pid=%d failed: %s", pid, exc)
 
 
 async def _resolve_tools_for_dispatch(connected_apps: list[str]) -> list[dict]:
@@ -266,6 +232,7 @@ def task_widget_envelope(task_id: str, task_doc: dict) -> UIEnvelope:
         component="BackgroundTaskWidget",
         data={
             "task_id": task_id,
+            "title": str(task_doc.get("title") or "").strip() or None,
             "status": task_doc.get("status", "running"),
             "progress_summary": task_doc.get("progress_summary", ""),
             "live_status": task_doc.get("live_status"),
@@ -273,12 +240,15 @@ def task_widget_envelope(task_id: str, task_doc: dict) -> UIEnvelope:
             "pending_input": task_doc.get("pending_input"),
             "source": task_doc.get("source", "voice"),
             "mode": task_doc.get("mode"),
+            "session_id": task_doc.get("session_id"),
+            "worker_kind": task_doc.get("worker_kind"),
             "created_at": task_doc.get("created_at", 0),
+            "cwd": task_doc.get("cwd"),
             "artifacts": task_doc.get("artifacts", []),
             "activity": task_doc.get("activity", []),
         },
         layout=WidgetLayout(size=WidgetSize.WIDE, priority=50),
-        title="Background Task",
+        title=str(task_doc.get("title") or "").strip() or "Working",
     )
 
 
@@ -318,22 +288,31 @@ async def _publish_completion_trigger(
     task_id: str,
     summary: str,
     budget_warning: str = "",
+    title: str = "",
+    outcome: str = "completed",
 ) -> None:
-    """Create the voice follow-up for a completed background task."""
-    voice_msg = summary or "Done."
+    """Create the voice follow-up for a completed or failed background task."""
+    named = str(title or "").strip() or "The task"
+    voice_msg = (summary or "").strip()
+    if outcome == "failed":
+        message = f"{named} failed. {voice_msg or 'Needs review.'}".strip()
+        dedup_key = f"task-failed:{task_id}"
+    else:
+        message = f"{named} is done. {voice_msg or 'Done.'}{budget_warning}".strip()
+        dedup_key = f"task-complete:{task_id}"
     instance = await trigger_service.create_instance(
         owner_id=owner_id,
         origin=TriggerOrigin(kind="system"),
         action=TriggerAction(
             decision=DECISION_TELL,
-            message=f"Finished. {voice_msg}{budget_warning}",
+            message=message,
             content_type="task_result",
         ),
         attention=AttentionPolicy(level="normal", sound="chime"),
         delivery=DeliveryPlan(),
         freshness=FreshnessPolicy(),
-        source_event={"task_id": task_id, "owner_id": owner_id},
-        dedup_key=f"task-complete:{task_id}",
+        source_event={"task_id": task_id, "owner_id": owner_id, "outcome": outcome},
+        dedup_key=dedup_key,
         management=ManagementOwnership(provider="agents", resource_id=task_id),
     )
     await event_bus.publish(
@@ -392,6 +371,7 @@ async def _complete_task(
 ) -> None:
     now = datetime.now(timezone.utc)
     col = mongodb.get_collection("background_tasks")
+    current = await col.find_one({"task_id": task_id}, {"open": 1, "title": 1})
     completion_fields: dict[str, Any] = {
         "status": "completed",
         "result": result[:10_000],
@@ -401,8 +381,9 @@ async def _complete_task(
         "pending_input": None,
         "live_status": None,
         "completed_at": now,
-        "expires_at": now + timedelta(days=30),
     }
+    if not (current and current.get("open") is True):
+        completion_fields["expires_at"] = now + timedelta(days=30)
     if duration_ms is not None:
         completion_fields["duration_ms"] = duration_ms
     if num_turns is not None:
@@ -434,6 +415,8 @@ async def _complete_task(
             task_id=task_id,
             summary=summary,
             budget_warning=budget_warning,
+            title=str((doc or current or {}).get("title") or ""),
+            outcome="completed",
         )
     except Exception as exc:
         logger.warning(
@@ -447,31 +430,72 @@ async def _complete_task(
         )
 
 
-async def _fail_task(task_id: str, owner_id: str, error: str) -> None:
+async def _settle_unsuccessful(
+    task_id: str,
+    owner_id: str,
+    *,
+    status: str,
+    result: str,
+    notify: bool,
+) -> None:
     now = datetime.now(timezone.utc)
     col = mongodb.get_collection("background_tasks")
+    current = await col.find_one({"task_id": task_id}, {"open": 1, "title": 1})
+    fields: dict[str, Any] = {
+        "status": status,
+        "result": result,
+        "attention": "none",
+        "pending_input": None,
+        "live_status": None,
+        "completed_at": now,
+    }
+    if not (current and current.get("open") is True):
+        fields["expires_at"] = now + timedelta(days=30)
     doc = await col.find_one_and_update(
         {"task_id": task_id},
-        {
-            "$set": {
-                "status": "failed",
-                "result": error,
-                "attention": "none",
-                "pending_input": None,
-                "live_status": None,
-                "completed_at": now,
-                "expires_at": now + timedelta(days=30),
-            }
-        },
+        {"$set": fields},
         return_document=ReturnDocument.AFTER,
     )
-    if doc:
-        from core.activity_events import publish_activity_changed
+    if not doc:
+        return
+    from core.activity_events import publish_activity_changed
 
-        await publish_activity_changed(owner_id)
-        await _push_widget(owner_id, task_id, doc)
-        await _push_task_progress_receipt(owner_id, task_id, force=True)
-        _last_task_receipt_push.pop(task_id, None)
+    await publish_activity_changed(owner_id)
+    await _push_widget(owner_id, task_id, doc)
+    await _push_task_progress_receipt(owner_id, task_id, force=True)
+    _last_task_receipt_push.pop(task_id, None)
+    if not notify:
+        return
+    try:
+        await _publish_completion_trigger(
+            owner_id=owner_id,
+            task_id=task_id,
+            summary=result,
+            title=str((doc or current or {}).get("title") or ""),
+            outcome="failed",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Task %s failed but failure trigger enqueue failed: %s",
+            task_id,
+            exc,
+        )
+        await col.update_one(
+            {"task_id": task_id},
+            {"$set": {"completion_notification_error": str(exc)[:500]}},
+        )
+
+
+async def _fail_task(task_id: str, owner_id: str, error: str) -> None:
+    await _settle_unsuccessful(
+        task_id, owner_id, status="failed", result=error, notify=True
+    )
+
+
+async def _cancel_task(task_id: str, owner_id: str, error: str = "Task was cancelled.") -> None:
+    await _settle_unsuccessful(
+        task_id, owner_id, status="cancelled", result=error, notify=False
+    )
 
 
 async def _run_agent(
@@ -484,213 +508,150 @@ async def _run_agent(
     system_prompt: str,
     resume_session_id: Optional[str] = None,
     max_budget_usd: Optional[float] = None,
+    worker_kind: Optional[WorkerKind] = None,
+    title: str = "",
 ) -> None:
-    """Drain the agent SDK subprocess, translating events to MongoDB + WebSocket updates."""
+    """Run a code worker and persist progress onto the existing task row."""
     col = mongodb.get_collection("background_tasks")
+    if worker_kind is None:
+        existing = await col.find_one({"task_id": task_id}, {"worker_kind": 1, "title": 1})
+        worker_kind = lineage_worker_kind(existing)
+        if not title:
+            title = str((existing or {}).get("title") or "")
+    worker = worker_for_kind(worker_kind)
 
-    # AgentOptions.mcp_servers expects {name: {type, url, headers?, ...}}
-    mcp_dict = {}
-    for s in mcp_servers:
-        entry: dict[str, Any] = {"type": s.get("type", "http"), "url": s["url"]}
-        if s.get("headers"):
-            entry["headers"] = s["headers"]
-        mcp_dict[s["name"]] = entry
-
-    # claude-agent-sdk takes a bare model name (no "provider/" prefix)
-    model = settings.BACKGROUND_AGENT_MODEL
-    if "/" in model:
-        model = model.split("/", 1)[1]
-
-    anthropic_key = credential_store.get_stored_secret("ANTHROPIC_API_KEY")
-    if not anthropic_key:
-        await _fail_task(task_id, owner_id, "Anthropic API key is not configured.")
-        return
-
-    options = AgentOptions(
-        model=model,
-        effort=settings.LLM_HEADLESS_REASONING_EFFORT,
-        max_turns=max_turns,
-        cwd=cwd,
-        permission_mode="bypassPermissions",
-        system_prompt=system_prompt,
-        mcp_servers=mcp_dict,
-        env={"ANTHROPIC_API_KEY": anthropic_key},
-        resume=resume_session_id or None,
-        setting_sources=["user"],
-        max_budget_usd=max_budget_usd,
-    )
-
-    client = SDKClient(options=options)
-    text_parts: list[str] = []
-    last_text: str = ""
-    result_session_id: Optional[str] = None
-    result_cost: Optional[float] = None
-    result_text: Optional[str] = None
-    result_duration_ms: Optional[int] = None
-    result_num_turns: Optional[int] = None
-    result_usage: Optional[dict[str, Any]] = None
-    child_pid: int | None = None
     artifact_candidates: dict[str, dict[str, Any] | None] = {}
     trace: list[dict[str, Any]] = []
     tool_use_to_span: dict[str, tuple[str, str]] = {}
 
+    async def emit(event: WorkerEvent) -> None:
+        nonlocal trace
+        ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+        if event.kind == "external_handle":
+            fields: dict[str, Any] = {}
+            if event.session_id:
+                fields["session_id"] = event.session_id
+            if event.external_run_id:
+                fields["external_run_id"] = event.external_run_id
+            if fields:
+                await col.update_one({"task_id": task_id}, {"$set": fields})
+            return
+
+        if event.kind == "text" and event.text:
+            payload: dict[str, Any] = {
+                "ts": ts,
+                "event_type": "text",
+                "text": event.text[:500],
+            }
+            trace = append_trace(
+                trace,
+                task_trace_item(
+                    kind="text",
+                    ts=ts,
+                    text_preview=event.text,
+                    status="completed",
+                ),
+            )
+            await col.update_one(
+                {"task_id": task_id},
+                {
+                    "$push": {"events": {"$each": [payload], "$slice": -50}},
+                    "$set": {
+                        "progress_summary": event.text[:100],
+                        "live_status": event.text[:100],
+                        "trace": trace,
+                    },
+                },
+            )
+            await _push_task_event(owner_id, task_id, payload)
+            return
+
+        if event.kind == "tool_start":
+            inp = event.tool_input or {}
+            tool_name = event.tool_name or event.tool or "tool"
+            tool_detail = event.tool or tool_name
+            for path in _mutating_tool_paths(tool_name, inp):
+                artifact_candidates.setdefault(path, file_snapshot(path, cwd=cwd))
+            payload = {
+                "ts": ts,
+                "event_type": "tool_start",
+                "tool": tool_detail,
+            }
+            span_id = new_span_id()
+            trace = append_trace(
+                trace,
+                task_trace_item(
+                    kind="tool_call",
+                    ts=ts,
+                    span_id=span_id,
+                    tool=tool_detail,
+                    args_preview=preview_args(inp),
+                    status="running",
+                ),
+            )
+            if event.tool_use_id:
+                tool_use_to_span[event.tool_use_id] = (span_id, tool_detail)
+            await col.update_one(
+                {"task_id": task_id},
+                {
+                    "$push": {"events": {"$each": [payload], "$slice": -50}},
+                    "$set": {
+                        "progress_summary": f"Running {tool_detail}…",
+                        "live_status": f"Running {tool_detail}…",
+                        "trace": trace,
+                    },
+                },
+            )
+            await _push_task_event(owner_id, task_id, payload)
+            return
+
+        if event.kind == "tool_result":
+            parent = tool_use_to_span.pop(event.tool_use_id, None) if event.tool_use_id else None
+            if parent:
+                span_id, tool_detail = parent
+            else:
+                span_id, tool_detail = new_span_id(), event.tool or "tool"
+            if event.tool_use_id:
+                result_body = format_tool_result_content(event.result_content)
+            else:
+                result_body = preview_text(event.result_content)
+            status = "failed" if event.is_error else "completed"
+            item_kwargs: dict[str, Any] = {
+                "kind": "tool_result",
+                "ts": ts,
+                "status": status,
+            }
+            if event.tool_use_id:
+                item_kwargs.update(
+                    span_id=new_span_id(),
+                    parent_id=span_id,
+                    tool=tool_detail,
+                    result_preview=result_body,
+                )
+            else:
+                item_kwargs["text_preview"] = result_body
+            trace = append_trace(trace, task_trace_item(**item_kwargs))
+            await col.update_one({"task_id": task_id}, {"$set": {"trace": trace}})
+
+    spec = CodeWorkSpec(
+        prompt=prompt,
+        cwd=cwd,
+        max_turns=max_turns,
+        mcp_servers=mcp_servers,
+        system_prompt=system_prompt,
+        resume_session_id=resume_session_id,
+        max_budget_usd=max_budget_usd,
+        title=title,
+    )
+
     try:
-        await client.connect()
-        child_pid = _extract_pid(client)
-        if child_pid:
-            from plugins.agents import register_child_pid
-            register_child_pid(child_pid)
-            logger.debug("Agent task %s running as pid=%d", task_id, child_pid)
-
-        await client.query(prompt)
-
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                # Capture session_id from the first message so it's persisted
-                # even if the task is cancelled or fails before ResultMessage.
-                if not result_session_id and msg.session_id:
-                    result_session_id = msg.session_id
-                    await col.update_one(
-                        {"task_id": task_id},
-                        {"$set": {"session_id": result_session_id}},
-                    )
-
-                for block in msg.content:
-                    ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-                    if isinstance(block, TextBlock) and block.text:
-                        text_parts.append(block.text)
-                        last_text = block.text
-                        payload: dict[str, Any] = {
-                            "ts": ts,
-                            "event_type": "text",
-                            "text": block.text[:500],
-                        }
-                        trace = append_trace(
-                            trace,
-                            task_trace_item(
-                                kind="text",
-                                ts=ts,
-                                text_preview=block.text,
-                                status="completed",
-                            ),
-                        )
-                        await col.update_one(
-                            {"task_id": task_id},
-                            {
-                                "$push": {"events": {"$each": [payload], "$slice": -50}},
-                                "$set": {
-                                    "progress_summary": block.text[:100],
-                                    "live_status": block.text[:100],
-                                    "trace": trace,
-                                },
-                            },
-                        )
-                        await _push_task_event(owner_id, task_id, payload)
-
-                    elif isinstance(block, ToolUseBlock):
-                        inp = block.input or {}
-                        span_id = new_span_id()
-                        tool_use_id = str(block.id)
-                        if block.name == "Bash" and inp.get("command"):
-                            tool_detail = f"Bash: {str(inp['command'])[:80]}"
-                        elif block.name in ("Read", "Write", "Edit", "MultiEdit") and inp.get("file_path"):
-                            for path in _mutating_tool_paths(block.name, inp):
-                                artifact_candidates.setdefault(path, file_snapshot(path, cwd=cwd))
-                            tool_detail = f"{block.name}: {inp['file_path']}"
-                        elif block.name == "MultiEdit" and inp.get("edits"):
-                            for path in _mutating_tool_paths(block.name, inp):
-                                artifact_candidates.setdefault(path, file_snapshot(path, cwd=cwd))
-                            tool_detail = block.name
-                        else:
-                            tool_detail = block.name
-                        payload = {
-                            "ts": ts,
-                            "event_type": "tool_start",
-                            "tool": tool_detail,
-                        }
-                        trace = append_trace(
-                            trace,
-                            task_trace_item(
-                                kind="tool_call",
-                                ts=ts,
-                                span_id=span_id,
-                                tool=tool_detail,
-                                args_preview=preview_args(inp),
-                                status="running",
-                            ),
-                        )
-                        tool_use_to_span[tool_use_id] = (span_id, tool_detail)
-                        await col.update_one(
-                            {"task_id": task_id},
-                            {
-                                "$push": {"events": {"$each": [payload], "$slice": -50}},
-                                "$set": {
-                                    "progress_summary": f"Running {tool_detail}…",
-                                    "live_status": f"Running {tool_detail}…",
-                                    "trace": trace,
-                                },
-                            },
-                        )
-                        await _push_task_event(owner_id, task_id, payload)
-
-            elif isinstance(msg, UserMessage):
-                ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-                for block in msg.content:
-                    if not isinstance(block, ToolResultBlock):
-                        continue
-                    parent = tool_use_to_span.pop(block.tool_use_id, None)
-                    if parent:
-                        span_id, tool_detail = parent
-                    else:
-                        span_id, tool_detail = new_span_id(), "tool"
-                    result_body = format_tool_result_content(block.content)
-                    status = "failed" if block.is_error else "completed"
-                    trace = append_trace(
-                        trace,
-                        task_trace_item(
-                            kind="tool_result",
-                            ts=ts,
-                            span_id=new_span_id(),
-                            parent_id=span_id,
-                            tool=tool_detail,
-                            result_preview=result_body,
-                            status=status,
-                        ),
-                    )
-                if msg.tool_use_result is not None:
-                    result_body = preview_text(msg.tool_use_result)
-                    trace = append_trace(
-                        trace,
-                        task_trace_item(
-                            kind="tool_result",
-                            ts=ts,
-                            text_preview=result_body,
-                            status="completed",
-                        ),
-                    )
-                if trace:
-                    await col.update_one({"task_id": task_id}, {"$set": {"trace": trace}})
-
-            elif isinstance(msg, ResultMessage):
-                result_session_id = msg.session_id or result_session_id
-                result_cost = msg.total_cost_usd if msg.total_cost_usd > 0 else None
-                if msg.result:
-                    result_text = msg.result
-                result_duration_ms = msg.duration_ms
-                result_num_turns = msg.num_turns
-                if msg.usage is not None:
-                    result_usage = (
-                        dict(msg.usage)
-                        if isinstance(msg.usage, dict)
-                        else {"raw": msg.usage}
-                    )
-
+        result = await worker.execute(spec, emit)
         verified_artifacts = [
             verify_file_artifact(path, cwd=cwd, source="code", before=before)
             for path, before in artifact_candidates.items()
         ]
         tool_call_count = sum(1 for item in trace if item.get("kind") == "tool_call")
-        full_result = (result_text or "".join(text_parts) or last_text).strip()
+        full_result = (result.text or result.summary or "").strip()
         if not full_result:
             changed_count = sum(1 for a in verified_artifacts if a.get("changed"))
             if tool_call_count or changed_count:
@@ -723,38 +684,37 @@ async def _run_agent(
             )
 
         budget_warning = ""
-        if result_cost and max_budget_usd and result_cost > max_budget_usd:
+        if result.cost_usd and max_budget_usd and result.cost_usd > max_budget_usd:
             logger.warning(
                 "Task %s exceeded budget: $%.4f spent vs $%.2f limit",
-                task_id, result_cost, max_budget_usd,
+                task_id, result.cost_usd, max_budget_usd,
             )
-            budget_warning = f" (Note: task exceeded budget — spent ${result_cost:.4f} of ${max_budget_usd:.2f} limit)"
+            budget_warning = (
+                f" (Note: task exceeded budget — spent ${result.cost_usd:.4f} "
+                f"of ${max_budget_usd:.2f} limit)"
+            )
 
         await _complete_task(
             task_id, owner_id,
             result=full_result,
-            summary=last_text or full_result[:500],
-            session_id=result_session_id,
-            cost_usd=result_cost,
+            summary=result.summary or full_result[:500],
+            session_id=result.session_id,
+            cost_usd=result.cost_usd,
             budget_warning=budget_warning,
-            duration_ms=result_duration_ms,
-            num_turns=result_num_turns,
-            usage=result_usage,
+            duration_ms=result.duration_ms,
+            num_turns=result.num_turns,
+            usage=result.usage,
         )
 
     except asyncio.CancelledError:
-        await _fail_task(task_id, owner_id, "Task was cancelled.")
+        await _cancel_task(task_id, owner_id)
         raise
+    except WorkerStartupError as exc:
+        logger.error("Agent task %s failed to start: %s", task_id, exc)
+        await _fail_task(task_id, owner_id, str(exc))
+    except WorkerRunError as exc:
+        logger.error("Agent task %s failed: %s", task_id, exc)
+        await _fail_task(task_id, owner_id, str(exc))
     except Exception as e:
         logger.error("Agent task %s failed: %s", task_id, e, exc_info=True)
         await _fail_task(task_id, owner_id, str(e))
-    finally:
-        try:
-            await asyncio.wait_for(client.disconnect(), timeout=SDK_CLEANUP_TIMEOUT)
-        except Exception:
-            if child_pid:
-                await _graceful_kill_pid(child_pid)
-        finally:
-            if child_pid:
-                from plugins.agents import unregister_child_pid
-                unregister_child_pid(child_pid)

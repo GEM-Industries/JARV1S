@@ -10,6 +10,7 @@ const receiptIndicator = (data: ContentData): 'running' | 'warning' | 'success' 
   if (data.attention === 'approval') return 'warning';
   if (data.status === 'completed') return 'success';
   if (data.status === 'failed') return 'error';
+  if (data.status === 'cancelled') return 'warning';
   if (data.status === 'running') return 'running';
   return undefined;
 };

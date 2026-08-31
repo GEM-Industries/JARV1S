@@ -11,7 +11,7 @@ Handles:
 
 import logging
 import webbrowser
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -24,20 +24,18 @@ from api.oauth_support import (
     publish_oauth_changed,
     render_oauth_callback_page,
 )
-from core.auth.oauth_flow import (
-    build_authorize_url,
-    complete_oauth_flow,
-    consume_callback_nonce,
-    consume_flow,
-    issue_flow,
-    reset_integrations_for_provider,
-)
+from core.auth.oauth_flow import consume_callback_nonce, oauth_redirect_uri
 from core.auth.providers import (
     BUILTIN_PROVIDERS,
     PROVIDER_URIS,
-    is_connectable,
     resolve_provider_config,
-    scopes_for_provider,
+)
+from core.integrations.lifecycle import (
+    IntegrationConflictError,
+    IntegrationOperationError,
+    complete_grant,
+    disconnect_grant,
+    start_authorize,
 )
 
 router = APIRouter(prefix="/auth")
@@ -56,6 +54,8 @@ class ConfigureRequest(BaseModel):
 
 class AuthorizeRequest(BaseModel):
     origin: str  # e.g. "http://localhost:5173" — used to build redirect_uri
+    plugin: Optional[str] = None
+    scopes: Optional[list[str]] = None
 
 
 class OpenExternalRequest(BaseModel):
@@ -65,6 +65,7 @@ class OpenExternalRequest(BaseModel):
 _OAUTH_HOST_SUFFIXES = (
     "accounts.google.com",
     "login.microsoftonline.com",
+    "accounts.spotify.com",
     "composio.dev",
     "composio.io",
 )
@@ -85,6 +86,7 @@ class ProviderStatus(BaseModel):
     connectable: bool
     connected: bool
     account_email: Optional[str] = None
+    config_mode: Optional[Literal["product", "self_managed"]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -98,25 +100,22 @@ async def get_oauth_providers(_auth=Depends(require_device)) -> list[ProviderSta
     from core.auth.manager import auth_manager
 
     results = []
-    for provider in ("google", "microsoft"):
-        connectable = await is_connectable(provider)
-        connected = False
-        account_email = None
-
-        if connectable:
-            try:
-                token = await auth_manager.get_token(provider)
-                connected = True
-                account_email = token.account_email
-            except Exception:
-                pass
-
+    for provider in PROVIDER_URIS:
+        token = await auth_manager.peek_grant(provider)
+        try:
+            _, mode = await resolve_provider_config(provider)
+            connectable = True
+            config_mode = mode
+        except KeyError:
+            connectable = False
+            config_mode = None
         results.append(
             ProviderStatus(
                 provider=provider,
                 connectable=connectable,
-                connected=connected,
-                account_email=account_email,
+                connected=token is not None,
+                account_email=token.account_email if token else None,
+                config_mode=config_mode,
             )
         )
 
@@ -125,12 +124,11 @@ async def get_oauth_providers(_auth=Depends(require_device)) -> list[ProviderSta
 
 @router.delete("/oauth/providers/{provider}")
 async def delete_provider(provider: str, _auth=Depends(require_device)) -> dict:
-    """Delete all OAuth data (config + tokens) for a provider, allowing a fresh setup."""
-    if provider not in BUILTIN_PROVIDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'.")
-    from core.auth.manager import auth_manager
-
-    await auth_manager.delete_provider(provider)
+    """Disconnect the user grant. Leaves the OAuth app registration in place."""
+    try:
+        await disconnect_grant(provider)
+    except IntegrationConflictError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"status": "deleted", "provider": provider}
 
 
@@ -144,7 +142,7 @@ async def configure_provider(
     if provider not in BUILTIN_PROVIDERS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown provider '{provider}'. Valid: google, microsoft",
+            detail=f"Unknown provider '{provider}'. Valid: {', '.join(PROVIDER_URIS)}",
         )
 
     from core.auth.manager import auth_manager
@@ -175,35 +173,22 @@ async def authorize_provider(
 
     Returns { authorize_url } — frontend opens this in a popup.
     """
-    if provider not in BUILTIN_PROVIDERS:
-        raise HTTPException(status_code=400, detail=f"Unknown provider '{provider}'.")
-
+    origin = assert_allowed_oauth_origin(body.origin, request.headers.get("origin"))
+    redirect_uri = oauth_redirect_uri(origin, provider)
     try:
-        config, _ = await resolve_provider_config(provider)
+        authorize_url = await start_authorize(
+            provider,
+            redirect_uri=redirect_uri,
+            plugin=body.plugin,
+            scopes=body.scopes,
+        )
+    except IntegrationConflictError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except KeyError:
         raise HTTPException(
             status_code=409,
-            detail=f"No OAuth app configured for '{provider}'. Set product credentials or configure manually.",
+            detail=f"No OAuth app configured for '{provider}'. Use Advanced to add your own.",
         )
-
-    from core.integrations.manager import integrations
-
-    registered = integrations.get_scopes_for_provider(provider)
-    scopes = scopes_for_provider(provider, registered)
-    origin = assert_allowed_oauth_origin(body.origin, request.headers.get("origin"))
-    redirect_uri = f"{origin}/api/v1/auth/oauth/callback"
-    state, code_challenge = issue_flow(
-        provider,
-        redirect_uri=redirect_uri,
-        scopes=scopes,
-    )
-    authorize_url = build_authorize_url(
-        config,
-        redirect_uri=redirect_uri,
-        scopes=scopes,
-        state=state,
-        code_challenge=code_challenge,
-    )
     return {"authorize_url": authorize_url}
 
 
@@ -237,7 +222,7 @@ async def oauth_callback(
     error_description: Optional[str] = Query(None, alias="error_description"),
 ) -> HTMLResponse:
     """
-    OAuth redirect callback for Google and Microsoft.
+    OAuth redirect callback for Google, Microsoft, and Spotify.
 
     Exchanges the authorization code for tokens, resolves the account email,
     stores via AuthManager, and renders the postMessage page to close the popup.
@@ -274,52 +259,22 @@ async def oauth_callback(
             )
         )
 
-    flow = consume_flow(state)
-    if not flow:
+    try:
+        token = await complete_grant(state, code)
+    except IntegrationOperationError as e:
         await publish_oauth_changed(app=provider_hint, success=False)
         return HTMLResponse(
             render_oauth_callback_page(
-                title="Authorization Error",
-                message="State validation failed. Please try again.",
+                title="Authorization Failed",
+                message=str(e),
                 success=False,
                 app_name=provider_hint,
             )
         )
 
-    try:
-        config, _ = await resolve_provider_config(flow.provider)
-    except KeyError:
-        await publish_oauth_changed(app=flow.provider, success=False)
-        return HTMLResponse(
-            render_oauth_callback_page(
-                title="Authorization Error",
-                message="Provider not configured.",
-                success=False,
-                app_name=flow.provider,
-            )
-        )
+    await publish_oauth_changed(app=token.provider, success=True, loaded=True)
 
-    from core.auth.manager import auth_manager
-
-    try:
-        token = await complete_oauth_flow(flow, config, code)
-    except Exception as e:
-        logger.error("%s token exchange failed: %s", flow.provider, e)
-        await publish_oauth_changed(app=flow.provider, success=False)
-        return HTMLResponse(
-            render_oauth_callback_page(
-                title="Authorization Failed",
-                message="Could not exchange the authorization code for a token.",
-                success=False,
-                app_name=flow.provider,
-            )
-        )
-
-    await auth_manager.store_token(token)
-    await reset_integrations_for_provider(flow.provider)
-    await publish_oauth_changed(app=flow.provider, success=True, loaded=True)
-
-    display = flow.provider.title()
+    display = token.provider.title()
     logger.info(
         "%s OAuth complete for %s (%d scopes)",
         display,
@@ -331,7 +286,7 @@ async def oauth_callback(
             title=f"{display} Connected",
             message=f"{display} is connected as {token.account_email}. You can close this window.",
             success=True,
-            app_name=flow.provider,
+            app_name=token.provider,
             loaded=True,
         )
     )

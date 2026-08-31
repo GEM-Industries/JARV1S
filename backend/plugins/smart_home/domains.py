@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from core.time.parsing import _parse_duration_seconds
+
 # Domains safe for setup milestone toggles (explicit allowlist).
 SAFE_SETUP_DOMAINS = frozenset({"light", "switch", "input_boolean", "fan"})
 
@@ -52,8 +54,34 @@ COLOR_MODES = frozenset({"rgb", "rgbw", "rgbww", "hs", "xy"})
 
 ADJUST_AMOUNTS = ("slight", "normal", "large")
 
+# Spoken whites → Kelvin. Chromatic names never use this path.
+_WHITE_NAME_KELVIN: dict[str, int] = {
+    "candle": 2000,
+    "candlelight": 2000,
+    "warm": 2700,
+    "warmwhite": 2700,
+    "ultrawarm": 2700,
+    "ultrawarmwhite": 2700,
+    "softwhite": 3000,
+    "morningwhite": 3000,
+    "readingwhite": 3000,
+    "cool": 4000,
+    "coolwhite": 4000,
+    "daylight": 5000,
+    "white": 5000,
+}
 
-# HA color_name for absolute requests; hue/sat anchors for relative steps.
+# CT-only bulbs cannot mix RGB; warmest white is the orange/gold/amber fallback.
+_AMBER_NAMES = frozenset({"orange", "gold", "amber"})
+_AMBER_KELVIN = 2000
+
+
+class UnsupportedLightCapability(ValueError):
+    """This light cannot apply the remaining requested colour or brightness fields."""
+
+
+# RGBWW colour mode mixes R+G+B only — low sat looks grey/peach, not the named hue.
+# Hues are shifted for typical LED peaks (blue→violet, yellow→peach).
 @dataclass(frozen=True)
 class HueAnchor:
     hue_deg: float
@@ -61,13 +89,15 @@ class HueAnchor:
 
 
 HUE_ANCHORS: dict[str, HueAnchor] = {
-    "orange": HueAnchor(27, 0.90),
-    "red": HueAnchor(4, 0.88),
-    "blue": HueAnchor(220, 0.72),
-    "green": HueAnchor(125, 0.68),
-    "yellow": HueAnchor(52, 0.82),
-    "purple": HueAnchor(275, 0.62),
-    "pink": HueAnchor(330, 0.52),
+    "orange": HueAnchor(32, 0.92),
+    "gold": HueAnchor(46, 0.85),
+    "amber": HueAnchor(36, 0.90),
+    "red": HueAnchor(4, 0.90),
+    "blue": HueAnchor(206, 0.88),
+    "green": HueAnchor(125, 0.85),
+    "yellow": HueAnchor(56, 0.92),
+    "purple": HueAnchor(278, 0.75),
+    "pink": HueAnchor(330, 0.70),
 }
 
 HUE_STEP_DEGREES = {
@@ -87,6 +117,8 @@ _COLOR_RELATIVE_PREFIXES = (
     "a bit ",
     "slightly ",
 )
+
+_VIVID_PREFIXES = ("vivid ", "neon ", "saturated ")
 
 
 @dataclass(frozen=True)
@@ -193,6 +225,24 @@ def parse_color_phrase(color: str) -> tuple[str, bool]:
     return normalized, False
 
 
+def _split_vivid(name: str) -> tuple[str, bool]:
+    for prefix in _VIVID_PREFIXES:
+        if name.startswith(prefix):
+            return name.removeprefix(prefix).strip(), True
+    return name, False
+
+
+def white_kelvin_for_name(name: str) -> int | None:
+    return _WHITE_NAME_KELVIN.get("".join(name.casefold().split()))
+
+
+def _clamp_kelvin(value: int, live: LiveLightState) -> int:
+    lo, hi = live.min_color_temp_kelvin, live.max_color_temp_kelvin
+    if lo is not None and hi is not None:
+        return max(lo, min(hi, value))
+    return value
+
+
 def relative_kelvin_adjustment(
     live: LiveLightState,
     warmth: Literal["warmer", "cooler"],
@@ -237,10 +287,27 @@ def resolve_hue_adjustment(
     relative: bool | None = None,
 ) -> dict[str, Any] | None:
     hue_name, phrase_is_relative = parse_color_phrase(color)
-    is_relative = phrase_is_relative if relative is None else relative
+    hue_name, is_vivid = _split_vivid(hue_name)
+    is_relative = (
+        False if is_vivid else (phrase_is_relative if relative is None else relative)
+    )
     anchor = HUE_ANCHORS.get(hue_name)
     modes = set(live.supported_color_modes or [])
     supports_hue = bool(modes & COLOR_MODES)
+    supports_temp = "color_temp" in modes
+
+    white_k = white_kelvin_for_name(hue_name)
+    if white_k is not None:
+        if supports_temp:
+            return {"color_temp_kelvin": _clamp_kelvin(white_k, live)}
+        if supports_hue and "".join(hue_name.split()) == "white":
+            return {"color_name": "white"}
+        return None
+
+    if is_vivid:
+        if supports_hue and hue_name:
+            return {"color_name": hue_name}
+        return None
 
     if anchor is not None and supports_hue:
         if is_relative:
@@ -253,9 +320,17 @@ def resolve_hue_adjustment(
             if live.rgb_color is not None and rgb == live.rgb_color:
                 return None
             return {"rgb_color": rgb}
-        return {"color_name": hue_name}
+        return {
+            "rgb_color": _hsv_to_rgb(anchor.hue_deg, anchor.saturation, 1.0)
+        }
 
-    if hue_name:
+    if hue_name in _AMBER_NAMES and supports_temp:
+        target = _clamp_kelvin(_AMBER_KELVIN, live)
+        if is_relative and live.color_temp_kelvin == target:
+            return None
+        return {"color_temp_kelvin": target}
+
+    if hue_name and supports_hue:
         return {"color_name": hue_name}
     return None
 
@@ -343,19 +418,58 @@ def capabilities_for_entity(entity: InventoryEntity) -> list[str]:
     return caps
 
 
+MAX_LIGHT_TRANSITION_S = 3600
+
+
+def normalize_light_transition(value: Any) -> int:
+    """Parse HA light.transition as seconds from an int or spoken duration."""
+    if isinstance(value, bool) or value is None:
+        raise ValueError(
+            "transition must be seconds or a duration like '15 minutes'."
+        )
+    if isinstance(value, int | float):
+        seconds = int(round(float(value)))
+    else:
+        raw = str(value).strip()
+        parsed = _parse_duration_seconds(raw) if raw else None
+        if parsed is not None:
+            seconds = int(round(parsed))
+        else:
+            try:
+                seconds = int(round(float(raw)))
+            except ValueError:
+                raise ValueError(
+                    f"Could not parse transition={value!r}. "
+                    "Use seconds or a duration like '15 minutes' or '10s'."
+                ) from None
+    if seconds < 1:
+        raise ValueError("transition must be at least 1 second.")
+    if seconds > MAX_LIGHT_TRANSITION_S:
+        raise ValueError(
+            f"transition cannot exceed {MAX_LIGHT_TRANSITION_S} seconds."
+        )
+    return seconds
+
+
 def clamp_light_params(
     entity: InventoryEntity, params: dict[str, Any] | None
 ) -> dict[str, Any]:
     """Normalize model-facing light params to the HA service payload."""
     raw = dict(params or {})
     caps = set(capabilities_for_entity(entity))
-    allowed_keys = {"brightness_pct", "color_temp_kelvin", "rgb_color", "color_name"}
+    allowed_keys = {
+        "brightness_pct",
+        "color_temp_kelvin",
+        "rgb_color",
+        "color_name",
+        "transition",
+    }
     unknown = sorted(set(raw) - allowed_keys)
     if unknown:
         raise ValueError(
             "Unsupported light parameter(s): "
             + ", ".join(unknown)
-            + ". Use brightness_pct, color_temp_kelvin, rgb_color, or color_name."
+            + ". Use brightness_pct, color_temp_kelvin, rgb_color, color_name, or transition."
         )
 
     allowed = {k: v for k, v in raw.items() if k in allowed_keys}
@@ -365,24 +479,41 @@ def clamp_light_params(
             raise ValueError(
                 "color_name must be a non-empty Home Assistant color name."
             )
-        allowed["color_name"] = name
-
-    unsupported: list[str] = []
-    if "brightness_pct" in allowed and "brightness" not in caps:
-        unsupported.append("brightness_pct")
-    if "color_temp_kelvin" in allowed and "color_temp" not in caps:
-        unsupported.append("color_temp_kelvin")
-    if ("rgb_color" in allowed or "color_name" in allowed) and "color" not in caps:
-        unsupported.append("rgb_color/color_name")
-    if unsupported:
-        raise ValueError(
-            f"{entity.entity_id} does not support: {', '.join(unsupported)}. "
-            f"Capabilities: {', '.join(capabilities_for_entity(entity)) or 'none'}."
+        mapped = resolve_hue_adjustment(
+            name,
+            "slight",
+            LiveLightState(
+                state=entity.state,
+                brightness_pct=None,
+                color_mode=entity.color_mode,
+                rgb_color=None,
+                color_temp_kelvin=entity.color_temp_kelvin,
+                supported_color_modes=list(entity.supported_color_modes or []),
+                min_color_temp_kelvin=entity.min_color_temp_kelvin,
+                max_color_temp_kelvin=entity.max_color_temp_kelvin,
+            ),
+            relative=False,
         )
+        allowed.pop("color_name")
+        if mapped:
+            for key, value in mapped.items():
+                allowed.setdefault(key, value)
 
-    wants_kelvin = "color_temp_kelvin" in allowed and "color_temp" in caps
-    wants_rgb = "rgb_color" in allowed and "color" in caps
-    wants_color_name = "color_name" in allowed and "color" in caps
+    dropped: list[str] = []
+    if "brightness_pct" in allowed and "brightness" not in caps:
+        dropped.append("brightness_pct")
+        allowed.pop("brightness_pct")
+    if "color_temp_kelvin" in allowed and "color_temp" not in caps:
+        dropped.append("color_temp_kelvin")
+        allowed.pop("color_temp_kelvin")
+    if ("rgb_color" in allowed or "color_name" in allowed) and "color" not in caps:
+        dropped.append("rgb_color/color_name")
+        allowed.pop("rgb_color", None)
+        allowed.pop("color_name", None)
+
+    wants_kelvin = "color_temp_kelvin" in allowed
+    wants_rgb = "rgb_color" in allowed
+    wants_color_name = "color_name" in allowed
     if wants_rgb and wants_color_name:
         allowed.pop("color_name")
         wants_color_name = False
@@ -413,7 +544,22 @@ def clamp_light_params(
         result["rgb_color"] = rgb
     if wants_color_name:
         result["color_name"] = allowed["color_name"]
+    if "transition" in allowed:
+        result["transition"] = normalize_light_transition(allowed["transition"])
 
+    if result:
+        return result
+    if dropped:
+        raise UnsupportedLightCapability(
+            f"{entity.entity_id} does not support: {', '.join(dropped)}. "
+            f"Capabilities: {', '.join(capabilities_for_entity(entity)) or 'none'}."
+        )
+    if raw:
+        raise UnsupportedLightCapability(
+            f"{entity.entity_id} does not support: "
+            + ", ".join(sorted(raw))
+            + f". Capabilities: {', '.join(capabilities_for_entity(entity)) or 'none'}."
+        )
     return result
 
 

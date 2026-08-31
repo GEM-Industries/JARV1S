@@ -790,16 +790,15 @@ async def test_system_policy_routes_current_hint(router):
 
 
 @pytest.mark.asyncio
-async def test_budget_fitting_uses_real_schema_size(router_with_real_schema_stats):
+async def test_matched_plugins_are_not_evicted_by_schema_size(router_with_real_schema_stats):
     router_with_real_schema_stats._utterance_vectors = {
         "large": [[0.95]],
         "tiny": [[0.94]],
     }
     policy = RoutingPolicy(
-        name="small_budget",
+        name="keep_matches",
         threshold=0.5,
         max_matched=2,
-        schema_char_budget=220,
     )
 
     routed = await router_with_real_schema_stats.route(
@@ -808,7 +807,7 @@ async def test_budget_fitting_uses_real_schema_size(router_with_real_schema_stat
         policy=policy,
     )
 
-    assert routed == {"large.large_tool"}
+    assert routed == {"large.large_tool", "tiny.tiny_tool"}
 
 
 def test_always_on_fqns_uses_explicit_allowlist(monkeypatch):
@@ -834,3 +833,100 @@ def test_always_on_fqns_uses_explicit_allowlist(monkeypatch):
     assert tool_router.always_on_fqns() == {"files.read", "system.search_tools"}
     assert "files.open_file" not in tool_router.always_on_fqns()
     assert "weather.get_weather" not in tool_router.always_on_fqns()
+
+
+def test_always_on_excludes_routable_domain_creates():
+    assert {
+        "scheduler.remind",
+        "automations.create_rule",
+        "db.reset_conversation_window",
+        "agents.inspect",
+        "agents.list_tasks",
+    }.isdisjoint(tool_router.ALWAYS_ON_FQNS)
+    assert {
+        "system.search_tools",
+        "files.read",
+        "display.push_content",
+        "search.web",
+        "profile.remember",
+        "agents.dispatch",
+        "agents.get_status",
+        "system.exec",
+    } <= tool_router.ALWAYS_ON_FQNS
+
+
+def test_active_tool_fqns_hides_remind_on_act_turns(monkeypatch):
+    monkeypatch.setattr(
+        tool_router,
+        "always_on_fqns",
+        lambda: {"scheduler.remind", "system.search_tools"},
+    )
+    routed = {"scheduler.defer", "scheduler.remind", "smart_home.control_lights"}
+
+    act = tool_router.active_tool_fqns(routed, trigger_decision="act")
+    assert "scheduler.remind" not in act
+    assert "scheduler.defer" in act
+    assert "system.search_tools" in act
+    assert "smart_home.control_lights" in act
+
+    default = tool_router.active_tool_fqns(routed)
+    assert "scheduler.remind" in default
+    tell = tool_router.active_tool_fqns(routed, trigger_decision="tell")
+    assert "scheduler.remind" in tell
+
+
+def test_active_tool_fqns_hides_dispatch_during_background_execution(monkeypatch):
+    monkeypatch.setattr(
+        tool_router,
+        "always_on_fqns",
+        lambda: {"agents.dispatch", "agents.get_status", "system.search_tools"},
+    )
+
+    background = tool_router.active_tool_fqns(
+        {"agents.dispatch", "gmail.search"},
+        source="background",
+    )
+    assert "agents.dispatch" not in background
+    assert "agents.get_status" in background
+    assert "gmail.search" in background
+
+    interactive = tool_router.active_tool_fqns(
+        {"agents.dispatch", "gmail.search"},
+        source="user",
+    )
+    assert "agents.dispatch" in interactive
+
+
+def test_discovered_fqns_promotes_search_and_edit_tool(monkeypatch):
+    known = {"gmail.search", "scheduler.replace_alert"}
+    monkeypatch.setattr(
+        tool_router.registry,
+        "get_capability",
+        lambda fqn: object() if fqn in known else None,
+    )
+
+    search = tool_router.discovered_fqns(
+        {"tools": [{"fqn": "gmail.search", "name": "search"}]}
+    )
+    assert search == {"gmail.search"}
+
+    setups = tool_router.discovered_fqns(
+        {
+            "setups": [
+                {
+                    "name": "Morning Wakeup Lights",
+                    "edit_tool": "scheduler.replace_alert",
+                    "series_id": "rule-morning",
+                }
+            ]
+        }
+    )
+    assert setups == {"scheduler.replace_alert"}
+
+    from_json = tool_router.discovered_fqns(
+        '{"edit_tool":"scheduler.replace_alert","series_id":"rule-morning"}'
+    )
+    assert from_json == {"scheduler.replace_alert"}
+
+    assert tool_router.discovered_fqns({"edit_tool": "not a tool"}) == set()
+    assert tool_router.discovered_fqns({"edit_tool": "missing.tool"}) == set()

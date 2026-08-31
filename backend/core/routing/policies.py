@@ -16,8 +16,6 @@ FALLBACK_TOP_K = 1
 BASELINE_MAX_MATCHED = 2
 DECAY_BONUS = 0.10
 VOICE_MAX_MATCHED = 3
-DEFAULT_SCHEMA_CHAR_BUDGET = 16_000
-SYSTEM_SCHEMA_CHAR_BUDGET = 18_000
 
 
 @dataclass(frozen=True)
@@ -33,7 +31,6 @@ class RoutingPolicy:
     decay_bonus: float = DECAY_BONUS
     multi_intent: bool = False
     session_carryover: bool = False
-    schema_char_budget: int | None = None
     max_segments: int = 6
 
 
@@ -46,7 +43,6 @@ VOICE_POLICY = RoutingPolicy(
     segment_top_k=2,
     multi_intent=True,
     session_carryover=True,
-    schema_char_budget=DEFAULT_SCHEMA_CHAR_BUDGET,
 )
 TEXT_POLICY = RoutingPolicy(
     name="text_budget_aware_multi_intent",
@@ -54,7 +50,6 @@ TEXT_POLICY = RoutingPolicy(
     segment_top_k=2,
     multi_intent=True,
     session_carryover=True,
-    schema_char_budget=DEFAULT_SCHEMA_CHAR_BUDGET,
 )
 SYSTEM_POLICY = RoutingPolicy(
     name="system_budget_aware_multi_intent",
@@ -62,7 +57,6 @@ SYSTEM_POLICY = RoutingPolicy(
     segment_top_k=2,
     multi_intent=True,
     session_carryover=False,
-    schema_char_budget=SYSTEM_SCHEMA_CHAR_BUDGET,
 )
 
 

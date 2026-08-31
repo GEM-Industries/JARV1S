@@ -18,21 +18,20 @@ async def cancel_alert(series_id: str | None = None, instance_id: str | None = N
     return "ok"
 
 
-@pytest.fixture(autouse=True)
-def reset_tool_index(monkeypatch):
-    monkeypatch.setattr(system_plugin, "_tool_index_signature", None)
-    monkeypatch.setattr(system_plugin, "_tool_index", {})
+@tool
+async def dim_lights(query: str, amount: str = "normal") -> str:
+    """Dim matching lights by a relative amount."""
+    return "ok"
 
 
-@pytest.mark.asyncio
-async def test_search_tools_returns_signature_and_argument_guidance(monkeypatch):
+def _fake_registry(*tools: tuple[str, object]):
     class FakeRegistry:
         def __init__(self):
             self.plugins = {
                 "scheduler": SimpleNamespace(
                     name="scheduler",
                     description="scheduler",
-                    get_tools=lambda: {"cancel_alert": cancel_alert},
+                    get_tools=lambda: {name: func for name, func in tools},
                 ),
             }
             self._capabilities = {}
@@ -66,6 +65,16 @@ async def test_search_tools_returns_signature_and_argument_guidance(monkeypatch)
                     continue
                 yield definition
 
+    return FakeRegistry()
+
+
+@pytest.fixture(autouse=True)
+def reset_tool_index(monkeypatch):
+    monkeypatch.setattr(system_plugin, "_tool_index_signature", None)
+    monkeypatch.setattr(system_plugin, "_tool_index", {})
+
+
+async def _search(monkeypatch, query: str, *tools: tuple[str, object]):
     async def immediate_to_thread(fn, *args):
         return fn(*args)
 
@@ -75,7 +84,7 @@ async def test_search_tools_returns_signature_and_argument_guidance(monkeypatch)
     def fail_embed(_texts):
         raise AssertionError("lexical tool search should not embed obvious matches")
 
-    monkeypatch.setattr(registry_module, "registry", FakeRegistry())
+    monkeypatch.setattr(registry_module, "registry", _fake_registry(*tools))
     monkeypatch.setattr(system_plugin.asyncio, "to_thread", immediate_to_thread)
     monkeypatch.setattr(embeddings.embedding_service, "embed", fail_embed)
     monkeypatch.setattr(embeddings.embedding_service, "embed_one", fail_embed)
@@ -84,17 +93,34 @@ async def test_search_tools_returns_signature_and_argument_guidance(monkeypatch)
         "cosine_similarity",
         lambda _query, vector: vector[0],
     )
+    return await system_plugin.SystemPlugin().search_tools(query)
 
-    result = await system_plugin.SystemPlugin().search_tools("cancel alert")
+
+@pytest.mark.asyncio
+async def test_search_tools_returns_signature_and_argument_guidance(monkeypatch):
+    result = await _search(monkeypatch, "cancel alert", ("cancel_alert", cancel_alert))
     [tool_card] = result.tools
 
-    assert tool_card.model_dump() == {
-        "fqn": "scheduler.cancel_alert",
-        "name": "cancel_alert",
-        "plugin": "scheduler",
-        "description": "Cancel one alert occurrence or an entire recurring series.",
-        "parameters": {
-            "series_id": "Cancels the durable recurring series.",
-            "instance_id": "Cancels one concrete pending notification occurrence.",
-        },
+    assert tool_card.fqn == "scheduler.cancel_alert"
+    assert tool_card.name == "cancel_alert"
+    assert tool_card.plugin == "scheduler"
+    assert tool_card.description == "Cancel one alert occurrence or an entire recurring series."
+    assert "series_id" in tool_card.signature
+    assert "instance_id" in tool_card.signature
+    assert tool_card.parameters == {
+        "series_id": "Cancels the durable recurring series.",
+        "instance_id": "Cancels one concrete pending notification occurrence.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_tools_fills_parameter_names_without_args_docs(monkeypatch):
+    result = await _search(monkeypatch, "dim lights", ("dim_lights", dim_lights))
+    [tool_card] = result.tools
+
+    assert tool_card.fqn == "scheduler.dim_lights"
+    assert "query" in tool_card.signature
+    assert tool_card.parameters == {
+        "query": "required",
+        "amount": "optional",
     }

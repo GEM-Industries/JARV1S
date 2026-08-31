@@ -16,8 +16,6 @@ async def test_error_handler_pushes_oauth_widget(monkeypatch):
         pushed.append(envelope.data)
 
     monkeypatch.setattr("core.auth.error_handler.push_ui", _capture_ui)
-    monkeypatch.setattr("core.auth.providers.settings.GOOGLE_OAUTH_CLIENT_ID", "cid")
-    monkeypatch.setattr("core.auth.providers.settings.GOOGLE_OAUTH_CLIENT_SECRET", None)
 
     import core.integrations.manager as mgr_mod
 
@@ -41,8 +39,7 @@ async def test_error_handler_pushes_oauth_widget_without_metadata(monkeypatch):
         pushed.append(envelope.data)
 
     monkeypatch.setattr("core.auth.error_handler.push_ui", _capture_ui)
-    monkeypatch.setattr("core.auth.providers.settings.GOOGLE_OAUTH_CLIENT_ID", None)
-    monkeypatch.setattr("core.auth.providers.settings.MICROSOFT_OAUTH_CLIENT_ID", None)
+    monkeypatch.delenv("JARVIS_PRODUCT_OAUTH", raising=False)
 
     import core.integrations.manager as mgr_mod
 

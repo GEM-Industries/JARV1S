@@ -87,6 +87,14 @@ while IFS= read -r -d '' f; do
   cp "$ROOT/$f" "$DEST/$f"
 done < <(git -C "$ROOT" ls-files -z '*.wav')
 
+# Keep the private dogfood owner id out of the public snapshot.
+config_py="$DEST/backend/core/config.py"
+if ! grep -q 'DEFAULT_USER_ID: str = "geoff"' "$config_py"; then
+  echo "Refuse: expected private DEFAULT_USER_ID=geoff in $config_py" >&2
+  exit 1
+fi
+perl -i -pe 's/DEFAULT_USER_ID: str = "geoff"/DEFAULT_USER_ID: str = "local"/' "$config_py"
+
 assert_clean_staging
 
 echo "Staging file count: $(git -C "$DEST" ls-files --others --exclude-standard | wc -l | tr -d ' ') untracked after rsync (plus existing index)"

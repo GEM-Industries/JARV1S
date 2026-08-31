@@ -1,4 +1,4 @@
-"""Pure turn-admission policy tests (barge-in + fail-open follow-up)."""
+"""Pure turn-admission policy tests (barge-in + owner-gated follow-up)."""
 
 from core.voice.speaker_verifier import SpeakerMatchStatus
 from core.voice.turn_admission import (
@@ -378,7 +378,7 @@ def test_barge_in_explicit_not_directed_suppresses() -> None:
     assert decision.reason == "not_directed"
 
 
-def test_followup_unknown_commits_nonempty_including_short_answers() -> None:
+def test_followup_unenrolled_commits_nonempty_including_short_answers() -> None:
     for text in ("actually what time is it", "no", "yes", "cool"):
         decision = decide_followup_admission(
             FollowupEvidence(transcript=text, directedness=Directedness.UNKNOWN)
@@ -408,7 +408,7 @@ def test_followup_empty_suppresses() -> None:
     assert decision.reason == "empty"
 
 
-def test_followup_directed_commits() -> None:
+def test_followup_unenrolled_directed_still_fail_open() -> None:
     decision = decide_followup_admission(
         FollowupEvidence(
             transcript="set a timer for five minutes",
@@ -417,16 +417,77 @@ def test_followup_directed_commits() -> None:
     )
 
     assert decision.action is AdmissionAction.COMMIT
-    assert decision.reason == "directed"
+    assert decision.reason == "followup_open"
 
 
-def test_followup_wake_prefix_commits() -> None:
+def test_followup_matched_short_yes_commits() -> None:
     decision = decide_followup_admission(
         FollowupEvidence(
-            transcript="Jarvis stop listening",
-            directedness=Directedness.NOT_DIRECTED,
+            transcript="yes",
+            speaker_status=SpeakerMatchStatus.MATCHED,
         )
     )
 
     assert decision.action is AdmissionAction.COMMIT
-    assert decision.reason == "wake_prefix"
+    assert decision.reason == "owner_followup"
+
+
+def test_followup_mismatch_suppresses() -> None:
+    decision = decide_followup_admission(
+        FollowupEvidence(
+            transcript="what time is it",
+            speaker_status=SpeakerMatchStatus.MISMATCH,
+        )
+    )
+
+    assert decision.action is AdmissionAction.SUPPRESS
+    assert decision.reason == "speaker_mismatch"
+
+
+def test_followup_unavailable_commits() -> None:
+    decision = decide_followup_admission(
+        FollowupEvidence(
+            transcript="what time is it",
+            speaker_status=SpeakerMatchStatus.UNAVAILABLE,
+        )
+    )
+
+    assert decision.action is AdmissionAction.COMMIT
+    assert decision.reason == "followup_unscorable"
+
+
+def test_followup_wake_prefix_does_not_bypass_mismatch() -> None:
+    decision = decide_followup_admission(
+        FollowupEvidence(
+            transcript="Jarvis archive my mail",
+            speaker_status=SpeakerMatchStatus.MISMATCH,
+        )
+    )
+
+    assert decision.action is AdmissionAction.SUPPRESS
+    assert decision.reason == "speaker_mismatch"
+
+
+def test_followup_identity_wins_over_directed() -> None:
+    decision = decide_followup_admission(
+        FollowupEvidence(
+            transcript="set a timer for five minutes",
+            speaker_status=SpeakerMatchStatus.MISMATCH,
+            directedness=Directedness.DIRECTED,
+        )
+    )
+
+    assert decision.action is AdmissionAction.SUPPRESS
+    assert decision.reason == "speaker_mismatch"
+
+
+def test_followup_explicit_control_commits_despite_mismatch() -> None:
+    decision = decide_followup_admission(
+        FollowupEvidence(
+            transcript="stop",
+            speaker_status=SpeakerMatchStatus.MISMATCH,
+        )
+    )
+
+    assert decision.action is AdmissionAction.COMMIT
+    assert decision.reason == "explicit_control"

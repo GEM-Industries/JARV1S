@@ -470,6 +470,7 @@ class JarvisClient {
             store.updateOrAddTranscriptItem({
               id: toolCallId,
               toolCallId,
+              turn_id: typeof msg.data.turn_id === 'string' ? msg.data.turn_id : undefined,
               code: msg.data.text as string,
               sender: 'assistant',
               type: 'code',
@@ -770,6 +771,7 @@ class JarvisClient {
           store.addTranscriptItem({
             id: toolCallId,
             toolCallId,
+            turn_id: m.turn_id || undefined,
             code: m.code,
             codeResult: m.code_result || undefined,
             sender: 'assistant',
@@ -801,6 +803,7 @@ class JarvisClient {
         } else if (m.content) {
           store.addTranscriptItem({
             id: `history-${i}-${m.timestamp}`,
+            turn_id: m.turn_id || undefined,
             text: m.content,
             type: 'text',
             sender,

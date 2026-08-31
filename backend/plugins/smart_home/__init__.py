@@ -22,6 +22,7 @@ from plugins.db import get_tool_data, store_tool_data
 from plugins.smart_home.domains import (
     ADJUST_AMOUNTS,
     COLOR_MODES,
+    UnsupportedLightCapability,
     brightness_pct_from_ha,
     clamp_light_params,
     default_service_for_action,
@@ -40,7 +41,9 @@ from plugins.smart_home.inventory import (
     entities_for_config_entry,
     entity_to_device_summary,
     match_area_by_name,
+    parse_device_query,
     search_inventory,
+    unmatched_lights_message,
 )
 from plugins.smart_home.models import (
     DeviceSummary,
@@ -63,11 +66,15 @@ from plugins.smart_home.status import (
     load_or_refresh_inventory,
 )
 
-ROOM_REFERENCE_QUERIES = {"here", "this room", "in here", "this area"}
 WARMTH_STEPS_MIRED = {
     "slight": 50,
     "normal": 100,
     "large": 150,
+}
+BRIGHTNESS_STEPS_PCT = {
+    "slight": 10,
+    "normal": 20,
+    "large": 35,
 }
 
 
@@ -214,8 +221,12 @@ def _state_mismatches(
 ) -> list[str]:
     mismatches: list[str] = []
     actual_state = str(state.get("state", "unknown"))
+    fading = "transition" in payload
     if expected_state is not None and actual_state != expected_state:
-        mismatches.append(f"state={actual_state}")
+        if not (fading and expected_state == "off"):
+            mismatches.append(f"state={actual_state}")
+    if fading:
+        return mismatches
 
     attrs = state.get("attributes") or {}
     if "brightness_pct" in payload:
@@ -306,6 +317,7 @@ class SmartHomePlugin(JarvisPlugin):
             "turn the lights down",
             "make the bedroom lights warmer",
             "make the lights more orange",
+            "fade the bedroom lights in",
         ],
     )
 
@@ -679,11 +691,12 @@ class SmartHomePlugin(JarvisPlugin):
         brightness_pct: int | None = None,
         color_temp_kelvin: int | None = None,
         color_name: str | None = None,
+        transition: str | int | None = None,
         smart_home: HomeAssistantClient = None,
     ) -> str:
         """
         Turn lights by natural scope.
-        Use for all lights, room lights, or "in here" — entity_ids are resolved inside the tool. Brightness-only turn_on restores the last colour; for warm/white/cool/daylight also pass color_temp_kelvin or color_name. Use adjust_lights for relative changes (dimmer/brighter, warmer/cooler white, more orange/red/blue); use control_devices only when you already have exact entity_ids from search_devices.
+        Use for all lights, room lights, or "in here" — entity_ids are resolved inside the tool. Brightness-only turn_on restores the last colour. color_name sets a named hue in RGB (orange, green, blue) or a white in Kelvin (warm, cool, candle). Fade or sunrise with transition=. Use adjust_lights for relative dimmer/brighter, warmer/cooler, or more orange.
         """
         service_action = _normalize_light_action(action)
         if service_action is None:
@@ -695,7 +708,8 @@ class SmartHomePlugin(JarvisPlugin):
             if entity.domain == "light"
         ]
         if not lights:
-            return _fail(f"No lights matched '{query}'.")
+            snapshot = await self._inventory(smart_home)
+            return _fail(unmatched_lights_message(query, snapshot))
 
         params: dict[str, Any] = {}
         if service_action == "turn_on":
@@ -705,6 +719,8 @@ class SmartHomePlugin(JarvisPlugin):
                 params["color_temp_kelvin"] = color_temp_kelvin
             if color_name is not None:
                 params["color_name"] = color_name
+        if transition is not None:
+            params["transition"] = transition
 
         return await self.control_devices(
             [entity.entity_id for entity in lights],
@@ -721,18 +737,17 @@ class SmartHomePlugin(JarvisPlugin):
         complete: bool = False,
     ) -> list[InventoryEntity]:
         ctx = get_ctx()
-        normalized_query = query.strip().lower()
+        parsed = parse_device_query(query)
         area_id = None
-        if normalized_query in ROOM_REFERENCE_QUERIES:
+        if parsed.room_reference:
             area_id = await resolve_area_from_context(
                 ctx.get("location_ref"), get_node_id()
             )
-
-        if normalized_query in ROOM_REFERENCE_QUERIES and not area_id:
-            raise RuntimeError(
-                "This node is not bound to a Home Assistant area yet. "
-                "Use bind_node_area during setup or specify a room name."
-            )
+            if not area_id:
+                raise RuntimeError(
+                    "This node is not bound to a Home Assistant area yet. "
+                    "Use bind_node_area during setup or specify a room name."
+                )
 
         snapshot = await self._inventory(smart_home)
         return search_inventory(
@@ -770,7 +785,7 @@ class SmartHomePlugin(JarvisPlugin):
     ) -> str:
         """
         Execute on exact Home Assistant entity_ids only.
-        Do not pass wildcards or natural scopes like "all lights" — use control_lights instead. Pass entity_ids from search_devices. Valid common actions: turn_on, turn_off, toggle. For lights, use turn_on to apply brightness_pct 1-100, color_temp_kelvin, rgb_color [r,g,b], or color_name. Named colours (orange, red, blue) are hues — use adjust_lights(color=...). Warmer/cooler is white balance (Kelvin) via adjust_lights(warmth=...). Prefer adjust_lights for relative brightness, hue, or warmth requests.
+        Do not pass wildcards or natural scopes like "all lights" — use control_lights instead. Pass entity_ids from search_devices. Valid common actions: turn_on, turn_off, toggle. For lights, turn_on accepts brightness_pct 1-100, color_temp_kelvin, rgb_color [r,g,b], color_name, or transition. Prefer control_lights for named hues and whites; prefer adjust_lights for relative brightness, hue, or warmth.
         VOICE: Confirm the group outcome briefly.
         """
         targets = _coerce_entity_ids(entity_ids)
@@ -780,6 +795,7 @@ class SmartHomePlugin(JarvisPlugin):
         snapshot = await self._inventory(smart_home)
         entity_by_id = {entity.entity_id: entity for entity in snapshot.entities}
         groups: dict[tuple[str, str, str, tuple[tuple[str, Any], ...]], list[str]] = {}
+        skipped: list[str] = []
         for entity_id in targets:
             invalid_reason = _invalid_entity_id_reason(entity_id)
             if invalid_reason:
@@ -801,10 +817,20 @@ class SmartHomePlugin(JarvisPlugin):
             svc_domain, service = default_service_for_action(domain, action)
             try:
                 payload = _clamp_params_for_entity(entity, entity_id, params)
+            except UnsupportedLightCapability:
+                skipped.append(entity.name)
+                continue
             except ValueError as exc:
                 return _fail(f"{exc}")
             key = (domain, svc_domain, service, _payload_key(payload))
             groups.setdefault(key, []).append(entity_id)
+
+        if not groups:
+            if skipped:
+                return _fail(
+                    f"{', '.join(skipped)} do not support that colour setting."
+                )
+            return _fail("No entity_ids provided.")
 
         async def _do_control() -> str:
             results = []
@@ -850,7 +876,10 @@ class SmartHomePlugin(JarvisPlugin):
                     f"Home Assistant reports {', '.join(names)} "
                     f"{expected_state or 'updated'} ({', '.join(grouped_ids)}).{_format_params(payload)}"
                 )
-            return " ".join(results)
+            text = " ".join(results)
+            if skipped:
+                text += f" Skipped {', '.join(skipped)}."
+            return text
 
         risky = [
             entity_id
@@ -881,16 +910,25 @@ class SmartHomePlugin(JarvisPlugin):
         amount: Literal["slight", "normal", "large"] = "slight",
         brightness_delta_pct: int | None = None,
         color: str | None = None,
+        direction: Literal["dimmer", "brighter"] | None = None,
         smart_home: HomeAssistantClient = None,
     ) -> str:
         """
-        Adjust lights from a natural query like "bedroom lights" or "in here" without HA service details.
-        Use brightness_delta_pct for brighter/dimmer (negative dims). Use warmth for warmer/cooler white balance. Use color to move toward a named hue like orange, red, or blue. Never use warmth for named colours. Returns a no-change result when lights are already at their limit.
+        Adjust lights from a natural query like "bedroom lights" or "in here".
+        Relative dim/bright uses direction or dim/brighter in the query; amount scales the step. brightness_delta_pct overrides that step. color sets a named hue in RGB or a white in Kelvin; RGBWW bulbs leave white mode for hues. Relative phrases like more orange nudge hue. warmth is relative white balance when no color is set.
         """
-        if warmth is not None and color:
-            return _fail("Choose either warmth for white balance or color for a named hue, not both.")
+        parsed = parse_device_query(query)
+        amount_key = amount if amount in ADJUST_AMOUNTS else "slight"
+        resolved_direction = direction or parsed.brightness_direction
+        if brightness_delta_pct is None and resolved_direction is not None:
+            step = BRIGHTNESS_STEPS_PCT.get(amount_key, BRIGHTNESS_STEPS_PCT["slight"])
+            brightness_delta_pct = -step if resolved_direction == "dimmer" else step
+
         if warmth is None and brightness_delta_pct is None and not color:
-            return _fail("No light adjustment requested.")
+            return _fail(
+                "No light adjustment requested. Pass direction='dimmer' or 'brighter', "
+                "warmth='warmer' or 'cooler', color=..., or brightness_delta_pct=..."
+            )
 
         lights = [
             entity
@@ -898,9 +936,8 @@ class SmartHomePlugin(JarvisPlugin):
             if entity.domain == "light"
         ]
         if not lights:
-            return _fail(f"No lights matched '{query}'.")
-
-        amount_key = amount if amount in ADJUST_AMOUNTS else "slight"
+            snapshot = await self._inventory(smart_home)
+            return _fail(unmatched_lights_message(query, snapshot))
         ha_states = await asyncio.gather(
             *(smart_home.get_state(entity.entity_id) for entity in lights)
         )
@@ -914,16 +951,21 @@ class SmartHomePlugin(JarvisPlugin):
 
         payload_groups: dict[tuple[tuple[str, Any], ...], list[str]] = {}
         unchanged: list[str] = []
-        unsupported_temp: list[str] = []
+        skipped: list[str] = []
 
         for entity in lights:
             live = live_by_id[entity.entity_id]
             params: dict[str, Any] = {}
 
-            if warmth is not None:
-                if "color_temp" not in live.supported_color_modes:
-                    unsupported_temp.append(entity.name)
-                else:
+            if color:
+                resolved = resolve_hue_adjustment(color, amount_key, live)
+                if resolved:
+                    params.update(resolved)
+
+            if warmth is not None and not (
+                {"color_name", "rgb_color", "color_temp_kelvin"} & params.keys()
+            ):
+                if "color_temp" in live.supported_color_modes:
                     kelvin = relative_kelvin_adjustment(
                         live,
                         warmth,
@@ -934,6 +976,8 @@ class SmartHomePlugin(JarvisPlugin):
                         unchanged.append(entity.name)
                     else:
                         params["color_temp_kelvin"] = kelvin
+                else:
+                    skipped.append(entity.name)
 
             if brightness_delta_pct is not None:
                 current = (
@@ -945,35 +989,36 @@ class SmartHomePlugin(JarvisPlugin):
                     1, min(100, current + brightness_delta_pct)
                 )
 
-            if color:
-                hue_params = resolve_hue_adjustment(
-                    color, amount_key, live, relative=True
-                )
-                if hue_params is None:
-                    unchanged.append(entity.name)
-                else:
-                    params.update(hue_params)
+            if not params:
+                if color and entity.name not in skipped and entity.name not in unchanged:
+                    skipped.append(entity.name)
+                continue
 
-            if params:
-                live_entity = entity.model_copy(
-                    update={
-                        "supported_color_modes": live.supported_color_modes,
-                        "min_color_temp_kelvin": live.min_color_temp_kelvin,
-                        "max_color_temp_kelvin": live.max_color_temp_kelvin,
-                    }
-                )
-                try:
-                    payload = clamp_light_params(live_entity, params)
-                except ValueError as exc:
-                    return _fail(f"{exc}")
-                payload_groups.setdefault(_payload_key(payload), []).append(
-                    entity.entity_id
-                )
+            live_entity = entity.model_copy(
+                update={
+                    "supported_color_modes": live.supported_color_modes,
+                    "min_color_temp_kelvin": live.min_color_temp_kelvin,
+                    "max_color_temp_kelvin": live.max_color_temp_kelvin,
+                }
+            )
+            try:
+                payload = clamp_light_params(live_entity, params)
+            except UnsupportedLightCapability:
+                skipped.append(entity.name)
+                continue
+            except ValueError as exc:
+                return _fail(f"{exc}")
+            if not payload:
+                skipped.append(entity.name)
+                continue
+            payload_groups.setdefault(_payload_key(payload), []).append(
+                entity.entity_id
+            )
 
         if not payload_groups:
-            if unsupported_temp:
-                names = ", ".join(unsupported_temp)
-                return _fail(f"{names} do not support color temperature.")
+            if skipped:
+                names = ", ".join(dict.fromkeys(skipped))
+                return _fail(f"{names} do not support that colour setting.")
             names = ", ".join(dict.fromkeys(unchanged))
             if warmth is not None:
                 direction = "warmest" if warmth == "warmer" else "coolest"
@@ -991,7 +1036,16 @@ class SmartHomePlugin(JarvisPlugin):
                     smart_home=smart_home,
                 )
             )
-        return " ".join(results)
+        text = " ".join(results)
+        applied = {eid for ids in payload_groups.values() for eid in ids}
+        leftover = [
+            entity.name
+            for entity in lights
+            if entity.name in skipped and entity.entity_id not in applied
+        ]
+        if leftover:
+            text += f" Skipped {', '.join(dict.fromkeys(leftover))}."
+        return text
 
     async def get_device_state(
         self,

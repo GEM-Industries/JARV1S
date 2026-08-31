@@ -1,6 +1,7 @@
-"""Owner speaker-profile helpers for wakeword Stage 2b enrollment.
+"""Owner speaker-profile helpers.
 
-Stores a normalized embedding gallery under DATA_DIR. Raw enrollment PCM is never persisted.
+Stores a normalized embedding gallery under DATA_DIR. Raw PCM is never persisted.
+Mac enrollment is five clips. Each room speaker may add one extra vector, tagged by node_id.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from core.voice.speaker_verifier import (
     embed_pcm16,
     l2_normalize,
     load_speaker_extractor,
-    load_speaker_profile,
+    load_speaker_profile_parts,
     mean_centroid,
     pcm16_bytes_to_float32,
     save_speaker_profile,
@@ -61,6 +62,7 @@ class SpeakerProfileError(ValueError):
 class SpeakerProfileStatus:
     status: ProfileStatusValue
     updated_at: datetime | None = None
+    node_ids: tuple[str, ...] = ()
 
 
 _locks: dict[str, threading.Lock] = {}
@@ -91,7 +93,7 @@ def get_profile_status(owner_id: str) -> SpeakerProfileStatus:
         return SpeakerProfileStatus(status="not_enrolled")
     try:
         model_path = _model_path()
-        gallery = load_speaker_profile(
+        gallery, node_embeddings = load_speaker_profile_parts(
             path,
             model_id=speaker_model_id(model_path),
         )
@@ -105,6 +107,7 @@ def get_profile_status(owner_id: str) -> SpeakerProfileStatus:
     return SpeakerProfileStatus(
         status="enrolled",
         updated_at=updated_at,
+        node_ids=tuple(sorted(node_embeddings)),
     )
 
 
@@ -118,48 +121,34 @@ def _pcm_stats(pcm: bytes) -> tuple[float, float, float]:
     return duration_s, rms, clipping_ratio
 
 
+def _validate_one_clip(pcm: bytes, *, clip_index: int | None = None) -> None:
+    if not isinstance(pcm, (bytes, bytearray)) or len(pcm) == 0:
+        raise SpeakerProfileError("too_short", "Clip is empty", clip_index=clip_index)
+    if len(pcm) % 2 != 0:
+        raise SpeakerProfileError(
+            "processing_failed",
+            "Clip is not valid PCM16",
+            clip_index=clip_index,
+        )
+    duration_s, rms, clipping_ratio = _pcm_stats(bytes(pcm))
+    if duration_s < MIN_CLIP_SECONDS:
+        raise SpeakerProfileError("too_short", "Clip is too short", clip_index=clip_index)
+    if duration_s > MAX_CLIP_SECONDS:
+        raise SpeakerProfileError("processing_failed", "Clip is too long", clip_index=clip_index)
+    if rms < MIN_RMS:
+        raise SpeakerProfileError("too_quiet", "Clip is too quiet", clip_index=clip_index)
+    if clipping_ratio > CLIPPING_RATIO_LIMIT:
+        raise SpeakerProfileError("clipped", "Clip is clipped", clip_index=clip_index)
+
+
 def validate_clips(clips: list[bytes]) -> None:
     if len(clips) != REQUIRED_CLIP_COUNT:
         raise SpeakerProfileError(
             "processing_failed",
             f"Expected {REQUIRED_CLIP_COUNT} enrollment clips, got {len(clips)}",
         )
-
     for index, pcm in enumerate(clips, start=1):
-        if not isinstance(pcm, (bytes, bytearray)) or len(pcm) == 0:
-            raise SpeakerProfileError("too_short", f"Clip {index} is empty", clip_index=index)
-        if len(pcm) % 2 != 0:
-            raise SpeakerProfileError(
-                "processing_failed",
-                f"Clip {index} is not valid PCM16",
-                clip_index=index,
-            )
-
-        duration_s, rms, clipping_ratio = _pcm_stats(bytes(pcm))
-        if duration_s < MIN_CLIP_SECONDS:
-            raise SpeakerProfileError(
-                "too_short",
-                f"Clip {index} is too short",
-                clip_index=index,
-            )
-        if duration_s > MAX_CLIP_SECONDS:
-            raise SpeakerProfileError(
-                "processing_failed",
-                f"Clip {index} is too long",
-                clip_index=index,
-            )
-        if rms < MIN_RMS:
-            raise SpeakerProfileError(
-                "too_quiet",
-                f"Clip {index} is too quiet",
-                clip_index=index,
-            )
-        if clipping_ratio > CLIPPING_RATIO_LIMIT:
-            raise SpeakerProfileError(
-                "clipped",
-                f"Clip {index} is clipped",
-                clip_index=index,
-            )
+        _validate_one_clip(pcm, clip_index=index)
 
 
 def _validate_embedding_consistency(embeddings: list[np.ndarray]) -> None:
@@ -186,6 +175,36 @@ def _model_path() -> Path:
     if not path.is_absolute():
         path = Path(__file__).resolve().parents[2] / path
     return path.resolve()
+
+
+def _commit_profile(
+    destination: Path,
+    *,
+    model_id: str,
+    embeddings: np.ndarray,
+    node_embeddings: dict[str, np.ndarray],
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".speaker-profile-",
+        suffix=".npz",
+        dir=destination.parent,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        os.close(fd)
+        save_speaker_profile(
+            tmp_path,
+            model_id=model_id,
+            embeddings=embeddings,
+            node_embeddings=node_embeddings,
+        )
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, destination)
+        os.chmod(destination, 0o600)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def write_profile(owner_id: str, clips: list[bytes]) -> SpeakerProfileStatus:
@@ -215,33 +234,74 @@ def write_profile(owner_id: str, clips: list[bytes]) -> SpeakerProfileStatus:
             raise SpeakerProfileError("processing_failed", str(exc)) from exc
 
         destination = profile_path(owner_id)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".speaker-profile-",
-            suffix=".npz",
-            dir=destination.parent,
+        existing_nodes: dict[str, np.ndarray] = {}
+        model_id = speaker_model_id(_model_path())
+        if destination.is_file():
+            try:
+                _existing_gallery, existing_nodes = load_speaker_profile_parts(
+                    destination,
+                    model_id=model_id,
+                    embedding_dim=gallery.shape[1],
+                )
+            except (OSError, ValueError):
+                existing_nodes = {}
+        _commit_profile(
+            destination,
+            model_id=model_id,
+            embeddings=gallery,
+            node_embeddings=existing_nodes,
         )
-        tmp_path = Path(tmp_name)
-        try:
-            os.close(fd)
-            save_speaker_profile(
-                tmp_path,
-                model_id=speaker_model_id(_model_path()),
-                embeddings=gallery,
-            )
-            os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, destination)
-            os.chmod(destination, 0o600)
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-
         logger.info(
-            "Wrote speaker profile for owner=%s path=%s shape=%s",
+            "Wrote speaker profile for owner=%s path=%s shape=%s nodes=%s",
             owner_id,
             destination,
             gallery.shape,
+            sorted(existing_nodes),
         )
+        return get_profile_status(owner_id)
+
+
+def append_node_clip(owner_id: str, node_id: str, pcm: bytes) -> SpeakerProfileStatus:
+    """Replace the single room-mic embedding for this node. Enrollment rows stay intact."""
+    node = (node_id or "").strip()
+    if not node:
+        raise SpeakerProfileError("processing_failed", "node_id is required")
+    _validate_one_clip(pcm)
+    with _owner_lock(owner_id):
+        destination = profile_path(owner_id)
+        model_id = speaker_model_id(_model_path())
+        try:
+            enrollment, node_embeddings = load_speaker_profile_parts(destination, model_id=model_id)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            raise SpeakerProfileError(
+                "not_enrolled",
+                "Enroll a voice profile before adding a room sample",
+            ) from exc
+        if enrollment.shape[0] != REQUIRED_CLIP_COUNT:
+            raise SpeakerProfileError(
+                "not_enrolled",
+                "Enroll a voice profile before adding a room sample",
+            )
+        try:
+            extractor = load_speaker_extractor(
+                _model_path(),
+                num_threads=settings.VOICE.wakeword_speaker_num_threads,
+            )
+            embedding = l2_normalize(embed_pcm16(extractor, bytes(pcm)))
+        except SpeakerProfileError:
+            raise
+        except Exception as exc:
+            logger.exception("Room speaker sample failed for owner=%s node=%s", owner_id, node)
+            raise SpeakerProfileError("processing_failed", str(exc)) from exc
+
+        node_embeddings[node] = embedding
+        _commit_profile(
+            destination,
+            model_id=model_id,
+            embeddings=enrollment,
+            node_embeddings=node_embeddings,
+        )
+        logger.info("Saved room speaker sample | owner=%s node=%s", owner_id, node)
         return get_profile_status(owner_id)
 
 

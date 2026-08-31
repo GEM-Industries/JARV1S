@@ -12,15 +12,15 @@ To build a **highly responsive, locally-grounded AI Home Assistant** (JARV1S) th
 
 ## Core System Architecture
 *   **Voice-First Pipeline:** VAD endpointing, pluggable streaming STT (Cartesia cloud or on-device Apple Speech), and pluggable streaming TTS (Cartesia cloud or on-device Kokoro, or text-only).
-*   **Structured Capability Calls:** An agent that interacts with the world by emitting named JSON tool calls. For heavy tasks, JARV1S dispatches to more powerful models via headless subagents (Claude Code, Codex) while staying fast and responsive on the voice loop.
-*   **Modular Plugin System:** Self-discovering "Skills" that extend the assistant's capabilities dynamically. A semantic Tool Router activates only the relevant plugin packs per turn based on utterance embeddings, keeping the context window lean as the tool ecosystem scales.
+*   **Structured Capability Calls:** An agent that interacts with the world by emitting named JSON tool calls. For heavy tasks, JARV1S dispatches to a local coding worker (Cursor or Claude Code) or an in-process Jarvis agent, and stays fast on the voice loop.
+*   **Modular Plugin System:** Self-discovering plugins. A semantic Tool Router offers only the relevant plugin schemas per turn via `tools=`. User-owned Agent Skills live in Home and are procedures, not plugins.
 *   **Identity & Presence Management:** Distinguishing between users and maintaining awareness of who is in which room.
 *   **Dynamic Context:** Real-time awareness of time, location, and user preferences for personalized turns.
 *   **Contextual UI:** The ability for the agent to push data (widgets, images, status) to the frontend for visual context.
 *   **Centralized Brain, Distributed Presence:** A single intelligent core that coordinates multiple room instances (Lobby, Bedroom) and handles cross-room alerts. V1 room satellites are JARV1S WebSocket nodes with stable presence metadata, not Home Assistant Assist satellites.
 *   **Omni-Channel Input:** Voice, text, and image input through a unified pipeline. Voice stays primary; text and multimodal extend reach to when you can't speak or need to share visual context.
 *   **Starvation-Free Concurrency:** Lane-based priority scheduling (Voice > System > Background) to ensure responsiveness never degrades due to background tasks.
-*   **Two-Tier Memory:** Core profile facts injected every turn (Layer 1) plus timestamped archival events with semantic recall on demand (Layer 2). The persona itself lives in modular YAML files for easy customization.
+*   **Two-Tier Memory:** Core profile facts injected every turn (Layer 1) plus timestamped archival events with semantic recall on demand (Layer 2). Personality lives in user-owned Agent Home `PROMPT.md`; product reliability lives in packaged `SYSTEM.md`.
 *   **System Pulse:** A background heartbeat service that allows the agent to be proactive independent of user triggering.
 
 ## Skills & Capabilities (Plugins)
@@ -28,8 +28,8 @@ To build a **highly responsive, locally-grounded AI Home Assistant** (JARV1S) th
 *   **Protocols & Routines:** ✅ User-defined multi-step routines with execution history, alarm-linked or on-demand. The primary differentiator — routines that remember, adapt, and compose.
 *   **Memory & Personalization:** ✅ Core facts shape every response; archival recall answers "when did I mention…?" This is what commodity assistants lack.
 *   **System Control & Diagnostics:** ✅ Volume, app control, consent-gated shell, machine health, file access.
-*   **Subagent Dispatch:** Spawn powerful coding agents (Claude Code, Codex) as background tasks. JARV1S stays fast on the voice loop, offloading heavy work to specialist models.
-*   **Information & Research:** ✅ Web search, unified calendar (Google + Outlook via OAuth).
+*   **Subagent Dispatch:** Spawn a local coding worker (Cursor or Claude Code) or an in-process Jarvis agent as background work. Named work (`work_id` + title) survives the Home conversation window.
+*   **Information & Research:** ✅ Web search, unified calendar (EventKit on this Mac plus Google + Outlook OAuth).
 *   **Home Control:** ✅ Home Assistant via direct REST + WebSocket. Product setup: Smart Home panel (URL + long-lived token → `system_config` + CredentialStore). Contributor CLI: `task setup:home` (connect existing, onboard fresh, or Docker bootstrap). Eight curated tools cover search, control, setup validation, Tuya refresh/reconcile (`refresh_home_assistant`, `organize_device`), and room binding. Vendor apps commission devices; JARV1S handles post-HA naming, areas, and control — see [HA_FIRST_DEVICE_PAIRING.md](./proposals/partial/HA_FIRST_DEVICE_PAIRING.md).
 *   **Media & Music:** Streaming music to specific speakers or syncing audio across the house.
 

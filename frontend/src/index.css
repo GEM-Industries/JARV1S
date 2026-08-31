@@ -137,12 +137,19 @@
   /*
    * Focus: beat UA outline (!important), keep hologram shadows (no box-shadow:none),
    * zero Tailwind ring vars, custom outline only under html[data-keyboard-nav].
+   * Tailwind `outline-none` is 2px transparent + offset — WKWebView flashes that
+   * white when a programmatically focused menu blurs. Make it a true none.
    */
   :focus {
     outline: none !important;
     outline-offset: 0 !important;
     --tw-ring-offset-shadow: 0 0 #0000 !important;
     --tw-ring-shadow: 0 0 #0000 !important;
+  }
+
+  .outline-none {
+    outline: none !important;
+    outline-offset: 0 !important;
   }
 
   html[data-keyboard-nav] :focus-visible {

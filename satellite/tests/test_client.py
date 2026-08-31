@@ -127,7 +127,7 @@ def test_mint_ws_ticket_normalizes_raw_timeout(monkeypatch: pytest.MonkeyPatch):
     def timeout(*args, **kwargs):
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(ticket_module, "urlopen", timeout)
+    monkeypatch.setattr("jarvis_satellite.http.urlopen", timeout)
 
     with pytest.raises(RuntimeError, match="timed out"):
         ticket_module.mint_ws_ticket("ws://192.168.1.10:8000/api/v1/ws", "device-token")

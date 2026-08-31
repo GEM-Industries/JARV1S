@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,7 +20,8 @@ from plugins.smart_home.domains import (
 TOOL_DATA_KEY = "inventory"
 CACHE_TTL_S = 300
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_ROOM_REFERENCE_PHRASES = frozenset({"here", "this room", "in here", "this area"})
+_CLAUSE_SPLIT_RE = re.compile(r"\s*(?:\band\b|&)\s*", re.IGNORECASE)
+_ROOM_REFERENCE_PHRASES = ("in here", "this room", "this area", "here")
 _GLOBAL_SCOPE_PHRASES = (
     "in the house",
     "in the home",
@@ -29,7 +30,17 @@ _GLOBAL_SCOPE_PHRASES = (
     "the home",
     "everywhere",
 )
-_SCOPE_FILLER_WORDS = frozenset({"my", "please", "the"})
+_SCOPE_FILLER_WORDS = frozenset({"my", "please", "the", "turn", "make"})
+_BRIGHTNESS_DIRECTION_WORDS = {
+    "dimmer": "dimmer",
+    "darker": "dimmer",
+    "dim": "dimmer",
+    "down": "dimmer",
+    "brighter": "brighter",
+    "bright": "brighter",
+    "up": "brighter",
+}
+_RELATIVE_STRIP_WORDS = frozenset({*_BRIGHTNESS_DIRECTION_WORDS, "warmer", "cooler"})
 _DOMAIN_QUERY_ALIASES = (
     ("light", ("light", "lights")),
     ("switch", ("switch", "switches")),
@@ -79,6 +90,7 @@ class DeviceQuery:
     scope_all: bool = False
     room_reference: bool = False
     tokens: frozenset[str] = frozenset()
+    brightness_direction: Literal["dimmer", "brighter"] | None = None
 
 
 class InventoryEntity(BaseModel):
@@ -117,10 +129,27 @@ def parse_device_query(query: str) -> DeviceQuery:
     if not raw:
         return DeviceQuery()
 
-    if raw in _ROOM_REFERENCE_PHRASES:
-        return DeviceQuery(room_reference=True)
-
     text = f" {raw} "
+    room_reference = False
+    for phrase in _ROOM_REFERENCE_PHRASES:
+        pattern = rf"\b{re.escape(phrase)}\b"
+        if re.search(pattern, text):
+            text = re.sub(pattern, " ", text)
+            room_reference = True
+
+    brightness_direction: Literal["dimmer", "brighter"] | None = None
+    for word, direction in sorted(
+        _BRIGHTNESS_DIRECTION_WORDS.items(), key=lambda item: len(item[0]), reverse=True
+    ):
+        pattern = rf"\b{re.escape(word)}\b"
+        if re.search(pattern, text):
+            if brightness_direction is None:
+                brightness_direction = direction
+            text = re.sub(pattern, " ", text)
+
+    for word in _RELATIVE_STRIP_WORDS - _BRIGHTNESS_DIRECTION_WORDS.keys():
+        text = re.sub(rf"\b{re.escape(word)}\b", " ", text)
+
     scope_all = False
     for phrase in _GLOBAL_SCOPE_PHRASES:
         wrapped = f" {phrase} "
@@ -132,9 +161,8 @@ def parse_device_query(query: str) -> DeviceQuery:
         text = re.sub(r"\ball\b", " ", text)
         scope_all = True
 
-    if scope_all:
-        for filler in _SCOPE_FILLER_WORDS:
-            text = re.sub(rf"\b{re.escape(filler)}\b", " ", text)
+    for filler in _SCOPE_FILLER_WORDS:
+        text = re.sub(rf"\b{re.escape(filler)}\b", " ", text)
 
     domain: str | None = None
     for canonical, aliases in _DOMAIN_QUERY_ALIASES:
@@ -147,7 +175,13 @@ def parse_device_query(query: str) -> DeviceQuery:
             break
 
     tokens = _tokenize_search_remainder(text)
-    return DeviceQuery(domain=domain, scope_all=scope_all, tokens=tokens)
+    return DeviceQuery(
+        domain=domain,
+        scope_all=scope_all,
+        room_reference=room_reference,
+        tokens=tokens,
+        brightness_direction=brightness_direction,
+    )
 
 
 def _friendly_name(state: dict[str, Any], registry: dict[str, Any] | None) -> str:
@@ -355,6 +389,20 @@ async def _parallel(*coros):
     return await asyncio.gather(*coros)
 
 
+def _query_clauses(query: str) -> list[str]:
+    parts = [part.strip() for part in _CLAUSE_SPLIT_RE.split(query or "") if part.strip()]
+    return parts if len(parts) > 1 else [query]
+
+
+def unmatched_lights_message(query: str, snapshot: InventorySnapshot) -> str:
+    rooms = sorted(
+        {entity.area_name for entity in snapshot.entities if entity.area_name}
+    )
+    if rooms:
+        return f"No lights matched '{query}'. Rooms: {', '.join(rooms)}."
+    return f"No lights matched '{query}'."
+
+
 def search_inventory(
     snapshot: InventorySnapshot,
     query: str,
@@ -364,9 +412,6 @@ def search_inventory(
     dedupe_devices: bool = True,
     limit: int | None = 10,
 ) -> list[InventoryEntity]:
-    parsed = parse_device_query(query)
-    effective_domain = domain or parsed.domain
-
     def finalize(matches: list[InventoryEntity]) -> list[InventoryEntity]:
         results = (
             _dedupe_by_device(matches)
@@ -375,32 +420,71 @@ def search_inventory(
         )
         return results if limit is None else results[:limit]
 
-    if parsed.room_reference and area_id:
-        matches = [
+    clauses = _query_clauses(query)
+    if len(clauses) > 1:
+        full = parse_device_query(query)
+        seen: set[str] = set()
+        union: list[InventoryEntity] = []
+        for clause in clauses:
+            for entity in search_inventory(
+                snapshot,
+                clause,
+                area_id=area_id,
+                domain=domain or full.domain,
+                dedupe_devices=False,
+                limit=None,
+            ):
+                if entity.entity_id in seen:
+                    continue
+                seen.add(entity.entity_id)
+                union.append(entity)
+        return finalize(union)
+
+    return finalize(
+        _search_inventory_clause(
+            snapshot,
+            query,
+            area_id=area_id,
+            domain=domain,
+        )
+    )
+
+
+def _search_inventory_clause(
+    snapshot: InventorySnapshot,
+    query: str,
+    *,
+    area_id: str | None,
+    domain: str | None,
+) -> list[InventoryEntity]:
+    parsed = parse_device_query(query)
+    effective_domain = domain or parsed.domain
+    if parsed.room_reference:
+        if not area_id:
+            return []
+        return [
             entity
             for entity in snapshot.entities
             if entity.area_id == area_id
             and (effective_domain is None or entity.domain == effective_domain)
+            and (not parsed.tokens or _matches_query(entity, set(parsed.tokens)))
         ]
-        return finalize(matches)
 
     if parsed.scope_all and not parsed.tokens:
-        matches = [
+        return [
             entity
             for entity in snapshot.entities
             if (effective_domain is None or entity.domain == effective_domain)
             and (area_id is None or entity.area_id == area_id)
         ]
-        return finalize(matches)
 
     if effective_domain and not parsed.tokens and not parsed.scope_all:
-        matches = [
+        return [
             entity
             for entity in snapshot.entities
             if entity.domain == effective_domain
             and (area_id is None or entity.area_id == area_id)
         ]
-        return finalize(matches)
 
     query_tokens = set(parsed.tokens)
     matches: list[InventoryEntity] = []
@@ -411,7 +495,7 @@ def search_inventory(
             continue
         if _matches_query(entity, query_tokens):
             matches.append(entity)
-    return finalize(matches)
+    return matches
 
 
 def find_safe_setup_candidate(snapshot: InventorySnapshot) -> InventoryEntity | None:

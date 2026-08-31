@@ -1,6 +1,5 @@
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -14,13 +13,10 @@ from plugins.agents import (
     _normalize_agent_cwd,
 )
 
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def test_dispatch_without_cwd_normalizes_to_project_root():
-    assert _normalize_agent_cwd(None) == str(settings.BASE_DIR.parent)
-    assert _normalize_agent_cwd("") == str(settings.BASE_DIR.parent)
+def test_dispatch_without_cwd_does_not_default_to_project_root():
+    assert _normalize_agent_cwd(None) is None
+    assert _normalize_agent_cwd("") is None
+    assert _normalize_agent_cwd("~/dev/shop").endswith("/dev/shop")
 
 
 def test_dispatch_result_has_stable_parseable_shape():
@@ -36,6 +32,7 @@ def test_dispatch_result_has_stable_parseable_shape():
     assert payload == {
         "ok": False,
         "task_id": None,
+        "work_id": None,
         "mode": None,
         "error_code": "source_limit_reached",
         "error_message": "limit reached",
@@ -100,59 +97,98 @@ async def test_startup_recovery_marks_stale_running_tasks_failed(monkeypatch):
 
     recovered = await plugin._recover_interrupted_tasks()
 
-    assert recovered == 2
-    filt, update = collection.update_many.await_args.args
-    assert filt == {"status": "running"}
-    fields = update["$set"]
-    assert fields["status"] == "failed"
-    assert fields["result"] == RESTART_INTERRUPTED_RESULT
-    assert fields["progress_summary"] == "Interrupted by backend restart."
-    assert fields["interrupted_reason"] == "backend_restart"
-    assert fields["completed_at"] is not None
-    assert fields["expires_at"] is not None
+    assert recovered == 4
+    assert collection.update_many.await_count == 2
+    open_filt, open_update = collection.update_many.await_args_list[0].args
+    legacy_filt, legacy_update = collection.update_many.await_args_list[1].args
+    assert open_filt == {"status": "running", "open": True}
+    assert "expires_at" not in open_update["$set"]
+    assert legacy_filt == {"status": "running", "open": {"$ne": True}}
+    assert legacy_update["$set"]["expires_at"] is not None
+    assert legacy_update["$set"]["interrupted_reason"] == "backend_restart"
+
+
+class _Cursor:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def sort(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, _n):
+        return self
+
+    async def to_list(self, length=None):
+        return self.docs[:length] if length else list(self.docs)
+
+
+class _Tasks:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def find(self, *_args, **_kwargs):
+        return _Cursor(self.docs)
+
+    async def find_one(self, filt, _projection=None):
+        for doc in self.docs:
+            if all(doc.get(k) == v for k, v in filt.items() if k != "owner_id"):
+                return doc
+        return None
+
+
+def _patch_tasks(monkeypatch, docs):
+    collection = _Tasks(docs)
+    monkeypatch.setattr("plugins.agents.work.mongodb.get_collection", lambda _name: collection)
+    monkeypatch.setattr("plugins.agents.mongodb.get_collection", lambda _name: collection)
+    return collection
 
 
 @pytest.mark.asyncio
 async def test_get_result_returns_full_completed_result(monkeypatch):
     plugin = AgentsPlugin()
-    collection = SimpleNamespace(
-        find_one=AsyncMock(
-            return_value={
+    _patch_tasks(
+        monkeypatch,
+        [
+            {
                 "task_id": "task-1",
+                "work_id": "work-1",
+                "title": "2713 review",
+                "open": True,
                 "status": "completed",
                 "progress_summary": "short preview",
                 "result": "full completed result",
                 "artifacts": [{"path": "/tmp/jarvis-output.test"}],
             }
-        )
-    )
-    monkeypatch.setattr(
-        "plugins.agents.mongodb.get_collection", lambda _name: collection
+        ],
     )
 
     payload = json.loads(await plugin.get_result("task-1"))
 
     assert payload["ok"] is True
     assert payload["task_id"] == "task-1"
+    assert payload["work_id"] == "work-1"
     assert payload["status"] == "completed"
     assert payload["result"] == "full completed result"
+    assert payload["open"] is True
+    assert "resume" in payload["message"]
     assert payload["artifacts"] == [{"path": "/tmp/jarvis-output.test"}]
 
 
 @pytest.mark.asyncio
-async def test_get_result_without_task_id_returns_latest_finished_task(monkeypatch):
+async def test_get_result_without_target_returns_latest_open_finished(monkeypatch):
     plugin = AgentsPlugin()
-    collection = SimpleNamespace(
-        find_one=AsyncMock(
-            return_value={
+    _patch_tasks(
+        monkeypatch,
+        [
+            {
                 "task_id": "latest-task",
+                "work_id": "work-2",
+                "title": "Quoting ports",
+                "open": True,
                 "status": "failed",
                 "result": "failure reason",
             }
-        )
-    )
-    monkeypatch.setattr(
-        "plugins.agents.mongodb.get_collection", lambda _name: collection
+        ],
     )
 
     payload = json.loads(await plugin.get_result())
@@ -160,45 +196,29 @@ async def test_get_result_without_task_id_returns_latest_finished_task(monkeypat
     assert payload["ok"] is True
     assert payload["task_id"] == "latest-task"
     assert payload["result"] == "failure reason"
-    query = collection.find_one.await_args.args[0]
-    assert query["status"] == {"$in": ["completed", "failed"]}
-    assert collection.find_one.await_args.kwargs["sort"] == [
-        ("completed_at", -1),
-        ("created_at", -1),
-    ]
 
 
 @pytest.mark.asyncio
-async def test_get_status_points_completed_tasks_to_get_result(monkeypatch):
+async def test_get_status_keeps_completed_open_work_resumable(monkeypatch):
     plugin = AgentsPlugin()
-    collection = SimpleNamespace(
-        find_one=AsyncMock(
-            return_value={
+    _patch_tasks(
+        monkeypatch,
+        [
+            {
                 "task_id": "task-1",
+                "work_id": "work-1",
+                "title": "2713 review",
+                "open": True,
                 "status": "completed",
-                "progress_summary": "truncated preview",
+                "cwd": "/tmp/aetheron-connect-v2",
+                "result": "Smallest fix is the judge gate.",
             }
-        )
-    )
-    monkeypatch.setattr(
-        "plugins.agents.mongodb.get_collection", lambda _name: collection
+        ],
     )
 
-    status = await plugin.get_status("task-1")
+    status = await plugin.get_status("2713 review")
 
-    assert "status=completed" in status
-    assert "truncated preview" not in status
-    assert 'jarvis.agents.get_result(task_id="task-1")' in status
-
-
-def test_protocols_capture_tool_truthfulness_invariants():
-    protocols = (REPO_ROOT / "backend/core/prompts/persona/protocols.yaml").read_text()
-    agents_source = (REPO_ROOT / "backend/plugins/agents/__init__.py").read_text()
-    agents_source_flat = " ".join(agents_source.split())
-
-    assert "the tool result is the source of truth" in protocols.casefold()
-    assert "blocked pending approval" in protocols
-    assert "action has NOT executed yet" in protocols
-    assert "Do NOT infer that the target was already changed" in protocols
-    assert "If ok=false, no task was started." in agents_source
-    assert "Do not dispatch the same work again unless the user explicitly asks" in agents_source_flat
+    assert "2713 review" in status
+    assert "completed" in status
+    assert "Still open — resume to continue" in status
+    assert "Do not recall()" in status

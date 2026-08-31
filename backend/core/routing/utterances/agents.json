@@ -2,13 +2,19 @@
   "utterances": [
     "Delegate that refactoring job to a background agent",
     "Spin up a subagent for the database migration",
+    "Send that cleanup to a background worker",
+    "In that project folder look at the pull request and don't edit yet",
     "Check on that long-running task",
-    "Escalate this architecture decision to a smarter model",
-    "Cancel the background job that's still running",
+    "What's happening with that review?",
     "What's the status of my delegated work?",
+    "Don't overcomplicate it, just keep going",
     "Resume the agent that was building the API",
-    "Use deep reasoning to compare these deployment strategies",
+    "Open that work in Claude Code",
+    "Show me that work so I can read it",
+    "I'm done with that work",
+    "Cancel the background job that's still running",
     "Show me everything running in the background",
-    "Send that cleanup to a background worker"
+    "Escalate this architecture decision to a smarter model",
+    "Use deep reasoning to compare these deployment strategies"
   ]
 }

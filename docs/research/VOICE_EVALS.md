@@ -38,15 +38,18 @@ Runtime cascade: Stage 1 `Jarvis.onnx` → Stage 2b Sherpa speaker verifier when
 
 ### 1b. Barge-in speaker (duplex scoreboard)
 
-Purpose: pick `barge_in_speaker_threshold` / policy from owner vs other cosines under TTS bleed — not from live dogfood alone.
+Purpose: pick `barge_in_speaker_threshold` from owner vs other cosines under TTS bleed — not from live dogfood or `host.log`.
 
-Clip contract: [`training/voice/README.md`](../../training/voice/README.md). Record near-end (`clips/owner`, `clips/other`) and far-end (`clips/tts`) separately; the tool mixes SER levels.
+Clip contract: [`training/voice/README.md`](../../training/voice/README.md). Record near-end (`clips/owner`, `clips/other`) and far-end (`clips/tts`) separately; the tool mixes SER levels. Nested `short/` and `satellite/` folders (and clip tags) group rows as `label/length/channel`. Phrase clips also get a derived 0.5s prefix so short-reply behavior shows up without extra recordings.
+
+Runtime scoring on this board is **max cosine** against enrollment plus the optional per-node room vector, on the **full clip**. Live barge-in additionally caps at 0.8s of *VAD-onset-forward* PCM so the 1.5s STT wait does not embed later room TTS; that is `--onset-seconds 0.8`, not the default. TTS on the board is mixed in at SER levels, not recorded bleed. Audio shorter than 0.4s is `UNAVAILABLE` (`unsc` on the board), not a mismatch.
 
 ```bash
 task be:eval-barge-in-speaker -- --owner-id geoff
+task be:eval-barge-in-speaker -- --owner-id geoff --node-clip ../training/voice/clips/owner/satellite/jarvis.wav
 ```
 
-Primary metrics: mean/p50 cosine and match rate around the active model's operating point (TitaNet currently 0.15–0.27) by label (`owner`, `other`, `tts_only`) and SER. Wakeword trees stay under `training/wakeword/`.
+`--score-mode mean` and `--onset-seconds 0.8` are ablations against the current scorer. Only move `barge_in_speaker_threshold` (currently **0.21**) when this board shows owner still under and other-FA still safe. Wakeword trees stay under `training/wakeword/`.
 
 ### 2. STT (offline / batch)
 

@@ -9,7 +9,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -111,6 +111,17 @@ def consume_flow(state: str) -> Optional[PendingOAuthFlow]:
     return flow
 
 
+def oauth_redirect_uri(origin: str, provider: str) -> str:
+    """Build the hosted callback URI. Spotify forbids `localhost`; use loopback IPv4."""
+    origin = origin.strip().rstrip("/")
+    if provider == "spotify":
+        parsed = urlparse(origin)
+        if (parsed.hostname or "").lower() == "localhost":
+            netloc = parsed.netloc.replace("localhost", "127.0.0.1", 1)
+            origin = urlunparse(parsed._replace(netloc=netloc)).rstrip("/")
+    return f"{origin}/api/v1/auth/oauth/callback"
+
+
 def build_authorize_url(
     config: ProviderConfig,
     *,
@@ -181,7 +192,11 @@ async def resolve_account_email(provider: str, access_token: str) -> str:
     if not userinfo_uri:
         return f"unknown@{provider}.local"
 
-    defaults = {"google": "unknown@gmail.com", "microsoft": "unknown@outlook.com"}
+    defaults = {
+        "google": "unknown@gmail.com",
+        "microsoft": "unknown@outlook.com",
+        "spotify": "unknown@spotify.local",
+    }
     fallback = defaults.get(provider, f"unknown@{provider}.local")
 
     try:
@@ -195,6 +210,8 @@ async def resolve_account_email(provider: str, access_token: str) -> str:
             data = resp.json()
             if provider == "google":
                 return data.get("email", fallback)
+            if provider == "spotify":
+                return data.get("email") or data.get("id") or fallback
             return data.get("mail") or data.get("userPrincipalName", fallback)
     except Exception:
         return fallback
@@ -228,13 +245,3 @@ async def complete_oauth_flow(
         token_expiry=now + timedelta(seconds=expires_in),
         granted_scopes=granted,
     )
-
-
-async def reset_integrations_for_provider(provider: str) -> None:
-    from core.integrations.manager import integrations
-
-    if provider == "google":
-        await integrations.reset("calendar")
-        await integrations.reset("gmail")
-    elif provider == "microsoft":
-        await integrations.reset()

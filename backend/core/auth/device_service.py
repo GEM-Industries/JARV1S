@@ -57,6 +57,10 @@ class InvalidWsTicketError(DeviceAuthError):
     pass
 
 
+class DeviceDisconnectedError(DeviceAuthError):
+    pass
+
+
 class PairingRateLimitError(DeviceAuthError):
     pass
 
@@ -177,12 +181,14 @@ class DeviceAuthService:
         node_label: str | None = None,
         capabilities: list[str] | None = None,
         location: DeviceLocation | None = None,
+        node_id: str | None = None,
     ) -> PairingCodeIssueResult:
         resolved_owner = owner_id or settings.DEFAULT_USER_ID
         code = generate_pairing_code()
         expires_at = self._now() + timedelta(
             seconds=settings.DEVICE_AUTH_PAIRING_CODE_TTL_S
         )
+        bound_node = (node_id or "").strip() or None
         doc = {
             "code_hash": hash_secret(normalize_pairing_code(code)),
             "owner_id": resolved_owner,
@@ -193,6 +199,8 @@ class DeviceAuthService:
             "consumed_at": None,
             "attempt_count": 0,
         }
+        if bound_node:
+            doc["node_id"] = bound_node
         await self._pairing().insert_one(doc)
         return PairingCodeIssueResult(
             code=code, expires_at=expires_at, owner_id=resolved_owner
@@ -247,12 +255,23 @@ class DeviceAuthService:
             raise InvalidPairingCodeError("node_id is required")
 
         now = self._now()
+        lookup = {
+            "code_hash": hash_secret(normalized),
+            "consumed_at": None,
+            "expires_at": {"$gt": now},
+        }
+        found = await self._pairing().find_one(lookup)
+        if not found:
+            raise InvalidPairingCodeError(
+                "Invalid, expired, or already used pairing code"
+            )
+        expected_node = str(found.get("node_id") or "").strip()
+        if expected_node and expected_node != node_id:
+            raise InvalidPairingCodeError(
+                "Invalid, expired, or already used pairing code"
+            )
         doc = await self._pairing().find_one_and_update(
-            {
-                "code_hash": hash_secret(normalized),
-                "consumed_at": None,
-                "expires_at": {"$gt": now},
-            },
+            {"_id": found["_id"], "consumed_at": None},
             {"$set": {"consumed_at": now}},
             return_document=True,
         )
@@ -341,6 +360,8 @@ class DeviceAuthService:
 
     async def mint_ws_ticket(self, device_token: str) -> WsTicketResponse:
         record = await self._load_device_by_token(device_token)
+        if record.disconnected_at is not None:
+            raise DeviceDisconnectedError("Device disconnected")
         ticket = generate_ws_ticket()
         expires_at = self._now() + timedelta(
             seconds=settings.DEVICE_AUTH_WS_TICKET_TTL_S
@@ -377,6 +398,8 @@ class DeviceAuthService:
         record = DeviceCredentialRecord.model_validate(device_doc)
         if record.revoked_at is not None:
             raise InvalidWsTicketError("Device revoked")
+        if record.disconnected_at is not None:
+            raise InvalidWsTicketError("Device disconnected")
 
         await self._devices().update_one(
             {"device_id": record.device_id},
@@ -396,6 +419,24 @@ class DeviceAuthService:
         result = await self._devices().update_one(
             {"device_id": device_id, "revoked_at": None},
             {"$set": {"revoked_at": self._now()}},
+        )
+        return result.modified_count > 0
+
+    async def disconnect_device(self, device_id: str) -> bool:
+        result = await self._devices().update_one(
+            {"device_id": device_id, "revoked_at": None},
+            {"$set": {"disconnected_at": self._now()}},
+        )
+        return result.modified_count > 0
+
+    async def resume_device(self, device_id: str) -> bool:
+        result = await self._devices().update_one(
+            {
+                "device_id": device_id,
+                "revoked_at": None,
+                "disconnected_at": {"$ne": None},
+            },
+            {"$unset": {"disconnected_at": ""}},
         )
         return result.modified_count > 0
 
@@ -605,6 +646,7 @@ class DeviceAuthService:
             location=record.location,
             kind=record.kind,
             revoked_at=record.revoked_at,
+            disconnected_at=record.disconnected_at,
             created_at=record.created_at,
             last_seen_at=record.last_seen_at,
         )

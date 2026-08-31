@@ -1,59 +1,26 @@
-"""Prompt builder that assembles system prompts from cached YAML sections.
-
-Supports multiple PromptModes following the OpenClaw pattern:
-  FULL       — main voice/text turns (all sections)
-  BACKGROUND — in-process background agents (skip voice/style/examples)
-Subprocess agents (mode="code") use build_subprocess_prompt() which
-generates a separate XML-structured prompt for the SDK.
-"""
+"""Build the JARV1S system prompt and dynamic turn context."""
 
 import logging
 import os
 import platform as _platform
 from dataclasses import dataclass
 from datetime import date
-from enum import Enum
 from pathlib import Path
-from typing import Optional, Dict, Any
-
-import yaml
+from typing import Optional, Dict, Any, Protocol
 
 from core.context import allows_home_location_fallback, fresh_geo_position
+from core.home import format_home_prompt, load_home_snapshot
 
 logger = logging.getLogger(__name__)
-
-
-class PromptMode(str, Enum):
-    """Controls which persona sections are included in the system prompt.
-
-    Follows the progressive-disclosure principle from OpenClaw's PromptMode:
-    subagents receive only the sections they need, saving tokens and
-    preventing context pollution from voice-specific rules.
-    """
-    FULL = "full"
-    BACKGROUND = "background"
-
-
-# Each section is tagged with the set of modes that include it.
-# Voice, style, and examples are voice-turn-only.
-PERSONA_SECTIONS: list[tuple[str, set[PromptMode]]] = [
-    ('persona/identity.yaml',         {PromptMode.FULL, PromptMode.BACKGROUND}),
-    ('persona/style.yaml',            {PromptMode.FULL}),
-    ('persona/protocols.yaml',        {PromptMode.FULL}),
-    ('persona/background.yaml',       {PromptMode.BACKGROUND}),
-    ('persona/voice.yaml',            {PromptMode.FULL}),
-    ('persona/examples.yaml',         {PromptMode.FULL}),
-    ('capabilities/reasoning.yaml',   {PromptMode.FULL}),
-    ('capabilities/reasoning_background.yaml', {PromptMode.BACKGROUND}),
-]
 
 
 @dataclass
 class SystemPrompt:
     """Split prompt enabling LLM provider caching of the static prefix.
 
-    Providers cache the longest matching prefix between requests. Persona YAML
-    is turn-invariant and lives in ``static``. Per-turn runtime facts live in
+    Providers cache the longest matching prefix between requests. Product
+    instructions are turn-invariant and live in ``static``. User-owned and
+    per-turn facts live in
     ``dynamic``. Offered tool schemas are sent separately via ``tools=``.
     """
 
@@ -67,27 +34,150 @@ class SystemPrompt:
         return "\n\n".join(parts)
 
 
+class PromptBuilderLike(Protocol):
+    def build(
+        self,
+        runtime_context: Optional[Dict[str, Any]] = None,
+        user_profile: Optional[str] = None,
+    ) -> SystemPrompt: ...
+
+
+def format_runtime_context(context: Dict[str, Any]) -> str:
+    """Render model-visible facts and current-turn reminders."""
+    blocks: list[str] = []
+    lines = ["[RUNTIME CONTEXT]"]
+
+    if "local_time" in context:
+        local_time = str(context["local_time"])
+        clock = context.get("local_time_clock")
+        local_iso = context.get("local_time_iso")
+        if clock and local_iso:
+            lines.append(f"Authoritative Current Local Time: {local_time} ({clock}; {local_iso})")
+        elif clock:
+            lines.append(f"Authoritative Current Local Time: {local_time} ({clock})")
+        else:
+            lines.append(f"Authoritative Current Local Time: {local_time}")
+    if "utc_time" in context:
+        lines.append(f"Current UTC Time: {context['utc_time']}")
+    if "today_date" in context:
+        lines.append(f"Today's Date: {context['today_date']}")
+    if "tomorrow_date" in context:
+        lines.append(f"Tomorrow's Date: {context['tomorrow_date']}")
+    if "timezone" in context:
+        lines.append(f"User Timezone: {context['timezone']}")
+    if "modality" in context:
+        lines.append(f"Input Modality: {context['modality']}")
+    if "week_dates" in context:
+        lines.append(f"Week Dates (use these for day-name → ISO resolution): {context['week_dates']}")
+
+    location = context.get("location")
+    if fresh_geo_position(location) is not None:
+        lines.append(
+            "Geographic Position Available: yes (source=device; "
+            "location-aware tools resolve omitted location inputs automatically)"
+        )
+    elif allows_home_location_fallback(context):
+        lines.append(
+            "Geographic Position Available: room/home fallback eligible "
+            "(location-aware tools resolve it automatically when configured)"
+        )
+    else:
+        lines.append(
+            "Geographic Position Available: no "
+            "(ask for a concrete place name or address when location is required)"
+        )
+
+    location_ref = context.get("location_ref")
+    if isinstance(location_ref, dict):
+        room = (
+            location_ref.get("room_name")
+            or location_ref.get("room_id")
+            or location_ref.get("ha_area_id")
+        )
+        if room:
+            provider = location_ref.get("provider") or "unknown"
+            lines.append(f"Speaking From Room: {room} (provider={provider})")
+
+    if context.get("node_id"):
+        lines.append(f"Node Id: {context['node_id']}")
+    if context.get("node_label"):
+        lines.append(f"Node Label: {context['node_label']}")
+
+    skip = {
+        "local_time",
+        "local_time_iso",
+        "local_time_clock",
+        "utc_time",
+        "today_date",
+        "tomorrow_date",
+        "timezone",
+        "source",
+        "modality",
+        "week_dates",
+        "has_history",
+        "trigger_decision",
+        "location",
+        "location_ref",
+        "node_id",
+        "node_label",
+        "node_capabilities",
+        "device_kind",
+        "owner_id",
+        "connection_id",
+        "speaker_id",
+        "user_profile",
+        "cwd",
+        "open_work_block",
+    }
+    for key, value in context.items():
+        if key not in skip and value is not None:
+            lines.append(f"{key.replace('_', ' ').title()}: {value}")
+
+    blocks.append("\n".join(lines))
+
+    if context.get("open_work_block"):
+        blocks.append(str(context["open_work_block"]))
+
+    if context.get("has_history") and context.get("source") not in ("system", "background"):
+        blocks.append(
+            "[CONVERSATION] The messages that follow are your conversation history. "
+            "Use them directly; use recall only for older topics not shown."
+        )
+
+    if context.get("source") not in ("system", "background") and "local_time" in context:
+        blocks.append(
+            "[CURRENT TIME] For direct questions about the current time, date, "
+            "day, or timezone, use this turn's Authoritative Current Local Time "
+            "and User Timezone. Prior assistant answers about the time are stale "
+            "immediately. Treat message timestamps as history metadata, not the "
+            "current local time."
+        )
+
+    if context.get("modality") == "voice" and context.get("source") == "user":
+        blocks.append(
+            "[CURRENT VOICE TURN] Act on this request. This text is a speech "
+            "transcript: resolve likely substitutions from this turn's context "
+            "and do not comment on them. A new state change, repeated request, "
+            "failed requested state, lookup, or store needs a confirming tool "
+            "result from this response."
+        )
+
+    return "\n\n".join(blocks)
+
+
 class PromptBuilder:
-    """Builds system prompts from modular YAML files with dynamic content injection."""
+    """Build the product prompt followed by user-owned and per-turn context."""
 
     def __init__(self, prompts_dir: Optional[Path] = None):
         self.prompts_dir = prompts_dir or Path(__file__).parent
-        self._section_cache: Dict[str, str] = {}
-        self._preload_sections()
-
-    def _preload_sections(self) -> None:
-        """Load and cache all persona YAML files once at init."""
-        for file, _modes in PERSONA_SECTIONS:
-            section = self._load_section(file)
-            if section:
-                self._section_cache[file] = section
+        self._system_prompt = (self.prompts_dir / "SYSTEM.md").read_text(
+            encoding="utf-8"
+        ).strip()
 
     def build(
         self,
         runtime_context: Optional[Dict[str, Any]] = None,
         user_profile: Optional[str] = None,
-        mode: PromptMode = PromptMode.FULL,
-        action_capable: bool = True,
     ) -> SystemPrompt:
         """Build the system prompt split into static (cacheable) and dynamic (per-turn) parts.
 
@@ -95,32 +185,22 @@ class PromptBuilder:
         separately via provider ``tools=``. This prompt carries only global
         behavior and per-turn runtime facts.
         """
-        action_files = {
-            "persona/protocols.yaml",
-            "persona/background.yaml",
-            "capabilities/reasoning.yaml",
-            "capabilities/reasoning_background.yaml",
-        }
-        sections = []
-        for file, modes in PERSONA_SECTIONS:
-            if mode not in modes:
-                continue
-            if not action_capable and file in action_files:
-                continue
-            section = self._section_cache.get(file)
-            if section:
-                sections.append(section)
-                if file == 'persona/identity.yaml' and user_profile:
-                    sections.append(user_profile)
-
-        static_prompt = '\n\n'.join(sections)
+        try:
+            home_block = format_home_prompt(load_home_snapshot())
+        except Exception as exc:
+            logger.warning("Failed to load Agent Home overlays: %s", exc)
+            home_block = ""
 
         dynamic_parts: list[str] = []
+        if home_block:
+            dynamic_parts.append(home_block)
+        if user_profile:
+            dynamic_parts.append(user_profile)
         if runtime_context:
-            dynamic_parts.append(self._format_runtime_context(runtime_context))
+            dynamic_parts.append(format_runtime_context(runtime_context))
         dynamic_prompt = '\n\n'.join(dynamic_parts)
 
-        return SystemPrompt(static=static_prompt, dynamic=dynamic_prompt)
+        return SystemPrompt(static=self._system_prompt, dynamic=dynamic_prompt)
 
     # ------------------------------------------------------------------
     # Subprocess prompt (mode="code") — XML-structured for SDK agents
@@ -197,44 +277,6 @@ class PromptBuilder:
 
         return "\n\n".join(parts)
 
-    # ------------------------------------------------------------------
-    # Shared context utilities
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    async def build_background_context(owner_id: str, cwd: str = "") -> dict[str, Any]:
-        """Build the runtime context dict for in-process background agents.
-
-        Equivalent to what process_turn injects for voice turns so background
-        agents receive the same profile and timezone context.
-        """
-        from core.time import build_turn_time_context
-
-        ctx: dict[str, Any] = {
-            "source": "background",
-            "cwd": cwd,
-            "owner_id": owner_id,
-            "connection_id": owner_id,
-            "speaker_id": None,
-        }
-        try:
-            from plugins.profile import get_profile_block
-            ctx["user_profile"] = await get_profile_block(owner_id)
-        except Exception:
-            pass
-        tz_str = "UTC"
-        try:
-            from services.database.mongodb import mongodb as _mdb
-            session_doc = await _mdb.db["sessions"].find_one({"session_id": owner_id})
-            tz_str = (session_doc or {}).get("timezone", "UTC")
-        except Exception:
-            pass
-        try:
-            ctx.update(build_turn_time_context(tz_str))
-        except Exception:
-            ctx.update(build_turn_time_context("UTC"))
-        return ctx
-
     @staticmethod
     async def build_conversation_context(owner_id: str, max_messages: int = 6) -> str:
         """Extract recent conversation turns for background agent context.
@@ -266,197 +308,3 @@ class PromptBuilder:
             logger.warning("Failed to build conversation context: %s", e)
             return ""
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _format_runtime_context(self, context: Dict[str, Any]) -> str:
-        blocks = []
-
-        if context.get("source") == "system":
-            decision = context.get("trigger_decision", "tell")
-            if decision == "offer":
-                blocks.append(
-                    "[DECISION EVALUATION] This is a proactive offer evaluation. "
-                    "Use CURRENT_STATE and INSTRUCTIONS in the system event to decide "
-                    "whether to speak now, defer, or stay silent. Do not announce preemptively."
-                )
-            elif decision == "act":
-                blocks.append(
-                    "[SILENT EXECUTION] Execute the system event without speaking to the user."
-                )
-            else:
-                blocks.append(
-                    "[IMPORTANT] This is a PROACTIVE ALERT. Follow the VOICE PROTOCOLS. "
-                    "You are the messenger. Use the Imperative Mood. "
-                    "Direct the message to the user immediately."
-                )
-
-        if context.get("source") == "background":
-            blocks.append(
-                "[EXECUTION MODE] You are a background agent. "
-                "Execute the task directly using available tools "
-                "(e.g. jarvis.slack.*, jarvis.gmail.*, jarvis.calendar.*). "
-                "External API cooldowns outlast a single turn — never retry a "
-                "rate-limited call. "
-                "Your connected service identities (Slack, GitHub, etc.) are in "
-                "[USER CONTEXT] — use them directly when searching for your own "
-                "messages, assignments, or activity instead of looking up your account."
-            )
-
-        if context.get("modality") == "text":
-            blocks.append(
-                "[OUTPUT FORMAT] This is a text session. Use Markdown formatting, "
-                "include precise data, and structure responses for readability. "
-                "Ignore voice/TTS optimization rules."
-            )
-
-        lines = ["[RUNTIME CONTEXT]"]
-
-        if "local_time" in context:
-            local_time = str(context["local_time"])
-            clock = context.get("local_time_clock")
-            local_iso = context.get("local_time_iso")
-            if clock and local_iso:
-                lines.append(f"Authoritative Current Local Time: {local_time} ({clock}; {local_iso})")
-            elif clock:
-                lines.append(f"Authoritative Current Local Time: {local_time} ({clock})")
-            else:
-                lines.append(f"Authoritative Current Local Time: {local_time}")
-        if "utc_time" in context:
-            lines.append(f"Current UTC Time: {context['utc_time']}")
-        if "today_date" in context:
-            lines.append(f"Today's Date: {context['today_date']}")
-        if "tomorrow_date" in context:
-            lines.append(f"Tomorrow's Date: {context['tomorrow_date']}")
-        if "timezone" in context:
-            lines.append(f"User Timezone: {context['timezone']}")
-        if "modality" in context:
-            lines.append(f"Input Modality: {context['modality']}")
-        if "week_dates" in context:
-            lines.append(f"Week Dates (use these for day-name → ISO resolution): {context['week_dates']}")
-
-        location = context.get("location")
-        if fresh_geo_position(location) is not None:
-            lines.append(
-                "Geographic Position Available: yes (source=device; "
-                "location-aware tools resolve omitted location inputs automatically)"
-            )
-        elif allows_home_location_fallback(context):
-            lines.append(
-                "Geographic Position Available: room/home fallback eligible "
-                "(location-aware tools resolve it automatically when configured)"
-            )
-        else:
-            lines.append(
-                "Geographic Position Available: no "
-                "(ask for a concrete place name or address when location is required)"
-            )
-
-        location_ref = context.get("location_ref")
-        if isinstance(location_ref, dict):
-            room = (
-                location_ref.get("room_name")
-                or location_ref.get("room_id")
-                or location_ref.get("ha_area_id")
-            )
-            if room:
-                provider = location_ref.get("provider") or "unknown"
-                lines.append(f"Speaking From Room: {room} (provider={provider})")
-
-        if context.get("node_id"):
-            lines.append(f"Node Id: {context['node_id']}")
-        if context.get("node_label"):
-            lines.append(f"Node Label: {context['node_label']}")
-
-        skip = {
-            "local_time",
-            "local_time_iso",
-            "local_time_clock",
-            "utc_time",
-            "today_date",
-            "tomorrow_date",
-            "timezone",
-            "source",
-            "modality",
-            "week_dates",
-            "has_history",
-            "trigger_decision",
-            "location",
-            "location_ref",
-            "node_id",
-            "node_label",
-            "node_capabilities",
-            "device_kind",
-            "owner_id",
-            "connection_id",
-            "speaker_id",
-            "user_profile",
-            "cwd",
-        }
-        for key, value in context.items():
-            if key not in skip and value is not None:
-                lines.append(f"{key.replace('_', ' ').title()}: {value}")
-
-        blocks.append("\n".join(lines))
-
-        # Prompt repetition: re-state conversation awareness at the system/history
-        # boundary so non-reasoning models attend to it near the actual messages.
-        if context.get("has_history") and context.get("source") not in ("system", "background"):
-            blocks.append(
-                "[CONVERSATION] The messages that follow are your conversation history. "
-                "You can see and quote them directly. NEVER say \"I don't have that information\" "
-                "when the answer is in the messages below. "
-                "For older topics not visible here, use recall() to search past sessions."
-            )
-
-        if context.get("source") not in ("system", "background") and "local_time" in context:
-            blocks.append(
-                "[CURRENT TIME] For direct questions about the current time, date, "
-                "day, or timezone, use this turn's Authoritative Current Local Time "
-                "and User Timezone. Prior assistant answers about the time are stale "
-                "immediately. Treat message timestamps as history metadata, not the "
-                "current local time."
-            )
-
-        if context.get("modality") == "voice" and context.get("source") == "user":
-            blocks.append(
-                "[CURRENT VOICE TURN] Act from this current user request, not from matching "
-                "the previous assistant message. Spoken claims are not tool results. Lookups "
-                "may reuse a complete current tool result in this conversation. A new state "
-                "change, repeat, or contradiction still needs a tool call in this response. "
-                "Never output bracketed example text."
-            )
-
-        return "\n\n".join(blocks)
-
-    def _load_section(self, relative_path: str) -> Optional[str]:
-        """Load a single YAML section from disk."""
-        path = self.prompts_dir / relative_path
-        if not path.exists():
-            return None
-
-        with open(path, encoding='utf-8') as f:
-            data = yaml.safe_load(f)
-
-        if 'content' in data:
-            return data['content'].strip()
-        elif 'examples' in data:
-            return self._format_examples(data['examples'])
-        return None
-
-    @staticmethod
-    def _format_examples(examples: list) -> str:
-        """Format examples list into prompt text."""
-        lines = [
-            'STYLE EXAMPLES:',
-            'These demonstrate tone and brevity, not exact wording. Adapt to actual context.',
-            ''
-        ]
-        for ex in examples:
-            lines.append(f"User: {ex['user']}")
-            lines.append(f"JARVIS: {ex['jarvis']}")
-            if 'note' in ex:
-                lines.append(f"(Style note: {ex['note']})")
-            lines.append('')
-        return '\n'.join(lines)

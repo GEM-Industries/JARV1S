@@ -19,7 +19,12 @@ from core.integrations.mcp.cache import (
     save_schema_cache,
 )
 from core.integrations.mcp.client import MCPClient, MCPError
-from core.integrations.mcp.config import MCPServerConfig, load_mcp_config
+from core.integrations.mcp.config import (
+    MCPConfigError,
+    MCPServerConfig,
+    load_mcp_config,
+    load_runtime_mcp_servers,
+)
 from core.integrations.mcp.http_client import StreamableHTTPClient
 from core.plugins.capabilities import CapabilityErrorDetail
 from core.plugins.types import JarvisPlugin, PluginMetadata
@@ -203,7 +208,7 @@ def _generate_tool_fn(
 def generate_utterances(tools: list[dict[str, Any]], server_name: str) -> list[str]:
     """Generate synthetic utterances from tool names and descriptions for the ToolRouter.
 
-    Hand-curate utterances in mcp_servers.yaml for important servers.
+    Hand-curate utterances in mcp_servers.json for important servers.
     """
     utterances = [server_name]
     phrase_utterances: list[str] = []
@@ -353,31 +358,41 @@ async def _refresh_cache(client: _MCPTransport, server_name: str) -> None:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+_live_bridge_names: frozenset[str] = frozenset()
 
-async def load_mcp_bridges() -> None:
-    """Load stdio/HTTP MCP servers from mcp_servers.yaml and register as auto-bridged plugins.
+
+def live_bridge_names() -> frozenset[str]:
+    return _live_bridge_names
+
+
+async def load_mcp_bridges(configs: list[MCPServerConfig] | None = None) -> list[str]:
+    """Load stdio/HTTP MCP servers and register as auto-bridged plugins.
 
     Composio-type entries are skipped — managed by ComposioGateway.
     Bespoke plugins with matching names always win on collision.
     """
+    global _live_bridge_names
     from core.config import settings
     from core.plugins.registry import registry
 
-    config_path = settings.MCP_SERVERS_CONFIG
-    if not config_path or not config_path.exists():
-        logger.debug("mcp_servers.yaml not found — skipping MCP auto-bridge")
-        return
+    if configs is None:
+        try:
+            configs = load_runtime_mcp_servers()
+        except MCPConfigError as exc:
+            logger.error("MCP merge rejected; using packaged config only: %s", exc)
+            try:
+                configs = load_mcp_config(settings.MCP_SERVERS_CONFIG)
+            except MCPConfigError as packaged_exc:
+                logger.error("Packaged MCP config invalid: %s", packaged_exc)
+                configs = []
 
-    server_configs = load_mcp_config(config_path)
-    if not server_configs:
-        return
-
-    for config in [c for c in server_configs if c.type != "composio"]:
+    registered: list[str] = []
+    for config in [c for c in configs if c.type != "composio"]:
         try:
             plugin = await _connect_and_fetch(config)
             if plugin:
-                registered = await registry.register(plugin)
-                if registered:
+                if await registry.register(plugin):
+                    registered.append(config.name)
                     logger.info(
                         "Auto-bridge ready: jarvis.%s (%d tools)",
                         config.name, len(plugin.get_tools()),
@@ -386,3 +401,6 @@ async def load_mcp_bridges() -> None:
             logger.error(
                 "Failed to load MCP server '%s': %s — skipping", config.name, e, exc_info=True,
             )
+
+    _live_bridge_names = frozenset(registered)
+    return registered

@@ -124,6 +124,25 @@ def test_resolved_llm_config_apply_to_includes_provider():
     assert captured["model"] == "gemma4:12b-mlx"
 
 
+def test_background_agent_uses_focused_prompt_builder(monkeypatch):
+    from core.prompts.background import BackgroundPromptBuilder
+
+    runtime = JarvisRuntime()
+    registered: dict[str, object] = {}
+
+    def register(name, factory, **_kwargs):
+        registered[name] = factory(None)
+
+    monkeypatch.setattr("core.integrations.manager.integrations.register", register)
+
+    runtime._register_background_agent(SimpleNamespace(model="background-model"))
+
+    agent = registered["background_agent"]
+    assert isinstance(agent.prompt_builder, BackgroundPromptBuilder)
+    assert "background worker" in agent.prompt_builder.build().static
+    assert "personal AI assistant" not in agent.prompt_builder.build().static
+
+
 @pytest.mark.asyncio
 async def test_background_llm_uses_anthropic_key(monkeypatch):
     runtime = JarvisRuntime()

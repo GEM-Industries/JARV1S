@@ -1,10 +1,9 @@
 """
 Translate integration auth errors into blocked capability outcomes.
 
-When a decorated tool's injected integration raises ``NeedsReauth`` or
-``ScopeGapError``, we push an ``OAuthWidget`` to the user and return a
-blocked ``reauth_needed`` error so the LLM can explain the situation
-instead of failing the turn.
+``NeedsReauth`` / ``ScopeGapError`` push an ``OAuthWidget`` and return
+``reauth_needed``. ``OsPermissionNeeded`` returns ``permission_needed``
+with no widget — OS Settings, not OAuth.
 """
 
 from datetime import datetime, timezone
@@ -23,7 +22,10 @@ async def handle_integration_auth_error(
 ) -> Optional[CapabilityErrorDetail]:
     """Return a blocked reauth outcome and push an OAuthWidget, or None for non-auth errors."""
     from core.auth.exceptions import ScopeGapError
-    from core.integrations.manager import NeedsReauth
+    from core.integrations.manager import NeedsReauth, OsPermissionNeeded
+
+    if isinstance(exc, OsPermissionNeeded):
+        return CapabilityErrorDetail(code="permission_needed", message=exc.message)
 
     auth_status: int | None = None
     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403):

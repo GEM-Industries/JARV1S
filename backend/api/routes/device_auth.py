@@ -24,6 +24,7 @@ from core.auth.device_models import (
 )
 from core.auth.device_service import (
     DeviceAuthError,
+    DeviceDisconnectedError,
     InvalidDeviceTokenError,
     InvalidPairingCodeError,
     PairingRateLimitError,
@@ -57,7 +58,7 @@ def backend_ws_url_from_request(request: Request) -> str:
     return f"{ws_scheme}://{host}/api/v1/ws"
 
 
-@router.post("/pair", response_model=PairConsumeResponse)
+@router.post("/pair", response_model=PairConsumeResponse, response_model_exclude_none=True)
 async def pair_device(
     request: Request,
     response: Response,
@@ -88,6 +89,13 @@ async def pair_device(
             # Pairing already succeeded; stale-row cleanup must not consume the
             # one-time code without returning the new credential.
             logger.exception("Could not retire superseded device credentials")
+        if body.client_surface == "satellite":
+            return PairConsumeResponse(
+                device_id=result.device_id,
+                owner_id=result.owner_id,
+                node_id=result.node_id,
+                device_token=result.device_token,
+            )
         forwarded_proto = request.headers.get("x-forwarded-proto", "")
         origin = request.headers.get("origin", "")
         response.set_cookie(
@@ -103,7 +111,11 @@ async def pair_device(
             path="/",
             max_age=settings.DEVICE_AUTH_COOKIE_MAX_AGE_S,
         )
-        return result
+        return PairConsumeResponse(
+            device_id=result.device_id,
+            owner_id=result.owner_id,
+            node_id=result.node_id,
+        )
     except PairingRateLimitError as exc:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)
@@ -120,12 +132,22 @@ async def issue_pairing_code(
     auth: DeviceAuthResult = Depends(require_device),
 ) -> PairingCodeIssueResponse:
     """Issue a short-lived pairing code for another browser/phone/satellite."""
-    location = DeviceLocation(room_name=body.room_name) if body.room_name else None
+    room_name = (body.room_name or "").strip() or None
+    ha_area_id = (body.ha_area_id or "").strip() or None
+    location = None
+    if room_name or ha_area_id:
+        location = DeviceLocation(
+            provider="home_assistant" if ha_area_id else "manual",
+            room_id=(room_name or "").lower().replace(" ", "_") or None,
+            room_name=room_name,
+            ha_area_id=ha_area_id,
+        )
     result = await device_auth_service.issue_pairing_code(
         owner_id=auth.owner_id,
         node_label=body.node_label,
         capabilities=body.capabilities,
         location=location,
+        node_id=body.node_id,
     )
     return PairingCodeIssueResponse(
         code=result.code,
@@ -179,6 +201,10 @@ async def mint_ws_ticket(request: Request, body: WsTicketRequest) -> WsTicketRes
         )
     try:
         return await device_auth_service.mint_ws_ticket(device_token)
+    except DeviceDisconnectedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except InvalidDeviceTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)

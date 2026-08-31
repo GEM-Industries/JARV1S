@@ -69,6 +69,16 @@ const CredentialRow: React.FC<CredentialRowProps> = ({ card, onChanged }) => {
         <div className="min-w-0">
           <h3 className="type-heading text-foreground">{card.label}</h3>
           <p className="mt-1 type-body text-foreground-muted">{card.description}</p>
+          {card.docs_url && (
+            <a
+              href={card.docs_url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 inline-block type-body text-foreground underline-offset-2 hover:underline"
+            >
+              {card.docs_label || 'Open docs'}
+            </a>
+          )}
           {card.masked_suffix && <p className="mt-1 font-mono text-xs text-foreground-subtle">{card.masked_suffix}</p>}
         </div>
         <StatusPill tone={statusTone}>{statusLabel}</StatusPill>

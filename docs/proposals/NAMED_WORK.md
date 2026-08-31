@@ -1,6 +1,6 @@
 # Named Work
 
-**Status:** Proposed  
+**Status:** V1 skeleton shipped (2026-08-19)  
 **Date:** 2026-08-15  
 **Priority:** High — this is the gap that keeps delegated work from surviving Home.  
 **Depends on:** existing `background_tasks`, `agents.dispatch` / `resume` / `get_status`, Claude Agent SDK `session_id`, Activity task rows, review-rail receipts.  
@@ -15,7 +15,7 @@ Do **not** add a Job, Project, or chat-session product.
 Promote what already exists: a **named work lineage** over `background_tasks`.
 
 A **run** (`task_id`) is one agent execution. It can complete, fail, or be cancelled.  
-**Work** (`work_id` + `title`) is the thing the user can name later: “the checkout PR.” It outlives a run, outlives the 2-hour Home window, and is what voice resolves. The worker’s transcript stays in the Claude Code `session_id`, not in Home.
+**Work** (`work_id` + `title`) is the thing the user can name later: “the checkout PR.” It outlives a run, outlives the 2-hour Home window, and is what voice resolves. The worker’s transcript stays in the vendor `session_id` (Cursor `agent_id` or Claude session), not in Home.
 
 User-facing speech is the **title**. Do not teach a new noun. Internally the field is `work_id`, not `job_id`.
 
@@ -54,16 +54,16 @@ That is not a Project (a folder). It is not a Job (a cron/queue word, and the in
 
 ## Current state (the actual bug)
 
-`background_tasks` already almost is this, and then throws the handle away:
+`background_tasks` already almost is this, and then throws the handle away. **V1 skeleton shipped** the handle; leftover product gaps are listed under Dogfood lessons.
 
-1. **`resume()` creates a new `task_id`.** The Claude `session_id` is preserved, but voice and Activity see a different object. There is no `work_id` tying the lineage.
-2. **No title.** Tools and receipts speak nanoids (`k8Tm4xQ2pR7n`). The user says “that PR job.”
-3. **Home is a 2-hour cache.** `CONVERSATION_SESSION_INACTIVITY_MINUTES = 120`. After that, the model is told to `recall()`. Recall is search, not a noun. The user does not trust it, correctly.
-4. **`get_status` on a completed run is a dead end.** “Terminal. Call `get_result`. Do not poll.” There is no “this work is still open; resume it.”
-5. **cwd defaults to the JARV1S repo.** `_default_agent_cwd()` → `settings.BASE_DIR.parent`. User work lands in the assistant’s own tree unless the model guesses a path.
-6. **House chat leaks into the worker.** `build_conversation_context()` injects the last 6 Home turns into every code dispatch/resume. Steer should be the new instruction plus the Claude session, not last night’s lights.
-7. **`mode="jarvis"` cannot resume.** Fine for V1: named work is the **code** path (desktop files, git, the thing Cursor would do). Jarvis-mode stays fire-and-forget integration work until a later slice.
-8. **Running steer is refused.** `resume()` errors if `status == "running"`. Cafe “tweak this” while it is working is Conductor/SDK `interrupt()`, not V1.
+1. **`resume()` creates a new `task_id`.** Fixed: `work_id` ties the lineage; resume copies title/cwd/`session_id`.
+2. **No title.** Fixed: required on code dispatch; receipts and roster speak the title.
+3. **Home is a 2-hour cache.** Unchanged on purpose. Roster replaces `recall()` for open work.
+4. **`get_status` on a completed run is a dead end.** Fixed for **open** work: “still open — resume.”
+5. **cwd defaults to the JARV1S repo.** Fixed: code mode refuses missing cwd.
+6. **House chat leaks into the worker.** Fixed: Home context is first-dispatch only.
+7. **`mode="jarvis"` cannot resume.** Unchanged (V1).
+8. **Running steer is refused.** Unchanged (Conductor later).
 
 Activity already opens `BackgroundTaskWidget`. The rail already shows progress. The missing piece is identity, not another surface.
 
@@ -77,7 +77,7 @@ flowchart LR
   roster["Open-work roster: titles + one-line status"]
   work["Work: work_id + title + cwd + session_id"]
   run["Run: task_id in background_tasks"]
-  worker["Claude Code on this Mac"]
+  worker["Local coding worker (Cursor or Claude)"]
 
   home --> roster
   roster --> work
@@ -105,7 +105,9 @@ No new collection. Additive fields on `background_tasks`:
     "open": bool,            # True until user closes it or idle close
     "ref": str | None,       # optional "PR #412" / Jira key / path; not a schema
     "cwd": str,
-    "session_id": str | None,
+    "session_id": str | None,  # vendor conversation handle
+    "worker_kind": "claude_code" | "cursor_local" | None,
+    "external_run_id": str | None,
     "mode": "code" | "jarvis",
     # existing status, prompt, progress_summary, ...
 }
@@ -114,9 +116,9 @@ No new collection. Additive fields on `background_tasks`:
 Rules:
 
 - First `dispatch(mode="code")` mints `work_id` (same generator as `task_id`) and a required `title`.
-- `resume` inserts a new **run** with the **same** `work_id`, `title`, `cwd`, and Claude `session_id`.
+- `resume` inserts a new **run** with the **same** `work_id`, `title`, `cwd`, `worker_kind`, and vendor `session_id`.
 - `open` stays true after a successful run. Completed ≠ closed. That is the whole point.
-- Close is explicit (`agents.close` or “I’m done with the checkout PR”) or idle (days, not two hours). Closed work can keep the existing 30-day TTL. Open work must not.
+- Close is optional forget (`agents.close` or “I’m done with the checkout PR”), not required when a run finishes. The Home roster is recency (running + last few). Closed work can keep the existing 30-day TTL. Open work must not.
 - Resolution order for voice tools: exact `work_id` / `task_id`, then unique title / `ref` match among **open** work, then latest run in that lineage.
 
 Index: `{owner_id: 1, work_id: 1, created_at: -1}` and `{owner_id: 1, open: 1}`.
@@ -129,22 +131,23 @@ Keep `jarvis.agents.*`. Do not add `jarvis.work`.
 
 | Tool | Change |
 | :--- | :--- |
-| `dispatch` | Require `title` on `mode="code"`. Persist `work_id`. Refuse to default cwd to the JARV1S repo; if cwd is missing, return `ok=false` with a clear error (the old silent default is a trust bug). |
-| `resume` | Accept `target` (work_id, task_id, title, or ref), not only `task_id`. Same `work_id`. Still refuse running runs in V1. |
-| `get_status` | Resolve `target` the same way. For completed **runs** of **open** work, return title, last result line, and “still open — resume to continue,” not a terminal dead end. Omit `target` → open work, not “all running nanoids.” |
+| `dispatch` | Nickname cwd is enough. Title optional. Matching open work continues the lineage (same as resume). Refuse unknown folders; never default to the JARV1S repo. |
+| `resume` | Accept `target` (title, ref, id). A constraint with no matching title continues unique open work. Same `work_id`. Still refuse running runs in V1. |
+| `get_status` | Recency roster when omitted (running + last few). Resolve `target` by title. Completed open work: “still open — resume or inspect.” |
+| `inspect` | Open the pinned worker session (`agent --resume` or `claude --resume`) so the user can **read** the transcript. Does not inject it into Home. |
 | `get_result` / `list_tasks` | Prefer latest run per `work_id`. List **open work** by default. |
 | `cancel_task` | Cancels the **run**. Does not close the work. |
-| `close` | New, tiny: mark `open=false` on the lineage. |
+| `close` | Optional forget: mark `open=false`. Finishing a run does not require this. |
 
-Steer from a Home turn: the voice model calls `get_status` / `resume`. It does not paste the worker transcript into Home history.
+Steer from a Home turn: the voice model calls `get_status` / `resume` / `inspect`. It does not paste the worker transcript into Home history.
 
 Prompt change (one block, dynamic, not persona YAML):
 
 ```text
 [OPEN WORK]
-- Checkout PR comments — completed, open, ~/dev/shop
+- Checkout PR comments — completed, ~/dev/shop
 - Inbox triage — running
-Refer to these by title. Use agents.get_status / resume. Do not recall() to find them.
+By title: resume to continue, inspect to read. close forgets; not required when a run finishes.
 ```
 
 Empty roster: omit the block.
@@ -211,21 +214,24 @@ Cursor remains the **desk** inspect surface: same files on disk. JARV1S does not
 
 ## Phasing
 
-**V1 — handle** (this doc)
+**V1 — handle** (shipped)
 
 - `work_id` + `title` + `open` on code dispatches.
-- Resume/status/list resolve by title.
-- Roster in the Home prompt.
-- cwd required; no JARV1S-repo default.
-- Receipts and Activity show titles.
-- Close work explicitly.
+- Resume/status/list resolve by title. Dispatch continues matching open work.
+- Folder nicknames resolve against `~/dev` (and similar) plus open-work cwds.
+- Recency roster in the Home prompt, including known project folders. Close is optional forget.
+- cwd required as a real folder; no JARV1S-repo default.
+- Receipts, widget, and Activity show titles; Activity groups by `work_id`.
+- `inspect` opens the pinned coding worker session; Claude runs load user + project skills, Cursor runs load user/project/plugins settings.
+- Connecting Cursor makes it the default for **new** `mode="code"` work; resume pins `worker_kind`.
 
 **Not V1**
 
 - Running interrupt.
 - Jarvis-mode resume.
-- Cursor adapter.
+- Importing or polling Cursor IDE/cloud jobs that JARV1S did not dispatch.
 - External refs as a typed schema (a free-string `ref` is enough if the title is good).
+- Idle-close-after-N-days.
 
 ---
 
@@ -235,6 +241,8 @@ Cursor remains the **desk** inspect surface: same files on disk. JARV1S does not
 - “Tweak it — use the existing tests” calls `resume` on the same `work_id` / `session_id`, not a new unrelated dispatch.
 - “Turn the lights off” does not carry the PR transcript and does not blow the Home window.
 - A completed run of open work is still findable; a closed work item is not in the roster.
+- The Home roster stays small without requiring close; older open work is still findable by title.
+- “Show me the 2713 review” opens the pinned coding worker rather than narrating the transcript.
 - Dispatch without a title or cwd does not start a code task.
 - Activity does not show two unrelated rows for one resume lineage.
 - No new product noun in UI chrome. The rail says the title.
@@ -249,3 +257,29 @@ Cursor remains the **desk** inspect surface: same files on disk. JARV1S does not
 | [CONDUCTOR_ORCHESTRATION.md](./CONDUCTOR_ORCHESTRATION.md) | Later: questions/approvals/running interrupt **on a named run**. Do not start Conductor first. |
 | [AUTOMATION_PRIMITIVE.md](./AUTOMATION_PRIMITIVE.md) | Standing rules stay `TriggerRule`. Do not reuse work handles for lights/birthdays. |
 | [MORNING_BRIEFING.md](./MORNING_BRIEFING.md) | Briefing can **mention** open work from the roster. It must not become the work store. |
+
+---
+
+## Dogfood lessons (2026-08-19)
+
+Ran the conductor loops against live Home (`gemma-4-31b` / Cerebras), stubbed tools so client trees were not written. Identity checks also ran against the desktop `background_tasks` collection with throwaway rows, then deleted.
+
+**What held**
+
+- Title resolution on live docs: “what's happening with the 2713 review?”, “the quoting ports thing”, and “I'm done with the 2713 review” all hit the right lineage. “Tweak it” with two open folders is ambiguous and does not guess latest-across-repos.
+- Dual-repo roster includes title + cwd. Close drops only that lineage.
+- After a Home gap, `get_status(target="2713 review")` / `close` — no `recall()`, no redispatch.
+- House interrupt (“Turn the lights off”) with the roster in context called `smart_home.control_lights`, not resume/dispatch.
+- Code dispatch without cwd still fails closed (`cwd_required`). Existing jarvis-mode rows without `open=true` stay off the roster.
+
+**What broke**
+
+- `resolution`: bare “tweak it” originally returned none (stopwords) instead of the two open candidates. Generic steers now return all open work when two+ items exist.
+- `wrong_surface`: only `agents.dispatch` was always-on. Status/resume/close were unusable after a gap unless the router happened to match. Named-work verbs the roster already names stay always-on (`dispatch`, `resume`, `get_status`, `cancel_task`, `close`). `inspect` and `list_tasks` route with the agents plugin.
+- `identity`: `get_result` on completed **open** work looked like a terminal dump, so a short steer summarized the last run instead of calling `resume`. The JSON now includes `open` and “still open — resume to continue.” `get_result` is **not** always-on (status already carries the last-result line); resume/status/close are.
+- Short steer still failed on this Home model even after that: it called `get_result` and spoke the last run. Treat as remaining Home-model miss, not a third prompt pass. Do not freeze a resume canary yet.
+- `wrong_surface` / Home model: kickoff utterances used `files.find` instead of `dispatch`. **UX pass:** cwd nicknames resolve against `~/dev`; title is inferred; matching open work continues; a constraint-only `resume` continues unique open work; Activity groups by `work_id`; chrome speaks the title. Known folders are listed in the roster so Home does not search the JARV1S tree.
+
+**Still will not build**
+
+No jobs collection, Conductor HITL, running interrupt, Cursor Cloud adapter, jarvis-mode resume, idle-close, Activity grouping (unless a resume shows as two unrelated rows in real use). Worker transcripts stay in the vendor `session_id`.

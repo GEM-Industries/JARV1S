@@ -119,8 +119,8 @@ export const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
 
   const heroSizing = mode === 'hero'
     ? cn(
-        "w-full min-w-0 min-h-0 overflow-visible",
-        layoutMode === 'stage' ? "max-h-full min-h-[16rem]" : "h-full",
+        "w-full min-w-0 min-h-0",
+        layoutMode === 'stage' ? "h-full max-h-full overflow-visible" : "h-full overflow-visible",
         sizeClass,
         "animate-in fade-in zoom-in-[0.98] slide-in-from-top-4 duration-[250ms] ease-snappy-in",
         isExiting && "animate-out fade-out zoom-out-95 slide-out-to-bottom-8 duration-[200ms] ease-snappy-out fill-mode-forwards"
@@ -144,7 +144,7 @@ export const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
       } as React.CSSProperties}
       className={cn(
         "flex flex-col pointer-events-auto w-full",
-        layoutMode === 'stage' ? "h-auto min-h-[16rem]" : "h-full",
+        layoutMode === 'stage' ? "h-full min-h-0" : "h-full",
         mode === 'compressed' && "hover:bg-brand/5 active:scale-95",
         highlighted && "ring-1 ring-brand/60 shadow-[0_0_32px_oklch(var(--color-brand)/0.18)]"
       )}
@@ -152,9 +152,9 @@ export const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
     >
       <div className="p-0 h-full w-full relative overflow-hidden rounded-[var(--hologram-radius)]">
         {mode === 'hero' ? (
-          <WidgetLoader 
+          <WidgetLoader
             component={component}
-            props={{ ...data, mode, widgetId: widget_id }}
+            props={{ ...data, widgetId: widget_id }}
           />
         ) : (
           compressedConfig && (

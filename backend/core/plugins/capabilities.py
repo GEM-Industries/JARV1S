@@ -35,6 +35,7 @@ class InvocationStatus(str, Enum):
 BLOCKED_ERROR_CODES: frozenset[str] = frozenset({
     "approval_needed",
     "reauth_needed",
+    "permission_needed",
     "skipped",
 })
 

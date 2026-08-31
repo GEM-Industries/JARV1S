@@ -1,8 +1,9 @@
 """Pre-agent turn admission policy.
 
 VAD/EOU own acoustic endpointing. This module decides whether a finalized or
-barge-in candidate utterance should become a user turn. Barge-in is enforced;
-follow-up is fail-open until a DDSD producer supplies Directedness.
+barge-in candidate utterance should become a user turn. Barge-in is enforced
+with a candidate WAIT loop. Follow-up is a terminal decision: owner-gated when
+enrolled, fail-open when not. Directedness remains a future DDSD seam.
 """
 
 from __future__ import annotations
@@ -54,9 +55,10 @@ class BargeInEvidence:
 
 @dataclass(frozen=True, slots=True)
 class FollowupEvidence:
-    """Finalized follow-up transcript. Speaker identity is intentionally absent."""
+    """Finalized follow-up transcript. Handler always supplies a concrete speaker status."""
 
     transcript: str
+    speaker_status: SpeakerMatchStatus = SpeakerMatchStatus.NOT_ENROLLED
     directedness: Directedness = Directedness.UNKNOWN
 
 
@@ -155,16 +157,22 @@ def decide_barge_in_admission(
 
 
 def decide_followup_admission(evidence: FollowupEvidence) -> AdmissionDecision:
-    """Fail-open follow-up admission until DDSD supplies directedness."""
+    """Terminal follow-up admission. Owner-gated when enrolled; fail-open otherwise.
+
+    Wake-prefix is not an identity bypass here. Barge-in keeps it public so anyone
+    can interrupt playback; local halt commands already run before this function.
+    """
     text = " ".join(evidence.transcript.split())
-    if has_wake_prefix(text):
-        return AdmissionDecision(AdmissionAction.COMMIT, "wake_prefix")
     if is_explicit_barge_control(text):
         return AdmissionDecision(AdmissionAction.COMMIT, "explicit_control")
     if evidence.directedness is Directedness.NOT_DIRECTED:
         return AdmissionDecision(AdmissionAction.SUPPRESS, "not_directed")
     if not text:
         return AdmissionDecision(AdmissionAction.SUPPRESS, "empty")
-    if evidence.directedness is Directedness.DIRECTED:
-        return AdmissionDecision(AdmissionAction.COMMIT, "directed")
-    return AdmissionDecision(AdmissionAction.COMMIT, "followup_open")
+    if evidence.speaker_status is SpeakerMatchStatus.NOT_ENROLLED:
+        return AdmissionDecision(AdmissionAction.COMMIT, "followup_open")
+    if evidence.speaker_status is SpeakerMatchStatus.MATCHED:
+        return AdmissionDecision(AdmissionAction.COMMIT, "owner_followup")
+    if evidence.speaker_status is SpeakerMatchStatus.UNAVAILABLE:
+        return AdmissionDecision(AdmissionAction.COMMIT, "followup_unscorable")
+    return AdmissionDecision(AdmissionAction.SUPPRESS, "speaker_mismatch")

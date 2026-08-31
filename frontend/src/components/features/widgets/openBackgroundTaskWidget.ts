@@ -16,6 +16,7 @@ export async function openBackgroundTaskWidget(
     component: 'BackgroundTaskWidget',
     data: {
       task_id: taskId,
+      title: typeof doc.title === 'string' ? doc.title : undefined,
       status: doc.status ?? 'running',
       progress_summary: doc.progress_summary ?? '',
       live_status: doc.live_status,
@@ -23,6 +24,7 @@ export async function openBackgroundTaskWidget(
       pending_input: doc.pending_input,
       source: doc.source ?? 'voice',
       mode: doc.mode,
+      session_id: typeof doc.session_id === 'string' ? doc.session_id : undefined,
       created_at: typeof doc.created_at === 'string'
         ? doc.created_at
         : new Date().toISOString(),
@@ -30,7 +32,7 @@ export async function openBackgroundTaskWidget(
       activity: doc.activity ?? [],
     },
     layout: { size: 'wide', priority: 50 },
-    title: 'Background Task',
+    title: typeof doc.title === 'string' && doc.title.trim() ? doc.title : 'Working',
     pinned: options?.pinned ?? false,
   };
 

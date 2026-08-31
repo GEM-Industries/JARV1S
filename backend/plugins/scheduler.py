@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from core.context import get_ctx, get_owner_id, get_timezone
 from core.decorators import tool
 from core.operations.events import publish_operations_changed
-from core.operations.setups import SetupPatch, patch_rule_lifecycle
+from core.operations.setups import SetupPatch, definition_pause_patch, patch_rule_lifecycle
 from core.plugins.capabilities import CapabilityErrorDetail
 from core.plugins.read_evidence import MatchStatus, ReadCoverage, match_status_from_count
 from core.plugins.result import ToolResult
@@ -44,7 +44,7 @@ from core.scheduling import (
     parse_schedule_time,
     recurrence_rule_from_origin,
 )
-from core.time import is_duration_expression, normalize_clock_time
+from core.time import normalize_clock_time
 from plugins.smart_home.node_binding import list_bound_room_names, resolve_location_ref_for_area_name
 from services.database.mongodb import mongodb
 
@@ -231,6 +231,27 @@ def _scheduler_manage_error(resource: str) -> CapabilityErrorDetail:
     return _fail(
         f"{resource} is not scheduler-managed. "
         "Use setups.find(query=...) to locate the owner and supported actions."
+    )
+
+
+async def _existing_named_series(owner_id: str, name: str) -> dict | None:
+    label = name.strip()[:80]
+    if not label:
+        return None
+    cursor = mongodb.db.trigger_rules.find({"owner_id": owner_id, "name": label})
+    for rule_doc in await cursor.to_list(20):
+        if is_scheduler_managed(rule_doc):
+            return rule_doc
+    return None
+
+
+def _replace_existing_series_error(rule_doc: dict) -> CapabilityErrorDetail:
+    series_id = str(rule_doc.get("id") or "")
+    name = str(rule_doc.get("name") or "that series")
+    return _fail(
+        f"{name} already exists (series_id={series_id}). "
+        f"Use scheduler.replace_alert(series_id={series_id!r}) to change it. "
+        "Do not delete and recreate."
     )
 
 
@@ -432,7 +453,6 @@ def _origin_with_updates(
     *,
     when: str | None,
     recurrence: str | None,
-    default_fire_at: datetime | None,
 ) -> tuple[TriggerOrigin, datetime | None, CapabilityErrorDetail | None]:
     origin = TriggerOrigin.model_validate(origin_doc)
     next_recurrence = (
@@ -457,22 +477,22 @@ def _origin_with_updates(
                 "'today 17:00', 'Friday at 5pm', or 'May 12 at 17:00'."
             )
 
-    fire_at = parsed_when or origin.fire_at or default_fire_at
     update: dict[str, Any] = {
         "recurrence": next_recurrence,
     }
-    if fire_at is not None:
-        update["fire_at"] = fire_at
-    if when is not None:
+    if parsed_when is not None:
+        update["fire_at"] = parsed_when
         update["timezone"] = get_timezone()
-    if next_recurrence and fire_at is not None:
-        update["original_local_time"] = fire_at.astimezone(
-            coerce_timezone(update.get("timezone") or origin.timezone or get_timezone())
-        ).strftime("%H:%M")
-    elif recurrence is not None:
+        if next_recurrence:
+            update["original_local_time"] = parsed_when.astimezone(
+                coerce_timezone(update["timezone"])
+            ).strftime("%H:%M")
+        elif recurrence is not None:
+            update["original_local_time"] = None
+    elif recurrence is not None and not next_recurrence:
         update["original_local_time"] = None
 
-    return origin.model_copy(update=update), fire_at, None
+    return origin.model_copy(update=update), parsed_when, None
 
 
 async def _schedule_next_occurrence(
@@ -531,6 +551,7 @@ class SchedulerPlugin(JarvisPlugin):
             "set a recurring reminder",
             "start a timer",
             "set an alarm",
+            "wake me up at a given time",
             "brief me at a scheduled time",
             "cancel, snooze, or list my reminders and alarms",
             "cancel that thing I asked you to do later",
@@ -563,8 +584,9 @@ class SchedulerPlugin(JarvisPlugin):
     ) -> ToolResult | CapabilityErrorDetail:
         """
         Schedule a message or task reminder at a future time.
-        Use add_timer for countdown timers and add_alarm for new wake alarms.
-        Use defer for "do this later" side-effect instructions; reminders are user-facing notifications.
+        Duration and wall-clock times both set a due time; they do not change this into a timer.
+        Use add_timer only when the user asks for a countdown timer, and add_alarm for new wake alarms.
+        Use defer for silent "do this later" side effects; reminders tell the user.
         Do NOT use automations.create_rule for time-based requests.
         To edit, reschedule, snooze, or retarget an existing item, call get_alerts first; use snooze_alert to extend a fired alert, replace_alert(instance_id=...) for today/tomorrow/next/one-off occurrence edits, or replace_alert(series_id=...) only for permanent/all-future series edits.
         message is static text to repeat at fire time. For live future work, set a short message plus instructions with what to do at fire time.
@@ -573,9 +595,9 @@ class SchedulerPlugin(JarvisPlugin):
         Example live briefing: remind(when="tomorrow 10:00", message="Briefing", instructions="Gather the relevant live data, then speak a concise briefing.")
 
         Args:
-            when: Wall-clock local time: "17:00", "5pm", "5 o'clock",
+            when: Duration or wall-clock time: "in 2 minutes", "30m", "17:00", "5pm",
                 "today 17:00", "tomorrow 9am", "Friday at 5pm",
-                "May 12 at 17:00", or ISO datetime. Not countdown durations.
+                "May 12 at 17:00", or ISO datetime.
             message: What to say or display when it fires.
             recurrence: "daily", "weekdays", "weekends", "weekly", "every Xh", "every Xm".
             importance: how hard it should reach the user when it fires.
@@ -597,13 +619,6 @@ class SchedulerPlugin(JarvisPlugin):
         if recurrence and not is_valid(recurrence):
             return _fail(f"Invalid recurrence '{recurrence}'. Use: daily, weekdays, weekends, weekly, every Xh, every Xm.")
 
-        if is_duration_expression(when):
-            return _fail(
-                f"when={when!r} is a countdown duration. "
-                "Use jarvis.scheduler.add_timer for timers, jarvis.scheduler.add_alarm for new wake alarms, "
-                "or jarvis.scheduler.defer for instructions to do something later."
-            )
-
         owner_id = get_owner_id()
         if protocol:
             from plugins.protocol import protocol_exists
@@ -623,7 +638,7 @@ class SchedulerPlugin(JarvisPlugin):
         except ValueError as exc:
             return _fail(
                 f"Could not parse when={when!r}. {exc}. "
-                'Use formats like "17:00", "5pm", "5 o\'clock", '
+                'Use formats like "in 2 minutes", "30m", "17:00", "5pm", '
                 "'today 17:00', 'Friday at 5pm', or 'May 12 at 17:00'."
             )
 
@@ -653,6 +668,9 @@ class SchedulerPlugin(JarvisPlugin):
 
         rule_id: str | None = None
         if recurrence:
+            existing = await _existing_named_series(owner_id, message)
+            if existing:
+                return _replace_existing_series_error(existing)
             if not confirmed:
                 sections = [
                     {
@@ -793,6 +811,9 @@ class SchedulerPlugin(JarvisPlugin):
             return deliver_err
 
         if recurrence:
+            existing = await _existing_named_series(owner_id, instruction)
+            if existing:
+                return _replace_existing_series_error(existing)
             kwargs["origin"] = TriggerOrigin(
                 kind="time",
                 fire_at=trigger_time,
@@ -908,6 +929,7 @@ class SchedulerPlugin(JarvisPlugin):
     ) -> str | CapabilityErrorDetail:
         """
         Set a snoozable alarm. Critical attention, alarm sound, explicit acknowledgement.
+        Wake-me-up requests use this tool; remind is a notification, not a snoozable alarm.
         Use snooze_alert to extend a fired alarm; replace_alert(series_id=... or instance_id=...) to edit, reschedule, or retarget an existing alarm.
         Accepts wall-clock times and relative durations such as "30m" or "in 2 hours".
         Args:
@@ -993,16 +1015,23 @@ class SchedulerPlugin(JarvisPlugin):
     ) -> AlertQueryResult:
         """
         Find pending time-based work: reminders, timers, alarms, and silent defer() instructions.
+        Omit status to list upcoming pending occurrences; status="active" is a recurring series with no pending occurrence.
         Use this for upcoming one-offs and recurring schedules before cancel/snooze/skip/replace;
         returns instance_id and series_id. If the user calls a timed action an "automation",
         "schedule", or "rule", still search here with query=/message= — not setups.find.
         Filter named reminders/timers/alarms with kind; search other scheduled work by query or message
-        (both match message+instructions). For durable external-event rules and protocol definitions,
-        use setups.find.
+        (both match message+instructions, or a clock time such as 12:00 / 12pm). For durable
+        external-event rules and protocol definitions, use setups.find.
         """
         owner_id = get_owner_id()
         now_utc = datetime.now(timezone.utc)
         text_filter = (query or message or "").strip() or None
+        normalized_local_time = normalize_clock_time(local_time)
+        if normalized_local_time is None:
+            clock_from_query = normalize_clock_time(text_filter)
+            if clock_from_query:
+                normalized_local_time = clock_from_query
+                text_filter = None
         instance_statuses = ["pending"] if status is None else [status]
         docs = []
         if status != "active":
@@ -1053,7 +1082,6 @@ class SchedulerPlugin(JarvisPlugin):
             )
 
         results.extend(await self._recurring_series_without_upcoming(owner_id, results))
-        normalized_local_time = normalize_clock_time(local_time)
         if kind or status or recurrence or normalized_local_time or text_filter:
             results = [
                 row for row in results
@@ -1233,7 +1261,6 @@ class SchedulerPlugin(JarvisPlugin):
             rule_doc.get("origin", {}),
             when=when,
             recurrence=recurrence,
-            default_fire_at=coerce_datetime(rule_doc.get("origin", {}).get("fire_at")),
         )
         if origin_error:
             return origin_error
@@ -1258,6 +1285,13 @@ class SchedulerPlugin(JarvisPlugin):
         delivery = with_target_fallback_for_critical(delivery, attention)
 
         now = datetime.now(timezone.utc)
+        previous_recurrence = str(
+            (rule_doc.get("origin") or {}).get("recurrence") or ""
+        ).lower().strip()
+        next_recurrence = str(origin.recurrence or "").lower().strip()
+        recurrence_changed = (
+            recurrence is not None and next_recurrence != previous_recurrence
+        )
         rule_update = {
             "origin": origin.model_dump(mode="python", exclude_none=True),
             "action": action.model_dump(mode="python", exclude_none=True),
@@ -1279,6 +1313,19 @@ class SchedulerPlugin(JarvisPlugin):
         }
         if next_due is not None:
             instance_set["due_at"] = next_due
+        elif recurrence_changed:
+            computed = next_occurrence(
+                recurrence_rule_from_origin(
+                    origin.model_dump(mode="python", exclude_none=True),
+                    rule_doc=rule_doc,
+                    owner_id=owner_id,
+                    rule_id=series_id,
+                ),
+                now,
+            )
+            if computed is not None:
+                instance_set["due_at"] = computed
+                next_due = computed
 
         await mongodb.db.trigger_instances.update_many(
             {
@@ -1325,7 +1372,6 @@ class SchedulerPlugin(JarvisPlugin):
             doc.get("origin_snapshot", {}),
             when=when,
             recurrence=None,
-            default_fire_at=coerce_datetime(doc.get("due_at")),
         )
         if origin_error:
             return origin_error
@@ -1610,6 +1656,7 @@ class SchedulerPlugin(JarvisPlugin):
     async def pause_series(self, series_id: str, until: str | None = None) -> str | CapabilityErrorDetail:
         """
         Pause a recurring notification series. No occurrences fire until resumed.
+        Prefer setups.pause when the user names configured behavior.
         Args:
             series_id: series_id from get_alerts().
             until: Relative ("7d") or natural date/time ("2026-02-17", "next Friday"). Omit for indefinite.
@@ -1630,11 +1677,7 @@ class SchedulerPlugin(JarvisPlugin):
         await patch_rule_lifecycle(
             owner_id,
             f"rule:{series_id}",
-            (
-                SetupPatch(enabled=True, paused_until=paused_until)
-                if paused_until is not None
-                else SetupPatch(enabled=False, paused_until=None)
-            ),
+            definition_pause_patch(paused_until),
         )
         if paused_until:
             return f"Series paused until {format_local_when(paused_until)}"
@@ -1648,44 +1691,14 @@ class SchedulerPlugin(JarvisPlugin):
         if isinstance(rule_doc, CapabilityErrorDetail):
             return rule_doc
 
-        trigger = rule_doc.get("origin", {})
-        await mongodb.db.trigger_rules.update_one(
-            {"id": series_id, "owner_id": owner_id},
-            {"$set": {
-                "enabled": True,
-                "paused_until": None,
-                "updated_at": datetime.now(timezone.utc),
-            }},
+        summary = await patch_rule_lifecycle(
+            owner_id,
+            f"rule:{series_id}",
+            SetupPatch(enabled=True, paused_until=None),
         )
-
-        now = datetime.now(timezone.utc)
-        next_time = next_occurrence(
-            recurrence_rule_from_origin(
-                trigger,
-                rule_doc=rule_doc,
-                owner_id=owner_id,
-                rule_id=series_id,
-            ),
-            now,
-        )
-        if not next_time:
-            return _fail("Could not compute next occurrence.")
-
-        created = await trigger_service.materialize_recurring_occurrence(
-            owner_id=owner_id,
-            rule_id=series_id,
-            origin=TriggerOrigin.model_validate(rule_doc["origin"]),
-            action=TriggerAction.model_validate(rule_doc["action"]),
-            attention=AttentionPolicy.model_validate(rule_doc["attention"]),
-            delivery=DeliveryPlan.model_validate(rule_doc["delivery"]),
-            freshness=FreshnessPolicy.model_validate(rule_doc["freshness"]),
-            due_at=next_time,
-            management=ManagementOwnership.model_validate(rule_doc["management"]),
-        )
-        if not created:
-            return "Series resumed. Pending occurrence already exists."
-        await publish_operations_changed(owner_id, "schedules")
-        return f"Series resumed. Next occurrence at {format_local_when(next_time)}"
+        if summary.next_due_at:
+            return f"Series resumed. Next occurrence at {format_local_when(summary.next_due_at)}"
+        return "Series resumed."
 
 
 def _format_receipt_when(trigger_time: datetime, *, now: datetime | None = None) -> str:

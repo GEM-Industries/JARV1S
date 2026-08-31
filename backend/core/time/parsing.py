@@ -90,6 +90,8 @@ def _has_explicit_time(value: str) -> bool:
 
 def _strip_duration_prefix(value: str) -> str:
     raw = value.strip()
+    if raw.lower().startswith("for "):
+        raw = raw[4:].strip()
     if raw.lower().startswith("in "):
         raw = raw[3:].strip()
     if raw.startswith("+"):

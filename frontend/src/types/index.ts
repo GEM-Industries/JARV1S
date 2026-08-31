@@ -223,8 +223,10 @@ export interface IntegrationSummary {
   enabled: boolean
   /** "composio" | "<oauth-provider>" | null — which reconnect/disconnect flow to use */
   auth_type?: string | null
-  /** OAuth providers that can authorize this integration, e.g. Calendar supports Google and Microsoft. */
+  /** Connections this plugin can use, e.g. Calendar: macos, google, microsoft. */
   auth_providers?: string[]
+  /** Currently linked connections. Additive — more than one may be live. */
+  connected_providers?: string[]
   description: string
   connection: IntegrationConnection
   health: IntegrationHealth

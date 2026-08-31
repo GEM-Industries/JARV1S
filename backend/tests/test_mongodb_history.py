@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -14,6 +14,49 @@ class _EmptyCursor:
 
     async def to_list(self, *, length):
         return []
+
+
+@pytest.mark.asyncio
+async def test_completed_user_turn_is_embedded_for_later_recall(monkeypatch):
+    collection = MagicMock()
+    collection.update_one = AsyncMock()
+    collection.find_one = AsyncMock(
+        return_value={
+            "_id": "message-1",
+            "content": "I normally buy refurbished technology through online marketplaces.",
+        }
+    )
+
+    service = MongoDBService()
+    monkeypatch.setattr(service, "get_collection", MagicMock(return_value=collection))
+    monkeypatch.setattr(
+        "services.embeddings.embedding_service.embed_one",
+        lambda text: [float(len(text))],
+    )
+
+    await service.mark_user_turn_status("geoff", "turn-1", "completed")
+
+    assert collection.update_one.await_count == 2
+    embedding_update = collection.update_one.await_args_list[1]
+    assert embedding_update.args[0] == {
+        "_id": "message-1",
+        "embedding": {"$exists": False},
+    }
+    assert embedding_update.args[1]["$set"]["embedding"]
+
+
+@pytest.mark.asyncio
+async def test_embedding_failure_does_not_fail_turn_completion(monkeypatch):
+    collection = MagicMock()
+    collection.update_one = AsyncMock()
+    collection.find_one = AsyncMock(side_effect=RuntimeError("embedding lookup failed"))
+
+    service = MongoDBService()
+    monkeypatch.setattr(service, "get_collection", MagicMock(return_value=collection))
+
+    await service.mark_user_turn_status("geoff", "turn-1", "completed")
+
+    collection.update_one.assert_awaited_once()
 
 
 @pytest.mark.asyncio

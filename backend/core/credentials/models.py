@@ -24,6 +24,8 @@ class CredentialCard(BaseModel):
     masked_suffix: Optional[str] = None
     next_action: Optional[str] = None
     detail: Optional[str] = None
+    docs_url: Optional[str] = None
+    docs_label: Optional[str] = None
 
 
 class ExternalTriggersStatus(BaseModel):

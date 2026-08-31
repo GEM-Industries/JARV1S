@@ -591,7 +591,7 @@ class VoiceDelivery:
         )
         await self._manager.send_voice_response(
             self._session_id, WSMessageType.CODE,
-            {"text": code, "tool_call_id": tool_call_id},
+            {"text": code, "tool_call_id": tool_call_id, "turn_id": self._turn_id},
         )
 
         # Rotate response correlation for the post-tool assistant turn

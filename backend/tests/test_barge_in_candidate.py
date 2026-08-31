@@ -790,6 +790,7 @@ async def test_commit_voice_turn_followup_fail_open_schedules_process_turn(monke
         stt_stream=None,
         current_run_task=None,
         processor=SimpleNamespace(
+            peek_turn_speech_audio=MagicMock(return_value=b"\x00\x00" * 160),
             consume_turn_audio=MagicMock(return_value=b"\x00\x00" * 160),
             mode=handlers.VoiceMode.ACTIVE_IDLE,
             force_active=MagicMock(),
@@ -819,6 +820,75 @@ async def test_commit_voice_turn_followup_fail_open_schedules_process_turn(monke
     assert voice_turn.admission_source == "followup"
     assert voice_turn.admission_reason == "followup_open"
     process_turn.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_commit_voice_turn_enrolled_mismatch_suppresses(monkeypatch) -> None:
+    voice_turn = VoiceInputTurn(
+        turn_id="turn-mismatch",
+        transcript_text="what time is it",
+    )
+    pcm = b"\x00\x00" * 160
+    verifier = SimpleNamespace(
+        enrolled=True,
+        owner_id="owner-1",
+        verify_pcm=MagicMock(
+            return_value=SpeakerEvidence(
+                status=SpeakerMatchStatus.MISMATCH,
+                speaker_id="owner-1",
+                cosine=0.05,
+                threshold=0.21,
+            )
+        ),
+    )
+    session = SimpleNamespace(
+        voice_turn=voice_turn,
+        barge_in_candidate_committed=False,
+        soft_muted=False,
+        stt_stream=None,
+        current_run_task=None,
+        speaker_verifier=verifier,
+        processor=SimpleNamespace(
+            peek_turn_speech_audio=MagicMock(return_value=pcm),
+            consume_turn_audio=MagicMock(return_value=pcm),
+            mode=handlers.VoiceMode.ACTIVE_IDLE,
+            force_active=MagicMock(),
+        ),
+        pending_attachments=[],
+    )
+    send_message = AsyncMock()
+    send_voice_response = AsyncMock()
+    process_turn = AsyncMock()
+    monkeypatch.setattr(handlers, "_flush_turn_detector", MagicMock())
+    monkeypatch.setattr(
+        handlers,
+        "_finish_streaming_stt",
+        AsyncMock(return_value=("what time is it", {"bytes_fed": 320, "feed_count": 1})),
+    )
+    monkeypatch.setattr(handlers, "_handle_local_voice_command", AsyncMock(return_value=False))
+    monkeypatch.setattr(handlers, "_close_streaming_stt", AsyncMock())
+    monkeypatch.setattr(handlers, "_close_turn_detector", AsyncMock())
+    monkeypatch.setattr(handlers, "_discard_voice_turn_latency", MagicMock())
+    monkeypatch.setattr(handlers.orchestrator, "process_turn", process_turn)
+    monkeypatch.setattr(
+        handlers,
+        "manager",
+        SimpleNamespace(send_message=send_message, send_voice_response=send_voice_response),
+    )
+
+    await handlers._commit_voice_turn(
+        "test",
+        session,
+        voice_turn,
+        TurnDecision(done=True, reason="audio_eou"),
+    )
+
+    verifier.verify_pcm.assert_called_once()
+    process_turn.assert_not_called()
+    send_message.assert_awaited_once()
+    assert send_message.await_args.args[1].type is WSMessageType.RETRACT
+    session.processor.force_active.assert_called_once()
+    assert voice_turn.admission_source is None
 
 
 @pytest.mark.asyncio

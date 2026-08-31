@@ -8,9 +8,9 @@ Reference for the background agent system — execution paths, task lifecycle, s
 
 Background agents ship with two runtimes on purpose — collapsing them to one was considered and rejected.
 
-- Both runtimes use `BACKGROUND_AGENT_MODEL` (default `claude-opus-4-8`) with medium reasoning effort. The Anthropic key is stored through **Settings → Credentials** and read from `CredentialStore`; `.env` keys are not used. Code mode passes the key only to its SDK subprocess.
+- Both runtimes use stored product credentials rather than `.env`. `mode="jarvis"` uses the Anthropic key through **Settings → Connections** (`background_agents`). `mode="code"` uses Cursor when a Cursor API key is connected, otherwise Claude Agent SDK with the Anthropic key. Code workers receive the key only inside the vendor SDK.
 - **`mode="jarvis"` (in-process)** keeps every active integration, credential, context-var (including `_consent_resolver`), and already-hot singleton (embedder, tool router, MongoDB client). Tool calls cross a Python function boundary, not a process or network boundary — sub-millisecond overhead. Best fit for any dispatch that touches Slack, Gmail, GitHub, Calendar, Memory, Smart Home, or anything cross-service.
-- **`mode="code"` (SDK subprocess)** gives the user the best-available coding model with first-class Bash, file edit, diff, and session-resume primitives. Best fit for pure file/git/shell work where the subprocess-grade tooling is the point.
+- **`mode="code"` (coding worker)** gives the user the connected local coding agent — Cursor when connected, otherwise Claude Code — with first-class file/git/shell work and session resume. Best fit for pure file/git/shell work where the worker’s tooling is the point.
 
 Why not collapse to one runtime (e.g. a universal MCP bridge)? An in-process capability call is a direct function invocation in the same asyncio loop. An equivalent call from a subprocess has to traverse stdio/MCP framing, JSON-encode both request and response, and re-hydrate context on each hop. For high-fan-out plugin sequences (read memory, check calendar, draft email, push widget) the overhead dominates the actual work. Cross-process consent would also need a new request/response protocol whose only job is to reproduce a contextvar that already works in-process.
 
@@ -22,18 +22,20 @@ Every background task runs in one of two modes, selected by the voice model when
 
 | | `mode="code"` | `mode="jarvis"` |
 |---|---|---|
-| **Runtime** | Claude Code SDK subprocess (`claude-agent-sdk`) | In-process `JarvisAgent` via `asyncio.create_task` |
-| **Tools available** | Read, Write, Edit, Bash, Grep, Glob + Composio MCP (Slack, GitHub, Gmail…) | Full plugin catalog via structured capability calls — calendar, email, memory, smart_home, weather, automations, widgets |
-| **JARV1S access** | None — isolated process | Full — same plugins as a voice turn |
-| **File/shell work** | Best-in-class (battle-tested Edit, diff handling, session resume) | `files.*` / `system.exec` tools — no native Bash |
+| **Runtime** | Pluggable local worker (`cursor_local` or `claude_code`) | In-process `JarvisAgent` via `asyncio.create_task` |
+| **Tools available** | Vendor file/git/shell tools + Composio MCP (Slack, GitHub, Gmail…) | Full plugin catalog via structured capability calls — calendar, email, memory, smart_home, weather, automations, widgets |
+| **JARV1S access** | None — isolated worker | Full — same plugins as a voice turn |
+| **File/shell work** | Best-in-class (Cursor or Claude Code) | `files.*` / `system.exec` tools — no native Bash |
 | **Max turns** | `max_turns` param (default 40) | `AGENT_INPROCESS_MAX_TURNS` (default 30) |
-| **Cancellation** | `task.cancel()` → drain coroutine → SIGTERM → SIGKILL | `task.cancel()` → `asyncio.CancelledError` — instant |
-| **Session resume** | Yes — stores `session_id`, resume restores full prior context | No — always starts fresh |
+| **Cancellation** | `task.cancel()` → worker cancels the vendor run → `status=cancelled` | `task.cancel()` → `asyncio.CancelledError` → `status=cancelled` |
+| **Session resume** | Yes — stores `session_id` (Cursor `agent_id` or Claude session) | No — always starts fresh |
 | **When to use** | Pure file editing, Git operations, shell pipelines — tasks with no JARV1S plugin dependency | Any task involving integrations (Slack, Gmail, GitHub), JARV1S plugins (calendar, memory, automations, smart home), or cross-service work |
 
 The voice model specifies `mode` explicitly; there is no deterministic runtime router inside `dispatch()`. The `dispatch()` docstring steers pure file/git/shell work toward `mode="code"` and JARV1S integration work toward `mode="jarvis"`.
 
-`cwd` is optional on the public tool. If omitted, it defaults to the JARV1S project root. For file-producing tasks, prompts should still use explicit absolute output paths so artifacts are predictable and verifiable.
+`mode` chooses JARV1S execution semantics. `worker_kind` chooses the local coding vendor (`cursor_local` or `claude_code`). Adapters in `plugins/agents/workers/` own SDK connect/stream/cancel/dispose and inspect command construction. `AgentsPlugin` still owns spoken tools; `client.py` still owns Mongo, receipts, artifacts, lifecycle settlement, and `TRIGGER_DUE`. There is no worker picker, plugin registry, or Conductor mid-run steering in this slice. A future Codex or ACP adapter should change only the worker package and credential/setup mapping.
+
+`mode="code"` accepts a folder **nickname** (`connect-v2`) or an absolute cwd. Title is optional (inferred from a PR number or the folder name). If that title or folder is already **open** work, `dispatch` continues it instead of minting a new lineage. Connecting Cursor in Settings makes Cursor the default for **new** code work; resume always keeps the lineage’s `worker_kind`. Relative paths that are not real directories are never resolved under the JARV1S tree. If the folder cannot be resolved uniquely, `ok=false` with `cwd_required` and a short list of known `~/dev` folders. `mode="jarvis"` stays fire-and-forget (no `work_id`); omitted cwd falls back to `$HOME`.
 
 `dispatch()` returns a JSON string, not prose:
 
@@ -41,21 +43,23 @@ The voice model specifies `mode` explicitly; there is no deterministic runtime r
 {
   "ok": true,
   "task_id": "k8Tm4xQ2pR7n",
+  "work_id": "pL9s2Qw8nM4c",
   "mode": "code",
   "error_code": null,
   "error_message": null,
-  "message": "Task started."
+  "message": "I'll take checkout PR and let you know when it's done."
 }
 ```
 
-If `ok=false`, no task row was created and the task did not start. Common `error_code` values include `already_in_background`, `source_limit_reached`, `depth_limit_reached`, `agents_not_initialized`, and `jarvis_runtime_unavailable`. Batch delegation is still one `dispatch()` call per task; callers must inspect each result before starting the next task. A compound prompt that says "do task 1, task 2, and task 3" creates one cancelable task row, not three independent agents.
+If `ok=false`, no task row was created and the task did not start. Common `error_code` values include `cwd_required`, `ambiguous_work`, `already_in_background`, `source_limit_reached`, `depth_limit_reached`, `agents_not_initialized`, and `jarvis_runtime_unavailable`. Batch delegation is still one `dispatch()` call per task; callers must inspect each result before starting the next task. A compound prompt that says "do task 1, task 2, and task 3" creates one cancelable task row, not three independent agents.
 
-Completed or failed task results are retrieved with `get_result()`, not `get_status()`:
+A **run** is `task_id`. **Named work** is `work_id` + `title` and stays `open` after a run completes. Completed ≠ closed. `resume` mints a new run with the same `work_id`, `title`, `cwd`, `worker_kind`, and vendor `session_id`. `inspect` opens the work in the editor: Cursor via `cursor --reuse-window` (project or a file), Claude via `claude --resume` in Terminal. Home never loads the transcript. `get_status(target)` / `get_result(target)` / `close(target)` / `inspect(target)` resolve by title, ref, work_id, or task_id. Omit `target` on `get_status` to see the recency roster (running + last few), not every open lineage. Completed open work says “still open — resume or inspect,” not a terminal dead end. `close` forgets a lineage; it is not required when a run finishes. `cancel_task` cancels the run only and records `status=cancelled` (not failed).
 
 ```json
 {
   "ok": true,
   "task_id": "k8Tm4xQ2pR7n",
+  "work_id": "pL9s2Qw8nM4c",
   "status": "completed",
   "result": "Full stored task result...",
   "error_code": null,
@@ -63,8 +67,6 @@ Completed or failed task results are retrieved with `get_result()`, not `get_sta
   "message": "Task result found."
 }
 ```
-
-`get_status(task_id)` is intentionally status-focused. For completed or failed tasks it returns a terminal-state message and points the model to `get_result(task_id)` instead of returning a truncated `progress_summary`; repeated status polling after that is wasted. If `task_id` is omitted, `get_result()` returns the most recent completed or failed task for the owner, which supports natural follow-ups like "what was that result?" without redispatching the work.
 
 ---
 
@@ -81,19 +83,19 @@ queued → running → completed
 | State | Set by | Notes |
 |---|---|---|
 | `running` | `_prepare_task()` at insert time | Task is in MongoDB before the asyncio Task is created |
-| `completed` | `_complete_task()` | Creates a system-origin `TriggerInstance` and publishes `TRIGGER_DUE` for delivery |
-| `failed` | `_fail_task()` | On exception or `CancelledError` |
-| `cancelled` | `_fail_task("Task was cancelled.")` | Set inside the `CancelledError` handler |
+| `completed` | `_complete_task()` | Creates a system-origin `TriggerInstance` titled as “{title} is done.” and publishes `TRIGGER_DUE` |
+| `failed` | `_fail_task()` | Exception or vendor run failure. Alerts once as “{title} failed.” |
+| `cancelled` | `_cancel_task()` | User cancellation via `cancel_task`. Silent unless the user asks. |
 
 **There is no `queued` state in practice.** Tasks are written as `running` immediately and the asyncio Task is created synchronously after. If the semaphore blocks, the task sits at `running` in MongoDB while the coroutine awaits the semaphore.
 
 **Task IDs** are 12-character alphanumeric nanoids (e.g. `k8Tm4xQ2pR7n`) generated by `core.id.generate_id()` — compact enough for reliable LLM pass-through and voice readback.
 
-**TTL / cleanup:** Completed and failed tasks have an `expires_at` BSON Date field set 30 days after completion. A sparse TTL index on `expires_at` auto-deletes them. Running tasks have no `expires_at` while the backend process is alive.
+**TTL / cleanup:** Closed work (and never-opened legacy runs) get `expires_at` 30 days out. A sparse TTL index on `expires_at` auto-deletes them. Open named work must not get `expires_at` on complete/fail — completed ≠ closed. Running tasks have no `expires_at` while the backend process is alive.
 
 ### Crash Recovery
 
-On startup, any task left in `running` state is marked `failed` with `interrupted_reason="backend_restart"`, `completed_at`, and `expires_at`. Recovery does **not** retry or auto-resume work. `mode="jarvis"` cannot resume, and `mode="code"` resume should remain explicit through `resume(task_id, feedback)` so file edits and shell work are not restarted unexpectedly.
+On startup, any task left in `running` state is marked `failed` with `interrupted_reason="backend_restart"` and `completed_at`. Open named work is failed without TTL so the handle survives; legacy (`open != true`) rows still get `expires_at`. Recovery does **not** retry or auto-resume work. `mode="jarvis"` cannot resume, and `mode="code"` resume should remain explicit through `resume(target, feedback)` so file edits and shell work are not restarted unexpectedly.
 
 ---
 
@@ -102,30 +104,28 @@ On startup, any task left in `running` state is marked `failed` with `interrupte
 ### `mode="code"` — Subprocess Path
 
 ```
-agents.dispatch(prompt, cwd=None, mode="code")
+agents.dispatch(prompt, cwd, title, mode="code")
   ↓
 _dispatch()
   ├── _get_connected_composio_apps()                         concurrent
-  ├── PromptBuilder.build_conversation_context()             concurrent
+  ├── PromptBuilder.build_conversation_context()             first dispatch only
   ├── _resolve_tools_for_dispatch(apps)    → list[{type, url, name, headers}]
   └── PromptBuilder.build_subprocess_prompt(owner_id, cwd, conv_context)
   ↓
-_prepare_task() → MongoDB insert (status="running")
+_prepare_task() → MongoDB insert (status="running", work_id, title, open=true)
   ↓
 _push_task_progress_receipt(force=True) → review-rail progress receipt
   ↓
 asyncio.create_task(_run())
   └── semaphore.acquire()
-      └── _run_agent(task_id, prompt, cwd, max_turns, mcp_servers, system_prompt)
-            ├── AgentOptions(permission_mode="bypassPermissions", mcp_servers=mcp_dict)
-            ├── SDKClient.connect() + query(prompt)
-            ├── drain loop: AssistantMessage → MongoDB $push events, progress_summary
-            │              ToolUseBlock → _push_task_event → throttled receipt upsert
-            │              ResultMessage → capture session_id, cost_usd
+      └── _run_agent(task_id, prompt, cwd, max_turns, mcp_servers, system_prompt, worker_kind)
+            ├── resolve worker (`cursor_local` if Cursor is connected, else `claude_code`)
+            ├── worker.execute(spec, emit) — vendor SDK connect/stream/cancel/dispose
+            ├── emit text/tool/external_handle → MongoDB events, progress_summary, session_id
             └── _complete_task() → terminal receipt + TriggerInstance + TRIGGER_DUE
 ```
 
-**System prompt injected:** Built by `PromptBuilder.build_subprocess_prompt()` — XML-tagged with `<identity>`, `<rules>`, `<env>` (owner, home, cwd, platform, date), `<conversation-context>` (last 6 turns, tool results truncated to 300 chars), `<user-preferences>` (last 10 memories). The subprocess agent has no access to JARV1S internals — only what's in this prompt plus the MCP tools.
+**System prompt injected:** Built by `PromptBuilder.build_subprocess_prompt()` — XML-tagged with `<identity>`, `<rules>`, `<env>` (owner, home, cwd, platform, date), `<conversation-context>` (last 6 Home turns on **first** dispatch only; resume passes an empty context), `<user-preferences>` (last 10 memories). Claude-code `AgentOptions` pass `setting_sources=["user", "project"]`. Cursor local passes `setting_sources=["user", "project", "plugins"]` and prepends that prompt only on first dispatch (Cursor has no system_prompt field). The worker has no access to JARV1S internals — only what's in this prompt plus the MCP tools. Home turns inject a recency `[OPEN WORK]` roster of titles + cwd; they never load the worker transcript. `inspect` attaches that `session_id` in Terminal.
 
 **MCP tools:** Composio apps are resolved fresh per dispatch (late-binding). Each app becomes an HTTP MCP server config passed to the SDK. The subprocess calls Composio's MCP endpoint directly over HTTP — no in-process connection.
 
@@ -143,15 +143,14 @@ _push_task_progress_receipt(force=True) → review-rail progress receipt
 asyncio.create_task(_run_inprocess())
   └── _IN_BACKGROUND.set(True)
       semaphore.acquire()
-      └── bg_context = PromptBuilder.build_background_context(owner_id, cwd)
+      └── bg_context = build_background_context(owner_id, cwd)
           bg_context["routed_tools"] = tool_router.route(prompt, task_id)
           background_agent.process_stream(
               prompt,
               [],                                    # empty history
               owner_id,
               context=bg_context,                    # source, cwd, user_profile, timezone, local_time
-              max_iterations=AGENT_INPROCESS_MAX_TURNS,
-              prompt_mode=PromptMode.BACKGROUND
+              max_iterations=AGENT_INPROCESS_MAX_TURNS
           )
           ├── AgentEventType.TEXT        → MongoDB progress_summary/live_status, throttled receipt upsert
           ├── AgentEventType.TOOL_CALL   → throttled receipt upsert
@@ -188,9 +187,9 @@ Receipts upsert through `ui.update` with stable `widget_id: task-receipt-{task_i
 
 **Detail fetch:** `BackgroundTaskWidget` loads richer task state from `GET /api/v1/tasks/{task_id}` when opened or when the task reaches a terminal state inside an already-open detail view.
 
-**System prompt:** Built by `PromptBuilder.build(mode=BACKGROUND)` — includes identity, protocols, and reasoning sections but **skips** voice, style, and examples (irrelevant for background execution). The dispatch prompt is routed with the task id as its isolated session key and injected as `routed_tools`, so the background agent gets a task-specific manifest instead of the full plugin namespace. The `[EXECUTION MODE]` block is injected via runtime context: *"You are a background agent. Execute the task directly. Do NOT call agents.dispatch."*
+**System prompt:** `BackgroundPromptBuilder` loads the focused packaged `BACKGROUND.md`. It contains only the delegated-worker contract and does not load Agent Home personality, voice behavior, system-alert rules, widgets, backchannels, or conversational memory policy. The dispatch prompt is routed with the task id as its isolated session key and injected as `routed_tools`, so the worker gets a task-specific manifest instead of the full plugin namespace. `agents.dispatch` is omitted from that manifest, and `_IN_BACKGROUND` remains a runtime recursion guard.
 
-**Context injection:** `PromptBuilder.build_background_context()` loads user profile (via `get_profile_block()`) and resolves timezone from the session document — identical to the context `process_turn()` provides for voice turns.
+**Context injection:** `BackgroundPromptBuilder` includes the Home skill catalog without `PROMPT.md`. `build_background_context()` loads operational user facts and connected-service identities via `get_profile_block()`, then resolves current time from the active timezone. It does not inject Home personality, conversation history, or interactive delivery context.
 
 If `mode="jarvis"` is requested and the in-process JARV1S runtime is unavailable, dispatch returns `ok=false` with `error_code="jarvis_runtime_unavailable"`. It does not silently fall back to `mode="code"`, because code mode has a powerful model but no JARV1S plugin access.
 
@@ -247,9 +246,10 @@ Background agents are operational, but not yet fully trustworthy for high-stakes
 | Source | Path | `depth` | `source` value |
 |---|---|---|---|
 | Voice turn | `agents.dispatch()` capability call | 0 | `"voice"` |
-| Automation rule (`dispatch_agent` action) | `AgentsPlugin._dispatch()` directly | 0 | `"automation"` |
-| `resume()` | New task, old `session_id` passed to SDK | 0 | `"resume"` |
+| `resume()` | New run, same `work_id` / vendor `session_id` | 0 | `"resume"` |
 | Background agent trying to re-dispatch | Blocked by `_IN_BACKGROUND` check | — | Rejected with error |
+
+There is no trigger action that spawns agents. Use `agents.dispatch()` from a voice or system turn.
 
 ---
 
@@ -276,12 +276,12 @@ The foreground model is responsible for fan-out shape. If the user asks for "thr
 ```
 resume(task_id, feedback)
   → look up task in MongoDB
+  → pin worker_kind from the lineage (never switch vendors)
   → re-resolve Composio MCP servers (fresh credentials)
-  → _run_agent(..., resume_session_id=doc["session_id"])
-      → AgentOptions(resume=session_id)
+  → _run_agent(..., resume_session_id=doc["session_id"], worker_kind=...)
 ```
 
-`session_id` is captured from the **first `AssistantMessage`** (not `ResultMessage`) so it's available even for cancelled or failed tasks. Session files live in `~/.claude/projects/` (Claude SDK) or `~/.opencode/sessions/` (OpenCode SDK). If session files are missing (e.g. different machine, clean install), resume will start a fresh session — it won't error.
+`session_id` is the vendor conversation handle (Cursor `agent_id` or Claude session) and is persisted as soon as the worker starts, so it's available even for cancelled or failed tasks. Claude session files live in `~/.claude/projects/`. Cursor local sessions are owned by the Cursor CLI/bridge. If the handle is missing (e.g. different machine, clean install), resume starts a fresh session — it won't error.
 
 `mode="jarvis"` tasks do **not** support resume. Their `session_id` field is always `null`.
 
@@ -308,7 +308,7 @@ The subprocess is completely isolated. It has Composio MCP tools and filesystem 
 `max_budget_usd` is stored on the task document but cannot be enforced mid-task (the SDK only returns `total_cost_usd` in the final `ResultMessage`). A task can exceed its budget — the overage is logged and included in the completion trigger message but cannot be prevented.
 
 **No automatic backoff for external API rate limits**
-The `[EXECUTION MODE]` prompt instructs the background agent to skip rate-limited resources and continue, but there is no runtime-level throttle. The agent relies on LLM compliance. If the agent retries a 429 immediately, it will waste iterations. For integration scan tasks (Slack, Gmail), the dispatch prompt should prefer targeted search APIs over sequential per-channel/per-thread history fetches — search queries produce fewer API calls for the same coverage.
+There is no runtime-level throttle for background integrations. Provider tools should return actionable rate-limit errors; repeated immediate retries can waste iterations. For integration scans, prefer targeted search APIs over sequential per-channel or per-thread fetches.
 
 **Dispatch prompts should include the user's known identity**
 When the task is "search for my messages/mentions/assignments," the dispatch prompt should include the user's email or display name. The in-process agent receives `[USER CONTEXT]` in its system prompt, but the dispatch prompt itself often uses "me" or "the user" without an anchor. Including `geoff@example.com` or `Geoff` saves the subagent 2-3 identity-discovery iterations.

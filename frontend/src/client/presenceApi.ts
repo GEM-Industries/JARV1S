@@ -45,6 +45,7 @@ export interface PresenceNode {
   last_seen_at?: string | null
   active: boolean
   device_id?: string | null
+  disconnected: boolean
 }
 
 export interface PresenceView {
@@ -56,6 +57,14 @@ export interface RevokeDeviceResponse {
   revoked: boolean
 }
 
+export interface DisconnectDeviceResponse {
+  disconnected: boolean
+}
+
+export interface ResumeDeviceResponse {
+  resumed: boolean
+}
+
 export const presenceApi = {
   getPresence: () => request<PresenceView>('GET', '/'),
   assignNodeRoom: (nodeId: string, haAreaId: string | null) =>
@@ -64,4 +73,8 @@ export const presenceApi = {
     }),
   revokeDevice: (deviceId: string) =>
     request<RevokeDeviceResponse>('POST', `/devices/${encodeURIComponent(deviceId)}/revoke`),
+  disconnectDevice: (deviceId: string) =>
+    request<DisconnectDeviceResponse>('POST', `/devices/${encodeURIComponent(deviceId)}/disconnect`),
+  resumeDevice: (deviceId: string) =>
+    request<ResumeDeviceResponse>('POST', `/devices/${encodeURIComponent(deviceId)}/resume`),
 }

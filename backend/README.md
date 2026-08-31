@@ -13,7 +13,7 @@ A personal AI assistant backend built with FastAPI, featuring voice processing c
 
 ## Setup
 
-1. Ensure Python 3.11+ is installed
+1. Ensure Python 3.12+ is installed
 
 2. Install dependencies using `uv`:
 ```bash
@@ -40,7 +40,7 @@ task be:dev          # localhost only
 task be:dev:lan      # LAN-reachable for satellites (0.0.0.0:8000)
 ```
 
-See [docs/SATELLITE.md](../docs/SATELLITE.md) for how the Pi voice client works, and [docs/deployment/MULTI_DEVICE_REACHABILITY.md](../docs/deployment/MULTI_DEVICE_REACHABILITY.md) for private access (Tailscale Serve via Host Availability), in-app room-speaker mint (`POST /api/v1/device-auth/satellites`), phone pairing, CLI recovery (`task devices:*`), and turn-origin delivery across multiple nodes.
+See [docs/SATELLITE.md](../docs/SATELLITE.md) for how the Pi voice client works, and [docs/deployment/MULTI_DEVICE_REACHABILITY.md](../docs/deployment/MULTI_DEVICE_REACHABILITY.md) for private access (Tailscale Serve via Host Availability), room-speaker pairing (Rooms **Connect speaker**), phone pairing, CLI recovery (`task devices:*`), and turn-origin delivery across multiple nodes.
 
 ## Project Structure
 
@@ -90,7 +90,7 @@ See `docs/CORE_TOOLS.md` (smart_home tools) and `docs/proposals/partial/HA_FIRST
 
 The frontend Smart Home panel reads `GET /api/v1/smart-home/status` for connection state, controllable devices by HA area, and a link to open Home Assistant. First-time connect uses the in-panel Connect form. Room speakers are managed from **Rooms & devices** (not a Smart Home Endpoints sub-mode).
 
-**Rooms & devices** (`PresencePanel`) reads `GET /api/v1/presence/` for live and provisioned devices (This Mac, phones, room speakers; online/offline/revoked), assigns rooms via presence APIs, mints room-speaker credentials via `POST /api/v1/device-auth/satellites`, pairs phones/browsers via pairing codes, and revokes via `POST /api/v1/presence/devices/{device_id}/revoke`.
+**Rooms & devices** (`PresencePanel`) reads `GET /api/v1/presence/` for live and provisioned devices (This Mac, phones, room speakers; online/offline/revoked), assigns rooms via presence APIs, pairs room speakers from the Host (**Connect speaker** / LAN pair, with CLI fallback), pairs phones/browsers via pairing codes, and revokes via `POST /api/v1/presence/devices/{device_id}/revoke`. `POST /api/v1/device-auth/satellites` remains CLI recovery.
 
 ## Latency Toolkit
 

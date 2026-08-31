@@ -217,6 +217,85 @@ async def test_browser_pairing_sets_http_only_cookie_without_exposing_token(
 
 
 @pytest.mark.asyncio
+async def test_phone_pairing_omits_token_from_json(rest_device_db):
+    from api.routes import device_auth as device_auth_route
+
+    issued = await device_auth_service.issue_pairing_code(owner_id="owner-phone")
+    app = FastAPI()
+    app.include_router(device_auth_route.router, prefix="/api/v1")
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/device-auth/pair",
+            json={
+                "code": issued.code,
+                "node_id": "phone-1",
+                "client_surface": "phone",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "device_token" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_satellite_pairing_returns_token_once_and_retires_old_cred(
+    rest_device_db,
+):
+    from api.routes import device_auth as device_auth_route
+
+    old, _ = await device_auth_service.create_device_credential(
+        owner_id="owner-sat",
+        node_id="jarvis-satellite-1",
+        kind="satellite",
+    )
+    issued = await device_auth_service.issue_pairing_code(
+        owner_id="owner-sat",
+        node_label="Bedroom Speaker",
+        capabilities=["mic", "speaker"],
+    )
+    app = FastAPI()
+    app.include_router(device_auth_route.router, prefix="/api/v1")
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/device-auth/pair",
+            json={
+                "code": issued.code,
+                "node_id": "jarvis-satellite-1",
+                "client_surface": "satellite",
+            },
+        )
+        replay = client.post(
+            "/api/v1/device-auth/pair",
+            json={
+                "code": issued.code,
+                "node_id": "jarvis-satellite-1",
+                "client_surface": "satellite",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["device_token"].startswith("jarvis_")
+    assert body["node_id"] == "jarvis-satellite-1"
+    assert "set-cookie" not in response.headers
+    assert replay.status_code == 401
+
+    devices = {
+        device.device_id: device
+        for device in await device_auth_service.list_devices(owner_id="owner-sat")
+    }
+    assert devices[old.device_id].revoked_at is not None
+    active = [
+        device
+        for device in devices.values()
+        if device.node_id == "jarvis-satellite-1" and device.revoked_at is None
+    ]
+    assert len(active) == 1
+    assert active[0].kind == "satellite"
+    assert active[0].device_id != old.device_id
+
+
+@pytest.mark.asyncio
 async def test_pairing_succeeds_when_stale_credential_cleanup_fails(
     rest_device_db,
     monkeypatch,
@@ -322,3 +401,25 @@ async def test_create_satellite_credential_route_returns_token_once(rest_device_
     assert result.backend_ws_url == "wss://macbook-pro.tail131191.ts.net/api/v1/ws"
     devices = await device_auth_service.list_devices(owner_id="owner-ui")
     assert any(device.node_id == result.node_id and device.kind == "satellite" for device in devices)
+
+
+@pytest.mark.asyncio
+async def test_mint_ws_ticket_returns_409_when_disconnected(rest_device_db):
+    from api.routes import device_auth as device_auth_route
+    from core.auth.device_models import WsTicketRequest
+
+    _, token = await device_auth_service.create_device_credential(
+        owner_id="owner-rest",
+        node_id="bedroom-sat",
+        kind="satellite",
+    )
+    devices = await device_auth_service.list_devices(owner_id="owner-rest")
+    await device_auth_service.disconnect_device(devices[0].device_id)
+
+    with pytest.raises(HTTPException) as exc:
+        await device_auth_route.mint_ws_ticket(
+            _request(),
+            WsTicketRequest(device_token=token),
+        )
+    assert exc.value.status_code == 409
+    assert "disconnected" in str(exc.value.detail).lower()

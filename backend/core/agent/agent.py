@@ -33,14 +33,12 @@ from core.plugins.capabilities import (
 )
 from core.plugins.dispatcher import dispatcher
 from core.plugins.registry import registry
-from core.prompts import PromptBuilder
-from core.prompts.builder import PromptMode
-from core.tool_router import active_tool_fqns, search_result_fqns
+from core.prompts import PromptBuilder, PromptBuilderLike
+from core.tool_router import active_tool_fqns, discovered_fqns
 from services.perf import perf
 
 logger = logging.getLogger(__name__)
 
-_SEARCH_TOOLS_FQN = "system.search_tools"
 _LLM_STALL_TEXT = "I'm sorry, the model stream stalled before I could finish."
 _LLM_LOOP_TEXT = "I'm sorry, sir. I seem to have encountered a logical loop."
 
@@ -106,9 +104,13 @@ class AgentEvent:
 class JarvisAgent:
     """Agent loop: stream model events, dispatch CapabilityCalls, continue until final text."""
 
-    def __init__(self, llm_service: LLMService):
+    def __init__(
+        self,
+        llm_service: LLMService,
+        prompt_builder: PromptBuilderLike | None = None,
+    ):
         self.llm = llm_service
-        self.prompt_builder = PromptBuilder()
+        self.prompt_builder = prompt_builder or PromptBuilder()
 
     async def process_stream(
         self,
@@ -117,7 +119,6 @@ class JarvisAgent:
         session_id: str,
         context: Optional[Dict[str, Any]] = None,
         max_iterations: int = 10,
-        prompt_mode: PromptMode = PromptMode.FULL,
         reasoning_effort: str | None = None,
     ):
         local_history = list(conversation_history)
@@ -132,14 +133,11 @@ class JarvisAgent:
         user_profile = context.pop("user_profile", None)
         routed_tools = set(context.pop("routed_tools", None) or ())
         action_capable = bool(context.pop("action_capable", True))
-        active_fqns = active_tool_fqns(routed_tools)
 
         perf.start("prompt_build", session_id)
         context_prompt = self.prompt_builder.build(
             runtime_context=context,
             user_profile=user_profile,
-            mode=prompt_mode,
-            action_capable=action_capable,
         )
         perf.end("prompt_build", session_id)
 
@@ -147,7 +145,7 @@ class JarvisAgent:
         local_history, ctx_stats = await compact_history(
             local_history, context_prompt,
             llm_service=self.llm,
-            session_id=session_id,
+            owner_id=str(owner_id),
         )
         perf.end("ctx_budget", session_id)
         yield AgentEvent(type=AgentEventType.CONTEXT_METRICS, content=json.dumps(ctx_stats))
@@ -170,10 +168,12 @@ class JarvisAgent:
                 local_history=local_history,
                 context_prompt=context_prompt,
                 session_id=session_id,
-                active_fqns=active_fqns,
+                active_fqns=routed_tools,
                 action_capable=action_capable,
                 max_iterations=max_iterations,
                 reasoning_effort=reasoning_effort,
+                source=context.get("source"),
+                trigger_decision=context.get("trigger_decision"),
             ):
                 yield event
         finally:
@@ -189,8 +189,15 @@ class JarvisAgent:
         action_capable: bool,
         max_iterations: int,
         reasoning_effort: str | None,
+        source: str | None,
+        trigger_decision: str | None,
     ):
         for turn in range(max_iterations):
+            active_fqns = active_tool_fqns(
+                active_fqns,
+                trigger_decision=trigger_decision,
+                source=source,
+            )
             llm_stream_meta: dict[str, Any] = {}
             llm_started_at = time.monotonic()
 
@@ -380,7 +387,7 @@ class JarvisAgent:
                 local_history.append(
                     tool_result_message(wire.call_id, observation, wire.name)
                 )
-                if outcome.capability == _SEARCH_TOOLS_FQN:
-                    active_fqns |= search_result_fqns(outcome.data)
+                if outcome.status == InvocationStatus.SUCCEEDED:
+                    active_fqns |= discovered_fqns(outcome.data)
 
         yield AgentEvent(type=AgentEventType.ERROR, content=_LLM_LOOP_TEXT)

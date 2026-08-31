@@ -15,7 +15,7 @@ def _event(
     title: str = "LinkedIn coffee with Jerry",
     start: str = "2026-05-27T14:00:00+00:00",
     end: str = "2026-05-27T15:00:00+00:00",
-    account: str = "personal",
+    account: str = "google",
     scope: str = "event",
     series_id: str | None = None,
 ) -> CalendarEvent:
@@ -40,7 +40,7 @@ class _FakeCalendar:
             title="Updated event",
             start="2026-05-27T15:00:00+00:00",
             end="2026-05-27T16:00:00+00:00",
-            account="personal",
+            account="google",
         ))
         events = [event] if event else []
         self.list_events = AsyncMock(return_value=CalendarQueryResult(
@@ -63,7 +63,7 @@ class _FakeCalendar:
             title="New event",
             start="2026-05-27T14:00:00+00:00",
             end="2026-05-27T15:00:00+00:00",
-            account="personal",
+            account="google",
         ))
 
     async def _get_event(self, event_id: str, account: str | None = None) -> CalendarEvent:
@@ -91,7 +91,7 @@ async def test_delete_event_fetches_target_before_approval(monkeypatch):
 
     result = await plugin.delete_event(
         event_id="evt-1",
-        account="personal",
+        account="google",
         expected_title="coffee",
         calendar=fake_calendar,
     )
@@ -99,10 +99,10 @@ async def test_delete_event_fetches_target_before_approval(monkeypatch):
     assert result.code == "approval_needed"
     assert "LinkedIn coffee with Jerry" in captured["description"]
     assert "evt-1" in captured["detail"]
-    assert "Account: personal" in captured["detail"]
+    assert "Account: google" in captured["detail"]
     assert captured["result"].content == 'Deleted "LinkedIn coffee with Jerry".'
-    fake_calendar.get_event.assert_awaited_once_with("evt-1", account="personal")
-    fake_calendar.delete_event.assert_awaited_once_with("evt-1", account="personal")
+    fake_calendar.get_event.assert_awaited_once_with("evt-1", account="google")
+    fake_calendar.delete_event.assert_awaited_once_with("evt-1", account="google")
 
 
 @pytest.mark.asyncio
@@ -117,7 +117,7 @@ async def test_delete_event_missing_target_does_not_create_approval(monkeypatch)
 
     result = await plugin.delete_event(
         event_id="missing",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -137,7 +137,7 @@ async def test_delete_event_expected_title_mismatch_refuses(monkeypatch):
 
     result = await plugin.delete_event(
         event_id="lecture",
-        account="personal",
+        account="google",
         expected_title="Jerry",
         calendar=fake_calendar,
     )
@@ -167,7 +167,7 @@ async def test_delete_event_provider_not_found_result_is_error(monkeypatch):
 
     await plugin.delete_event(
         event_id="evt-1",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -184,7 +184,7 @@ async def test_create_event_exact_duplicate_returns_existing_event():
         title="Quiet Mode Test",
         start="2026-05-27T14:00:00+00:00",
         end="2026-05-27T15:00:00+00:00",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -207,7 +207,7 @@ async def test_create_event_same_title_overlap_returns_existing_event():
         title="Quiet Mode Test",
         start="2026-05-27T14:05:00+00:00",
         duration_minutes=15,
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -225,7 +225,7 @@ async def test_create_event_non_duplicate_still_creates():
         title="Quiet Mode Test",
         start="2026-05-27T14:00:00+00:00",
         end="2026-05-27T15:00:00+00:00",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -243,7 +243,7 @@ async def test_create_event_normalizes_natural_start_and_duration_string(monkeyp
         title="Coffee",
         start="May 27 2027 at 2pm",
         duration_minutes="90m",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -262,7 +262,7 @@ async def test_update_event_expected_title_mismatch_refuses():
         event_id="evt-1",
         start="2026-05-27T15:00:00+00:00",
         expected_title="Test Alert Silent Mode",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -279,8 +279,8 @@ async def test_update_event_expected_target_updates_when_matched():
         event_id="evt-1",
         start="2026-05-27T15:00:00+00:00",
         expected_title="Quiet Mode",
-        expected_account="personal",
-        account="personal",
+        expected_account="google",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -296,12 +296,12 @@ async def test_update_event_always_fetches_target_before_write():
     result = await plugin.update_event(
         event_id="evt-1",
         start="2026-05-27T15:00:00+00:00",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
     assert result.id == "evt-1"
-    fake_calendar.get_event.assert_awaited_once_with("evt-1", account="personal")
+    fake_calendar.get_event.assert_awaited_once_with("evt-1", account="google")
     fake_calendar.update_event.assert_awaited_once()
 
 
@@ -316,7 +316,7 @@ async def test_update_recurring_event_requires_explicit_scope():
     result = await plugin.update_event(
         event_id="evt-1",
         start="2026-05-27T15:00:00+00:00",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -337,7 +337,7 @@ async def test_update_recurring_series_uses_series_id():
         event_id="evt-1",
         title="Updated series",
         scope="series",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -367,6 +367,27 @@ async def test_search_events_defaults_to_calendar_year(tool_context, monkeypatch
     time_min, time_max = fake_calendar.search_events.await_args.args[1:3]
     assert time_min.startswith("2026-01-01T00:00:00")
     assert time_max.startswith("2027-01-01T00:00:00")
+
+
+@pytest.mark.asyncio
+async def test_get_next_event_looks_past_all_day_clutter(tool_context, monkeypatch):
+    plugin = CalendarPlugin()
+    fake_calendar = _FakeCalendar(_event())
+    fixed_now = datetime(2026, 8, 11, 15, 0, tzinfo=ZoneInfo("Australia/Sydney"))
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    monkeypatch.setattr("plugins.calendar.datetime", _FixedDateTime)
+
+    with tool_context(timezone="Australia/Sydney"):
+        await plugin.get_next_event(calendar=fake_calendar)
+
+    assert fake_calendar.list_events.await_args.kwargs["max_results"] == 200
 
 
 @pytest.mark.asyncio
@@ -427,7 +448,7 @@ async def test_create_event_passes_recurrence():
         title="Annual review",
         start="2026-03-20",
         end="2026-03-21",
-        account="personal",
+        account="google",
         scope="series",
         series_id="series-1",
         recurrence="yearly",
@@ -438,7 +459,7 @@ async def test_create_event_passes_recurrence():
         start="2026-03-20",
         all_day=True,
         recurrence="yearly",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -460,7 +481,7 @@ async def test_create_all_day_duplicate_returns_existing_event():
         title="Charlotte Birthday",
         start="2026-03-20",
         all_day=True,
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -481,7 +502,7 @@ async def test_create_all_day_conflict_check_uses_rfc3339_window(tool_context, m
             start="2026-03-20",
             all_day=True,
             recurrence="yearly",
-            account="personal",
+            account="google",
             calendar=fake_calendar,
         )
 
@@ -506,7 +527,7 @@ async def test_update_event_converts_one_off_with_recurrence():
         title="Charlotte Birthday",
         start="2026-03-20",
         end="2026-03-21",
-        account="personal",
+        account="google",
         scope="series",
         series_id="evt-1",
         recurrence="yearly",
@@ -515,7 +536,7 @@ async def test_update_event_converts_one_off_with_recurrence():
     result = await plugin.update_event(
         event_id="evt-1",
         recurrence="yearly",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 
@@ -536,7 +557,7 @@ async def test_update_occurrence_recurrence_requires_series_scope():
     result = await plugin.update_event(
         event_id="evt-1",
         recurrence="yearly",
-        account="personal",
+        account="google",
         calendar=fake_calendar,
     )
 

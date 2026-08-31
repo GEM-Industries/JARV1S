@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from enum import Enum
 from ipaddress import ip_address, ip_network
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 WS_PATH = "/api/v1/ws"
 TAILNET_CGNAT = ip_network("100.64.0.0/10")
@@ -47,6 +47,13 @@ def classify_host(hostname: str) -> BackendUrlTarget:
     if addr.is_private:
         return BackendUrlTarget.LAN_PRIVATE
     return BackendUrlTarget.PUBLIC
+
+
+def api_base_from_backend_url(backend_url: str) -> str:
+    """HTTP origin used for pairing and ws-ticket, derived from backend_url."""
+    parts = urlsplit(backend_url)
+    scheme = "https" if parts.scheme == "wss" else "http"
+    return urlunsplit((scheme, parts.netloc, "", "", ""))
 
 
 def allow_insecure_ws_override() -> bool:

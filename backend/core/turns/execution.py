@@ -20,7 +20,6 @@ from core.plugins.capabilities import (
     set_capability_turn_id,
     take_stashed_execution_invocations,
 )
-from core.prompts.builder import PromptMode
 from core.routing.policies import RoutingPolicy, SYSTEM_POLICY, TEXT_POLICY, VOICE_POLICY
 from core.setup.readiness import require_llm_ready
 from core.time import build_turn_time_context
@@ -71,11 +70,6 @@ def resolve_tool_routing_request(
         )
 
     return None
-
-
-def resolve_prompt_mode(source: str) -> PromptMode:
-    """Pick the prompt surface from turn origin, not delivery mechanics."""
-    return PromptMode.FULL if source == "user" else PromptMode.BACKGROUND
 
 
 def format_tool_call_trace(spoken_text: str, preview: str) -> str:
@@ -165,6 +159,13 @@ async def execute_turn(
 
     # Inject user profile for system prompt
     context["user_profile"] = await get_profile_block(owner_id)
+    if source == "user":
+        try:
+            from plugins.agents.work import load_open_roster
+
+            context["open_work_block"] = await load_open_roster(owner_id)
+        except Exception:
+            logger.debug("Open-work roster unavailable", exc_info=True)
 
     # Tool Router: semantic plugin match for this turn's tools= set.
     # Always-on FQNs are unioned later in JarvisAgent. User turns route on the
@@ -277,7 +278,6 @@ async def execute_turn(
     try:
         async for event in turn_agent.process_stream(
             user_content, db_history, connection_id, context=context,
-            prompt_mode=resolve_prompt_mode(source),
             reasoning_effort=turn_reasoning_effort,
         ):
             if event.type == AgentEventType.REASONING:

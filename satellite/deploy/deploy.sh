@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SATELLITE_HOST="${SATELLITE_HOST:-jarvis-satellite-1.local}"
-SATELLITE_USER="${SATELLITE_USER:-pi}"
+if [ -z "${SATELLITE_USER:-}" ]; then
+  REMOTE="$("${SCRIPT_DIR}/resolve-remote.sh")"
+  SATELLITE_USER="${REMOTE%@*}"
+else
+  REMOTE="${SATELLITE_USER}@${SATELLITE_HOST}"
+fi
 REMOTE_ROOT="${REMOTE_ROOT:-/home/${SATELLITE_USER}/.jarvis-satellite}"
 REMOTE_APP="${REMOTE_ROOT}/app"
 SERVICE_NAME="${SERVICE_NAME:-jarvis-satellite}"
@@ -27,13 +33,11 @@ default_brain_host() {
 SATELLITE_BRAIN_HOST="${SATELLITE_BRAIN_HOST:-$(default_brain_host)}"
 SATELLITE_BACKEND_URL="${SATELLITE_BACKEND_URL:-ws://${SATELLITE_BRAIN_HOST}:8000/api/v1/ws}"
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SATELLITE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd -- "${SATELLITE_DIR}/.." && pwd)"
 FRONTEND_SOUNDS_DIR="${REPO_ROOT}/frontend/public/sounds"
 WAKEWORD_MODEL="${REPO_ROOT}/backend/resources/models/wakeword/Jarvis.onnx"
 SATELLITE_EDGE_WAKEWORD="${SATELLITE_EDGE_WAKEWORD:-0}"
-REMOTE="${SATELLITE_USER}@${SATELLITE_HOST}"
 
 echo "Deploying ${SATELLITE_DIR} to ${REMOTE}:${REMOTE_APP}"
 ssh "${REMOTE}" "mkdir -p '${REMOTE_APP}' '${REMOTE_ROOT}/models'"
@@ -110,6 +114,13 @@ if [ "${EDGE_WAKE_ENABLED}" = "1" ]; then
   UV_SYNC_EXTRAS="--extra wakeword"
 fi
 ssh "${REMOTE}" "export PATH=\"\$HOME/.local/bin:\$PATH\" && cd '${REMOTE_APP}' && uv sync ${UV_SYNC_EXTRAS}"
+ssh "${REMOTE}" "mkdir -p \"\$HOME/.local/bin\""
+scp "${SCRIPT_DIR}/jarvis-satellite.sh" "${REMOTE}:/home/${SATELLITE_USER}/.local/bin/jarvis-satellite"
+ssh "${REMOTE}" "chmod +x \"\$HOME/.local/bin/jarvis-satellite\""
+ssh "${REMOTE}" bash -s <<'EOF'
+grep -q "jarvis-satellite-path" "$HOME/.bashrc" 2>/dev/null && exit 0
+printf '\n# jarvis-satellite-path\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$HOME/.bashrc"
+EOF
 ssh "${REMOTE}" "mkdir -p '/home/${SATELLITE_USER}/.config/systemd/user' && cp '${REMOTE_APP}/deploy/jarvis-satellite.service' '/home/${SATELLITE_USER}/.config/systemd/user/${SERVICE_NAME}.service'"
 ssh "${REMOTE}" "systemctl --user daemon-reload && systemctl --user enable '${SERVICE_NAME}.service' && systemctl --user restart '${SERVICE_NAME}.service'"
 

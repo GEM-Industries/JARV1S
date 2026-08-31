@@ -31,6 +31,13 @@ def test_instant_controls_stay_quiet():
     assert phrase_for("system.set_volume") is None
     assert phrase_for("spotify.pause") is None
     assert phrase_for("smart_home.control_lights") is None
+    assert phrase_for("profile.add_memory") is None
+    assert phrase_for("profile.update_memory") is None
+    assert phrase_for("profile.remember") is None
+
+
+def test_memory_lookups_still_get_a_spoken_phrase():
+    assert phrase_for("profile.recall") in PHRASES
 
 
 def test_missing_capability_stays_quiet():

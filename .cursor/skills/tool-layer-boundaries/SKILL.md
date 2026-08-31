@@ -10,7 +10,8 @@ Use the narrowest layer that owns the problem:
 - `backend/plugins/<name>/__init__.py`: LLM-facing tools, docstrings, parameter normalization, consent, and user-shaped return values.
 - `backend/plugins/<name>/client.py` or provider modules: external API URLs, payloads, parsing, request retry/refresh mechanics, and provider-specific errors.
 - `backend/core/integrations/`: dependency injection, client lifecycle, scope validation, and cached-client refresh.
-- `backend/core/auth/`: OAuth token storage, refresh, scope checks, and reauth signaling.
+- `backend/core/integrations/lifecycle/`: the only connect/disconnect/reconcile mutation path (`oauth.py`, `composio.py`, `bespoke.py`).
+- `backend/core/auth/`: OAuth grant custody (Keychain-backed tokens, Mongo metadata), refresh, scope checks, and reauth signaling.
 - `backend/core/decorators.py`: `@tool` metadata only (inject list, signature, return schema).
 - `backend/core/plugins/dispatcher.py`: runtime injection, auth translation, `ToolResult` unwrap, and invocation ledger.
 - `backend/services/watchers/` and `backend/services/push/`: background polling/push adapters only; do not hide API failures as empty data unless the integration is genuinely unconfigured.

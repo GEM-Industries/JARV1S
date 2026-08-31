@@ -5,6 +5,7 @@ Keeps integration connection/load workflows out of delivery layers such as
 REST routes and voice-facing plugins. Submodules:
 
 - `composio`: reconcile/connect/disconnect for Composio-backed integrations
+- `oauth`:    start/complete/disconnect for Google/Microsoft grants
 - `bespoke`:  non-Composio MCP bridges + local plugin teardown
 - `_shared`:  cross-submodule types, errors, and registry helpers
 """
@@ -32,6 +33,11 @@ from core.integrations.lifecycle.composio import (
     reconcile_composio_startup,
     reconcile_integration,
 )
+from core.integrations.lifecycle.oauth import (
+    complete_grant,
+    disconnect_grant,
+    start_authorize,
+)
 
 __all__ = [
     "DisconnectResult",
@@ -41,7 +47,9 @@ __all__ = [
     "IntegrationUnavailableError",
     "IntegrationView",
     "ReconcileResult",
+    "complete_grant",
     "create_connect_link",
+    "disconnect_grant",
     "disconnect_integration",
     "get_declared_composio_configs",
     "get_integration",
@@ -50,5 +58,6 @@ __all__ = [
     "reconcile_composio_startup",
     "reconcile_integration",
     "refresh_non_composio_integrations",
+    "start_authorize",
     "teardown_local_integration",
 ]

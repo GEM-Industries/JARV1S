@@ -59,7 +59,7 @@ Product experience: [`PRODUCT_BRIEF.md`](./PRODUCT_BRIEF.md). Holographic direct
 ### 7. History Hydration (Transcript Persistence)
 **Pattern:** REST for initial load, WebSocket for live updates.
 - **On connect:** `JarvisClient.loadHistory()` fetches `GET /api/v1/history/` and populates the Zustand transcript — only when empty (prevents duplicate on reconnect).
-- **Types:** User/assistant turns, capability-call receipts parsed from the existing preview string (`plugin.tool({…})`, collapsed by default), and provider reasoning (`type: "reasoning"`, correlated by `response_id`, collapsed by default via `isCollapsed`). Consecutive assistant text, receipts, and reasoning render as one Jarvis turn so live and reloaded history match. Receipts are a local holographic panel, not a chat-kit tool card; rich outcomes still belong to widgets.
+- **Types:** User/assistant turns, capability-call receipts parsed from the existing preview string (`plugin.tool({…})`, collapsed by default), and provider reasoning (`type: "reasoning"`, correlated by `response_id`, collapsed by default via `isCollapsed`). Consecutive assistant text, receipts, and reasoning share a Jarvis turn only while they share `turn_id`. Unsolicited system speech is a separate Jarvis turn labeled Notice. Receipts are a local holographic panel, not a chat-kit tool card; rich outcomes still belong to widgets.
 - **Live:** All subsequent turns arrive via WebSocket as normal (`conversation.transcript`, `conversation.response`, `conversation.reasoning` on text turns).
 - **Why REST, not WebSocket:** Bulk history load over WebSocket would block the connection handshake. REST is fire-and-forget, keeps WS clean for real-time events.
 
@@ -125,10 +125,17 @@ Feature panels compose shared controls rather than recreating Tailwind recipes:
 **Pattern:** StatusBar workspace for things that hear/speak (This Mac, phones, room speakers).
 - **Entry:** Smart Home overview **Rooms & devices → Manage** opens `PresencePanelContent` (`activeOverlay: 'presence'`) in `StatusBarSurfaceHost` (`workspace-narrow`). Title copy is **Rooms & devices**. Header `leading` back opens `smart_home` so the host morphs in place.
 - **Data:** `presenceApi.getPresence()` fetches `GET /api/v1/presence/` when the panel opens, on manual refresh, and when `presence.changed` bumps Zustand. Backend merges in-memory WebSocket sessions with Mongo `ws_device_credentials`. Optional HA room list powers **Assign room**.
-- **Content:** Devices grouped Online / Offline / Revoked with plain kind labels (`Room speaker`, `This Mac`, `Phone`), room, capabilities, last seen, and active badges. Setup cards: **Add room speaker** (mint + copy blocks + poll until online) and **Pair a phone or browser** (QR/code, gated on private access when remote).
-- **Actions:** **Assign room** (`presenceApi.assignNodeRoom`), **View turns** (morphs to Activity workspace), **Remove access** (confirm-gated revoke; disabled for this device and live-only nodes without a credential). Empty/offline copy points at next steps in plain language (finish private access, add room speaker) — not CLI tasks.
-- **Availability link:** Private Tailscale access lives in **Settings → Availability** (`HostSettings` + `enableHostServe`); room-speaker mint prefers the Serve origin for `backend_ws_url`. Opening Availability from Rooms & devices uses `openOverlay('settings', …)` so the host morphs.
+- **Content:** Devices grouped Online / Offline with plain kind labels (`Room speaker`, `This Mac`, `Phone`), room, capabilities, last seen, and status. Setup cards: **Add a device** collapsible rows for **Phone** (QR/code, gated on private access when remote) and **Room speaker** (**Connect speaker** — Host LAN-pairs first; fallback is a paste-able `jarvis-satellite pair` on the speaker). Offline room speakers expose one primary **Reconnect** action; remaining actions live in `ActionMenu`.
+- **Actions:** **Assign room** is the room name (or “Assign room”) as a `TextLink` (`presenceApi.assignNodeRoom`). **Reconnect** tries Host LAN pair against that speaker’s `node_id` (keeps its room), then the same fallback command. Overflow holds check-again, copy address, Activity, and Remove access (confirm-gated revoke; disabled for this device and live-only nodes without a credential). Empty/offline copy points at next steps in plain language (finish private access, add room speaker) — not CLI tasks.
+- **Availability link:** Private Tailscale access lives in **Settings → Availability** (`HostSettings` + `enableHostServe`); Host LAN pair (and the fallback command) include the Serve origin. Opening Availability from Rooms & devices uses `openOverlay('settings', …)` so the host morphs.
 - **Why not SDUI:** Operational surface for multi-device trust — same StatusBar workspace pattern as Smart Home and Activity.
+
+### 13. Apps
+**Pattern:** StatusBar workspace for connection trust — one Apps flow regardless of OS permission, direct OAuth, or cloud connector.
+- **Entry:** StatusBar **Apps** opens `IntegrationsPanel` (`activeOverlay: 'integrations'`).
+- **Data:** `integrationsApi` + `oauthApi` when the panel opens. Connection labels: **On this Mac**, **Direct** / **Advanced**, **Cloud connector — powered by Composio**.
+- **Connect:** Gmail/Google uses bundled `product_oauth.json` when present (provider sign-in); otherwise Advanced. Calendar can use EventKit without OAuth. Composio apps use Connect Link and mount only an explicit `tools` allowlist.
+- **Why not SDUI:** Inspection/setup over `IntegrationView` and provider grants, not a pushed widget.
 
 ---
 
@@ -155,7 +162,7 @@ Feature panels compose shared controls rather than recreating Tailwind recipes:
   ```
 - **Frontend defaults:** `JarvisClient` persists `node_id` in `localStorage`, sends `capabilities=mic,speaker,display`, and passes optional location refs from URL query params (`room_id`, `room_name`, `ha_area_id`, `ha_device_id`, `ha_entity_id`). It does not send `owner_id`; the backend derives that from trusted configuration/auth.
 - **Ephemeral GPS:** On connect and foreground, the client sends `context.update` with `{source=gps, …}`. Desktop uses the Host Core Location bridge; phone/browser use the Geolocation API. No IP fallback. Denied/unavailable clears session location (`location: null`).
-- **Device credentials:** Browser pairing (Rooms & devices / Availability) sets a same-origin `HttpOnly`, `SameSite=Strict` cookie; durable device tokens are not stored in JavaScript-accessible storage. Room speakers use a one-time minted bearer token from `POST /device-auth/satellites` (shown once in UI). Pairing links contain a short-lived one-time code and QR images are generated locally.
+- **Device credentials:** Browser pairing (Rooms & devices / Availability) sets a same-origin `HttpOnly`, `SameSite=Strict` cookie; durable device tokens are not stored in JavaScript-accessible storage. Room speakers consume a pairing code via Host LAN pair (`POST` to the speaker `:8742/pair`) or fallback `jarvis-satellite pair` (`POST /device-auth/pair`, `client_surface=satellite`); `POST /device-auth/satellites` remains CLI recovery. Pairing links contain a short-lived one-time code and QR images are generated locally.
 - **Preferences:** User-facing runtime preferences are backend-owned. `system.connect` includes the current `preferences` snapshot, `preferences.update` broadcasts changes, and the frontend writes changes through REST (`PATCH /api/v1/preferences/`) rather than `localStorage` so browser and satellite behavior stays aligned.
 - **Targeting:**
   - **User Turn:** Response routed only to the requesting socket.
@@ -182,6 +189,7 @@ frontend/
 │   ├── client/              # The Headless Core
 │   │   ├── JarvisClient.ts  # Logic: WS, Audio, DeviceID
 │   │   ├── integrationsApi.ts # REST client for /api/v1/integrations
+│   │   ├── oauthApi.ts        # REST client for /api/v1/auth (Google/Microsoft)
 │   │   ├── operationsApi.ts   # REST client for activity + operations drill-down
 │   │   ├── smartHomeApi.ts    # REST client for /api/v1/smart-home/status
 │   │   └── presenceApi.ts     # REST client for /api/v1/presence

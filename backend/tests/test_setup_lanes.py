@@ -1,3 +1,5 @@
+import json
+
 from core.integrations.manager import IntegrationManager
 from core.setup.lanes import compute_capability_lanes
 from core.setup.runtime import jarvis_runtime
@@ -161,9 +163,13 @@ def test_search_lane_ready_without_optional_providers(monkeypatch):
     assert "Built-in web search" in (search.detail or "")
 
 
-def test_integrations_lane_ready_when_product_oauth_configured(monkeypatch):
-    monkeypatch.setattr("core.auth.providers.settings.GOOGLE_OAUTH_CLIENT_ID", "cid")
-    monkeypatch.setattr("core.auth.providers.settings.MICROSOFT_OAUTH_CLIENT_ID", None)
+def test_integrations_lane_ready_when_product_oauth_configured(monkeypatch, tmp_path):
+    path = tmp_path / "product_oauth.json"
+    path.write_text(
+        json.dumps({"google": {"client_id": "cid", "client_secret": "secret"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JARVIS_PRODUCT_OAUTH", str(path))
     monkeypatch.setattr(
         "core.setup.lanes.credential_store.get_stored_secret",
         lambda name: None,
@@ -236,6 +242,21 @@ def test_background_agents_lane_optional_without_key(monkeypatch):
 
     assert background_agents.status == "optional"
     assert "Anthropic" in (background_agents.detail or "")
+
+
+def test_background_agents_lane_configured_when_cursor_connected(monkeypatch):
+    monkeypatch.setattr(
+        "core.setup.lanes.credential_store.get_stored_secret",
+        lambda name: "cursor-key" if name == "CURSOR_API_KEY" else None,
+    )
+    monkeypatch.setattr(jarvis_runtime, "background_agent_ready", False)
+
+    background_agents = next(
+        lane for lane in compute_capability_lanes() if lane.id == "background_agents"
+    )
+
+    assert background_agents.status == "configured"
+    assert "Cursor" in (background_agents.detail or "")
 
 
 def test_background_agents_lane_configured_when_ready(monkeypatch):

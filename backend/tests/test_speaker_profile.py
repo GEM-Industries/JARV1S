@@ -12,6 +12,7 @@ from core.voice import speaker_profile as profile
 from core.voice.speaker_profile import (
     REQUIRED_CLIP_COUNT,
     SpeakerProfileError,
+    append_node_clip,
     delete_profile,
     get_profile_status,
     profile_path,
@@ -20,6 +21,7 @@ from core.voice.speaker_profile import (
 )
 from core.voice.speaker_verifier import (
     l2_normalize,
+    load_speaker_profile_parts,
     mean_centroid,
     save_speaker_profile,
     speaker_model_id,
@@ -198,3 +200,108 @@ def test_failed_replacement_preserves_existing_profile(tmp_path: Path, monkeypat
 def test_l2_normalize_rejects_zero() -> None:
     with pytest.raises(ValueError):
         l2_normalize(np.zeros(4, dtype=np.float32))
+
+
+def _enrolled_gallery() -> np.ndarray:
+    return np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.95, 0.05, 0.0, 0.0],
+            [0.9, 0.1, 0.0, 0.0],
+            [0.92, 0.08, 0.0, 0.0],
+            [0.93, 0.07, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+
+def test_v1_five_clip_profile_is_enrolled(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(profile.settings, "DATA_DIR", tmp_path)
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"fake")
+    monkeypatch.setattr(profile.settings.VOICE, "wakeword_speaker_model_path", str(model))
+    destination = profile_path("owner-a")
+    destination.parent.mkdir(parents=True)
+    save_speaker_profile(
+        destination,
+        model_id=speaker_model_id(model),
+        embeddings=_enrolled_gallery(),
+    )
+    status = get_profile_status("owner-a")
+    assert status.status == "enrolled"
+    assert status.node_ids == ()
+
+
+def test_append_node_clip_keeps_enrollment_rows(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(profile.settings, "DATA_DIR", tmp_path)
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"fake")
+    monkeypatch.setattr(profile.settings.VOICE, "wakeword_speaker_model_path", str(model))
+    destination = profile_path("owner-a")
+    destination.parent.mkdir(parents=True)
+    save_speaker_profile(
+        destination,
+        model_id=speaker_model_id(model),
+        embeddings=_enrolled_gallery(),
+    )
+    node_embedding = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+    with (
+        patch.object(profile, "load_speaker_extractor", return_value=object()),
+        patch.object(profile, "embed_pcm16", return_value=node_embedding),
+    ):
+        status = append_node_clip("owner-a", "sat-1", _pcm(duration_s=2.2))
+
+    assert status.status == "enrolled"
+    assert status.node_ids == ("sat-1",)
+    with np.load(destination, allow_pickle=False) as payload:
+        assert int(payload["format_version"].item()) == 2
+        assert payload["embeddings"].shape[0] == REQUIRED_CLIP_COUNT
+        assert list(payload["node_ids"]) == ["sat-1"]
+        assert payload["node_embeddings"].shape[0] == 1
+
+    other_embedding = np.array([0.1, 0.9, 0.0, 0.0], dtype=np.float32)
+    with (
+        patch.object(profile, "load_speaker_extractor", return_value=object()),
+        patch.object(profile, "embed_pcm16", return_value=other_embedding),
+    ):
+        append_node_clip("owner-a", "sat-1", _pcm(duration_s=2.2))
+    with np.load(destination, allow_pickle=False) as payload:
+        assert payload["node_embeddings"].shape[0] == 1
+
+
+def test_write_profile_preserves_node_embeddings(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(profile.settings, "DATA_DIR", tmp_path)
+    model = tmp_path / "model.onnx"
+    model.write_bytes(b"fake")
+    monkeypatch.setattr(profile.settings.VOICE, "wakeword_speaker_model_path", str(model))
+    destination = profile_path("owner-a")
+    destination.parent.mkdir(parents=True)
+    save_speaker_profile(
+        destination,
+        model_id=speaker_model_id(model),
+        embeddings=_enrolled_gallery(),
+        node_embeddings={"sat-1": np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)},
+    )
+    clips = [_pcm() for _ in range(REQUIRED_CLIP_COUNT)]
+    with (
+        patch.object(profile, "load_speaker_extractor", return_value=object()),
+        patch.object(profile, "embed_pcm16", side_effect=list(_enrolled_gallery())),
+    ):
+        status = write_profile("owner-a", clips)
+
+    assert status.node_ids == ("sat-1",)
+    enrollment, nodes = load_speaker_profile_parts(
+        destination,
+        model_id=speaker_model_id(model),
+        embedding_dim=4,
+    )
+    assert enrollment.shape[0] == REQUIRED_CLIP_COUNT
+    assert "sat-1" in nodes
+    assert nodes["sat-1"].ndim == 1
+
+
+def test_append_node_clip_requires_enrollment(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(profile.settings, "DATA_DIR", tmp_path)
+    with pytest.raises(SpeakerProfileError) as exc:
+        append_node_clip("owner-a", "sat-1", _pcm(duration_s=2.2))
+    assert exc.value.reason == "not_enrolled"

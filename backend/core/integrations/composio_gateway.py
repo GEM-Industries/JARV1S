@@ -13,7 +13,7 @@ Architecture:
   - One MCP server config per toolkit (persistent on Composio, created on first use)
   - Tools bridged into jarvis.<app_name>.* via MCPBridgePlugin + StreamableHTTPClient
   - Hot-reload: callback fires → discover tools → register plugin → update ToolRouter
-  - mcp_servers.yaml is optional: overrides utterances/allowlist/triggers per toolkit
+  - mcp_servers.json is optional: overrides utterances/allowlist/triggers per toolkit
 
 Prerequisites:
   - COMPOSIO_API_KEY in CredentialStore
@@ -728,7 +728,7 @@ class ComposioGateway:
         """Enable a Composio trigger instance for the user's connected account.
 
         Called automatically in on_app_connected for slugs declared in
-        mcp_servers.yaml (or passed as the triggers parameter), and
+        mcp_servers.json (or passed as the triggers parameter), and
         on-demand via the LLM-facing enable_trigger tool.
         """
         accounts = await self.list_connected_accounts(app_name)
@@ -967,14 +967,22 @@ class ComposioGateway:
         or during startup reconciliation. Hot-reloads tools into the live registry
         + ToolRouter without restart.
 
-        Optional overrides (from mcp_servers.yaml via lifecycle._get_config_overrides):
-          - tools_allowlist: explicit tools allowlist — only these tools are mounted
+        Optional overrides (from mcp_servers.json via lifecycle._get_config_overrides):
+          - tools_allowlist: host-owned allowlist — only these tools are mounted.
+            Missing or empty mounts nothing (fail-closed). User Home mcp.json is not Composio.
           - utterances_override: if provided, replaces auto-generated utterances
           - triggers: if provided, these Composio triggers are auto-registered
 
         ALL mounted tools are callable via jarvis.<app>.*. Tool routing and the
         per-turn tools= set are handled by ToolRouter using hybrid utterance + description embeddings.
         """
+        if not tools_allowlist:
+            logger.warning(
+                "Composio '%s': no tools allowlist; mounting nothing",
+                app_name,
+            )
+            return False
+
         mcp_url = await self.get_mcp_url(app_name)
         if not mcp_url:
             logger.warning(
@@ -1002,16 +1010,13 @@ class ComposioGateway:
 
         save_schema_cache(app_name, raw_tools)
 
-        if tools_allowlist is not None:
-            tools = [t for t in raw_tools if t["name"] in tools_allowlist]
-            logger.debug(
-                "Composio '%s': allowlist filtered to %d / %d tools",
-                app_name,
-                len(tools),
-                len(raw_tools),
-            )
-        else:
-            tools = raw_tools
+        tools = [t for t in raw_tools if t["name"] in tools_allowlist]
+        logger.debug(
+            "Composio '%s': allowlist filtered to %d / %d tools",
+            app_name,
+            len(tools),
+            len(raw_tools),
+        )
 
         # Derive utterances from ALL fetched tools for richer routing signals.
         utterances = utterances_override or generate_utterances(raw_tools, app_name)

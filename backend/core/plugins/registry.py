@@ -293,7 +293,7 @@ class PluginRegistry:
         return tools
 
     def estimate_schema_stats(self, fqns: Iterable[str]) -> tuple[int, int]:
-        """JSON-schema token budget for the given FQNs."""
+        """JSON-schema size for the given FQNs."""
         payload = self.provider_tools(fqns)
         if not payload:
             return 0, 0

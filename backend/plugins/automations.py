@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from core.context import get_owner_id, get_tz
 from core.decorators import tool
 from core.operations.events import publish_operations_changed
+from core.operations.projection import resolve_managed_setup
 from core.operations.setups import SetupPatch, patch_rule_lifecycle
 from core.plugins.mutations import merge_model_patch, validation_error_message
 from core.plugins.result import ToolResult
@@ -32,7 +33,6 @@ from core.triggers.service import trigger_service
 from core.triggers.vocabulary import DECISION_TELL, TriggerDecision
 from core.plugins.capabilities import CapabilityErrorDetail
 from services.database.mongodb import mongodb
-
 
 
 def _fail(message: str, code: str = "tool_error") -> CapabilityErrorDetail:
@@ -173,6 +173,30 @@ async def delete_automation_rule(owner_id: str, rule_id: str) -> TriggerRule | N
     await mongodb.db.automation_fired.delete_many({"rule_id": rule_id})
     await publish_operations_changed(owner_id, "automations")
     return rule
+
+
+async def _resolve_automation_rule_id(
+    owner_id: str,
+    token: str,
+) -> str | CapabilityErrorDetail:
+    needle = token.strip()
+    if not needle:
+        return _fail(f"No automation matching {needle!r}.")
+    # Exact ids are already on trigger_rules; skip the catalog scan.
+    existing = await mongodb.db.trigger_rules.find_one(
+        {"id": needle, "owner_id": owner_id, "origin.kind": "external"},
+    )
+    if existing:
+        return needle
+    resolved = await resolve_managed_setup(owner_id, needle, setup_type="automation")
+    if isinstance(resolved, list):
+        candidates = ", ".join(
+            f"{row.name} ({row.resource_ref})" for row in resolved[:8]
+        )
+        return _fail(f"Ambiguous automation. Retry with one resource_ref: {candidates}")
+    if resolved is not None:
+        return resolved.rule_id or resolved.resource_id
+    return _fail(f"No automation matching {needle!r}.")
 
 
 def _interval_trigger_error(trigger: dict[str, Any]) -> CapabilityErrorDetail | None:
@@ -596,8 +620,13 @@ class AutomationsPlugin(JarvisPlugin):
         Conditions may only use condition_fields from list_available_triggers for the rule source; do not invent fields.
         Use action={"instructions": "..."} or instructions=... for fire-time policy when the rule needs semantic judgment, unavailable fields, lifecycle behavior, or side-effect work; pass instructions="" to clear.
         paused_until: ISO datetime to pause until; use unpause_rule to resume immediately.
+        rule_id accepts the create_rule id or a unique automation name.
         """
         owner_id = get_owner_id()
+        resolved = await _resolve_automation_rule_id(owner_id, rule_id)
+        if isinstance(resolved, CapabilityErrorDetail):
+            return resolved
+        rule_id = resolved
         updates: dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
 
         if name is not None:
@@ -716,6 +745,10 @@ class AutomationsPlugin(JarvisPlugin):
     async def unpause_rule(self, rule_id: str) -> str | CapabilityErrorDetail:
         """Remove the pause from a specific rule, resuming it immediately."""
         owner_id = get_owner_id()
+        resolved = await _resolve_automation_rule_id(owner_id, rule_id)
+        if isinstance(resolved, CapabilityErrorDetail):
+            return resolved
+        rule_id = resolved
         try:
             await patch_rule_lifecycle(
                 owner_id,
@@ -730,16 +763,17 @@ class AutomationsPlugin(JarvisPlugin):
     async def delete_rule(self, rule_id: str) -> str | CapabilityErrorDetail:
         """
         Delete an external-event automation permanently.
-        Use rule_id from create_rule or setups.find(setup_type="automation").
+        rule_id accepts the create_rule id or a unique automation name.
         For other configured behavior, use setups.delete.
         """
         owner_id = get_owner_id()
+        resolved = await _resolve_automation_rule_id(owner_id, rule_id)
+        if isinstance(resolved, CapabilityErrorDetail):
+            return resolved
+        rule_id = resolved
         rule = await delete_automation_rule(owner_id, rule_id)
         if rule is None:
-            return _fail(
-                f"No external automation found with id '{rule_id}'. "
-                "Use setups.find(query=...) to locate other configured behavior."
-            )
+            return _fail(f"No automation matching {rule_id!r}.")
         return f"Rule '{rule_id}' deleted."
 
     @tool
@@ -750,6 +784,10 @@ class AutomationsPlugin(JarvisPlugin):
         Get event_id from calendar.get_events() or from the context of a fired alert.
         """
         owner_id = get_owner_id()
+        resolved = await _resolve_automation_rule_id(owner_id, rule_id)
+        if isinstance(resolved, CapabilityErrorDetail):
+            return resolved
+        rule_id = resolved
         result = await mongodb.db.trigger_rules.update_one(
             {"id": rule_id, "owner_id": owner_id, "origin.kind": "external"},
             {"$addToSet": {"suppressed_event_ids": event_id}},
@@ -767,7 +805,13 @@ class AutomationsPlugin(JarvisPlugin):
         """
         from services.automation import automation_service
 
+        owner_id = get_owner_id()
+        resolved = await _resolve_automation_rule_id(owner_id, rule_id)
+        if isinstance(resolved, CapabilityErrorDetail):
+            return resolved
+        rule_id = resolved
         results = await automation_service.test_rule(rule_id)
+        hold = automation_service.pause_observation()
 
         if results is None:
             rule = await mongodb.db.trigger_rules.find_one({
@@ -780,14 +824,16 @@ class AutomationsPlugin(JarvisPlugin):
             source = rule_model.origin.source or "unknown"
             event = rule_model.origin.event or ""
             event_label = f" ({event})" if event else ""
-            return (
+            body = (
                 f"This is a push-delivered trigger for '{source}'{event_label}. "
                 "It fires when Composio delivers a webhook — no dry-run is available. "
                 "The trigger is registered and will fire automatically when the event occurs."
             )
+            return f"{hold}\n{body}" if hold else body
 
         if not results:
-            return "No events match this rule in the current 24-hour window."
+            body = "No events match this rule in the current 24-hour window."
+            return f"{hold}\n{body}" if hold else body
 
         tz = get_tz()
         now_local = datetime.now(timezone.utc).astimezone(tz)
@@ -818,12 +864,15 @@ class AutomationsPlugin(JarvisPlugin):
             fired = " — already fired this cycle" if r.get("already_fired") else ""
             lines.append(f"  - {r['title']} {day} at {time_str} ({relative}){fired}")
 
-        return "\n".join(lines)
+        body = "\n".join(lines)
+        return f"{hold}\n{body}" if hold else body
 
     @tool
     async def pause_all(self, duration_minutes: Optional[int | str] = None) -> str | CapabilityErrorDetail:
         """
-        Globally pause all automations. duration_minutes: minutes or duration like "30m"/"2h"; omit for indefinite.
+        Globally pause all external automations. Does not pause scheduler lights,
+        alarms, or a named subset — use setups.pause for those.
+        duration_minutes: minutes or duration like "30m"/"2h"; omit for indefinite.
         Use resume_all to re-enable.
         """
         from services.automation import automation_service
@@ -855,7 +904,8 @@ class AutomationsPlugin(JarvisPlugin):
     @tool
     async def list_available_triggers(self, app_name: str) -> list[TriggerInfo]:
         """
-        List available triggers and condition fields for a source.
+        List trigger types and condition fields available to author a new rule for a source.
+        This is not an inventory of existing automations; use setups.find for configured rules.
         Built-in triggers include condition_fields for structured filters in create_rule/update_rule.
 
         provider="built-in": handled by JARV1S directly — works immediately, no connection needed.
@@ -864,8 +914,7 @@ class AutomationsPlugin(JarvisPlugin):
         RULE: if built-in triggers exist for this source, ALWAYS prefer them over composio.
         Built-in triggers are more reliable and don't require external connections.
 
-        ALWAYS call this ALONE in its own code block. Inspect the output, then call create_rule
-        in the NEXT code block using the exact .source and .event values from the result.
+        After inspecting the result, call create_rule with the exact source and event values.
         app_name: e.g. "gmail", "slack", "github".
         """
         from core.plugins.registry import registry

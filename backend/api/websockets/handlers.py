@@ -1349,15 +1349,28 @@ def _barge_in_evidence(session, *, endpointed: bool = False) -> BargeInEvidence:
     )
 
 
-def _stamp_owner_speaker(voice_turn: VoiceInputTurn | None, session) -> None:
+def _stamp_owner_speaker(
+    voice_turn: VoiceInputTurn | None,
+    evidence: SpeakerEvidence | None,
+    *,
+    source: str,
+) -> None:
     if voice_turn is None:
         return
-    evidence = getattr(session, "barge_in_speaker_evidence", None)
     if not isinstance(evidence, SpeakerEvidence) or not evidence.matched:
         return
     voice_turn.speaker_id = evidence.speaker_id
     voice_turn.speaker_confidence = evidence.cosine
-    voice_turn.speaker_source = "barge_in"
+    voice_turn.speaker_source = source
+
+
+async def _score_followup_speaker(session, pcm: bytes) -> SpeakerEvidence:
+    """One-shot owner score for a finalized follow-up. No barge-in rescore cache."""
+    verifier = getattr(session, "speaker_verifier", None)
+    if verifier is None or not verifier.enrolled:
+        return SpeakerEvidence(status=SpeakerMatchStatus.NOT_ENROLLED)
+    threshold = settings.VOICE.barge_in_speaker_threshold
+    return await asyncio.to_thread(verifier.verify_pcm, pcm, threshold=threshold)
 
 
 def _speaker_perf_fields(session) -> dict:
@@ -1446,6 +1459,7 @@ async def _ensure_barge_in_speaker_evidence(
             verifier.verify_pcm,
             pcm,
             threshold=threshold,
+            max_seconds=settings.VOICE.barge_in_speaker_onset_seconds,
         )
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
         session.barge_in_speaker_evidence = evidence
@@ -1478,7 +1492,11 @@ async def _commit_barge_in_candidate(session_id: str, session, *, reason: str) -
     voice_turn = getattr(session, "barge_in_candidate_turn", None) or session.voice_turn
     session.barge_in_candidate_committed = True
     _cancel_barge_in_candidate_task(session, reason=f"committed:{reason}")
-    _stamp_owner_speaker(voice_turn, session)
+    _stamp_owner_speaker(
+        voice_turn,
+        getattr(session, "barge_in_speaker_evidence", None),
+        source="barge_in",
+    )
     if voice_turn is not None:
         voice_turn.admission_source = "barge_in"
         voice_turn.admission_reason = reason
@@ -2021,6 +2039,13 @@ async def _commit_voice_turn(
     if getattr(session, "barge_in_candidate_committed", False):
         _clear_barge_in_candidate(session, reason="voice_turn_commit")
     _flush_turn_detector(session)
+    needs_followup_score = (
+        voice_turn.admission_source is None and not voice_turn.from_wake
+    )
+    speech_pcm = b""
+    if needs_followup_score:
+        peek = getattr(session.processor, "peek_turn_speech_audio", None)
+        speech_pcm = peek() if callable(peek) else b""
     turn_audio = session.processor.consume_turn_audio()
     voice_turn.last_endpoint_monotonic = time.monotonic()
     streamed_transcript, stt_stats = await _finish_streaming_stt(
@@ -2075,9 +2100,11 @@ async def _commit_voice_turn(
             voice_turn.admission_source = "wake"
             voice_turn.admission_reason = "wake_word"
         else:
+            speaker_evidence = await _score_followup_speaker(session, speech_pcm)
             admission = decide_followup_admission(
                 FollowupEvidence(
                     transcript=voice_turn.transcript_text,
+                    speaker_status=speaker_evidence.status,
                     directedness=Directedness.UNKNOWN,
                 )
             )
@@ -2091,6 +2118,7 @@ async def _commit_voice_turn(
                 return
             voice_turn.admission_source = "followup"
             voice_turn.admission_reason = admission.reason
+            _stamp_owner_speaker(voice_turn, speaker_evidence, source="followup")
 
     coverage = _stt_coverage_fields(len(turn_audio), int(stt_stats.get("bytes_fed", 0)))
     perf.log(
@@ -2582,7 +2610,10 @@ async def handle_audio_stream(session_id: str, message: WSMessage) -> None:
             if message.data.get("encoding") == "base64"
             else audio_data
         )
-        
+        session.ingest_voice_sample(audio_bytes)
+        if session.voice_sample_buffer is not None:
+            return
+
         # 1. Process with SpeechProcessor. While soft-muted, keep a short pre-roll so the
         # wake word is included in STT context without retaining ambient conversation.
         soft_muted = bool(getattr(session, "soft_muted", False))

@@ -1,8 +1,9 @@
 """
 CalendarProvider Protocol.
 
-Each backend (Google, Outlook, …) implements this interface. The UnifiedCalendarClient
-fans out across providers for reads and routes writes to a single provider by account label.
+Each backend (Google, Outlook, EventKit, …) implements this interface. The
+UnifiedCalendarClient fans out across providers for reads and routes writes
+to a single provider by connection name (`google` | `microsoft` | `macos`).
 
 Providers return already-parsed CalendarEvent / EventConfirmation — raw dicts do not cross
 the protocol boundary. Google-specific and Graph-specific shapes are reconciled inside
@@ -27,34 +28,30 @@ class ProviderEventBatch:
 
 
 class _ProviderBase:
-    """Shared transport + account-stamping for provider implementations.
-
-    Not an abstract class — just a thin mixin-style base so GoogleProvider and
-    OutlookProvider don't copy-paste the same four fields and one helper.
-    """
+    """Shared httpx transport and account-stamping for Google and Outlook."""
 
     name: str = ""  # overridden by subclasses
 
-    def __init__(self, client: httpx.AsyncClient, account: Optional[str] = None):
+    def __init__(self, client: httpx.AsyncClient):
         self._client = client
-        self._account = account
 
     @property
     def client(self) -> httpx.AsyncClient:
         """Transport client — exposed for the push adapter's watch registration."""
         return self._client
 
-    def _stamp(self, event: CalendarEvent) -> CalendarEvent:
-        if self._account is None:
-            return event
-        return event.model_copy(update={"account": self._account})
+    def _stamp(self, event: CalendarEvent, calendar: Optional[str] = None) -> CalendarEvent:
+        update = {"account": self.name}
+        if calendar:
+            update["calendar"] = calendar
+        return event.model_copy(update=update)
 
 
 @runtime_checkable
 class CalendarProvider(Protocol):
     """Minimal async interface every calendar backend must satisfy."""
 
-    name: str  # "google" | "microsoft"
+    name: str  # "google" | "microsoft" | "macos"
 
     async def list_events(
         self,
@@ -82,7 +79,7 @@ class CalendarProvider(Protocol):
         all_day: bool = False,
         recurrence: Optional[CalendarRecurrence] = None,
         tz_name: Optional[str] = None,
-    ) -> EventConfirmation:
+    ) -> EventConfirmation | CapabilityErrorDetail:
         """Create an event on this provider's primary calendar."""
         ...
 
@@ -99,7 +96,7 @@ class CalendarProvider(Protocol):
         add_meet: bool = False,
         recurrence: Optional[CalendarRecurrence] = None,
         tz_name: Optional[str] = None,
-    ) -> EventConfirmation:
+    ) -> EventConfirmation | CapabilityErrorDetail:
         """Patch an existing event. Only supplied fields change."""
         ...
 

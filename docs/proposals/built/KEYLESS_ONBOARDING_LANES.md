@@ -2,8 +2,8 @@
 
 **Status:** Built (Phases 1–4)  
 **Date:** 2026-06-24  
-**Updated:** 2026-07  
-**Superseded by:** [ARCHITECTURE.md](../../ARCHITECTURE.md) for normative runtime behavior; [ROADMAP.md](../../ROADMAP.md) for what ships next.  
+**Updated:** 2026-08  
+**Superseded by:** [ARCHITECTURE.md](../../ARCHITECTURE.md) for normative runtime behavior; [ROADMAP.md](../../ROADMAP.md) for what ships next; [LOCAL_FIRST_INTEGRATIONS.md](../LOCAL_FIRST_INTEGRATIONS.md) for connection custody.  
 **Related:** `docs/proposals/GUIDED_CREDENTIAL_ACQUISITION.md`, `backend/core/setup/`, `backend/core/credentials/`, `backend/core/auth/`, `backend/core/integrations/`
 
 ---
@@ -32,7 +32,7 @@ Phases 1–4 shipped the capability-lane substrate and the first keyless default
 - **Weather** — Open-Meteo default, keyless lane.
 - **Search** — built-in DDGS → optional SearXNG / Exa behind `jarvis.search.web`.
 - **Voice lanes** — Apple Speech input is ready when its helper reports permission and assets available; Cartesia input/output report `configured` only when a stored Cartesia key exists.
-- **Google/Microsoft** — first-party OAuth metadata path; browser consent without per-user Cloud Console setup in the normal product flow.
+- **Google/Microsoft** — official Google Desktop identity is bundled `product_oauth.json` (`JARVIS_PRODUCT_OAUTH`); Connect Gmail is provider sign-in. Microsoft and forks without that file use Apps → Advanced.
 
 ---
 
@@ -45,8 +45,8 @@ Phases 1–4 shipped the capability-lane substrate and the first keyless default
 | `keyless` | None | Open-Meteo weather, built-in DDGS search |
 | `local_service` | Install/start local sidecar | Ollama/LM Studio/llama.cpp, SearXNG, local STT |
 | `api_key_optional` | Paste key only for upgrade | Exa search, Cartesia voice |
-| `oauth_consent` | Browser consent only | Google Calendar/Gmail, Microsoft calendar/mail |
-| `brokered_connect` | Broker consent link | Composio long-tail apps |
+| `oauth_consent` | Browser consent only | Google Calendar/Gmail (Direct when product identity is bundled), Microsoft calendar/mail |
+| `brokered_connect` | Broker consent link | Composio long-tail apps (Apps: Cloud connector) |
 | `manual_handoff` | Human setup remains | Home Assistant device commissioning, Tailscale login |
 
 Lane status values: `ready`, `configured`, `optional`, `degraded`, `needs_action`.
@@ -57,15 +57,15 @@ Weather uses Open-Meteo. Search works keyless via built-in DDGS; optional SearXN
 
 ### 3. First-Party OAuth Apps
 
-JARV1S ships first-party Google/Microsoft app metadata; users authorize accounts in the browser. Public ingress remains for push/webhooks, not for local account connect.
+Official Google identity ships in `product_oauth.json`. Users authorize in the provider browser; Advanced is the BYO client path. Public ingress remains for push/webhooks, not for local account connect.
 
 ### 4. Credential Store For Unavoidable Secrets
 
-`CredentialStore` holds host-only secrets that cannot be keyless or consent-only. Integration factories resolve `config_keys` lazily so saved keys apply without restart.
+`CredentialStore` holds host-only secrets that cannot be keyless or consent-only, including OAuth access/refresh tokens. Integration factories resolve `config_keys` lazily so saved keys apply without restart.
 
 ### 5. Brokers Stay Optional
 
-Composio remains the convenience path for long-tail integrations. No Nango/Pipedream/Arcade migration in this slice.
+Composio remains the explicit cloud-connector path for long-tail integrations. No Nango/Pipedream/Arcade migration in this slice.
 
 ---
 
@@ -79,7 +79,7 @@ Composio remains the convenience path for long-tail integrations. No Nango/Piped
 
 ### Phase 2 — Consent-Only Google/Microsoft ✅
 
-- First-party OAuth app metadata; browser consent in the normal path
+- First-party OAuth app metadata; browser consent in the normal path. Later: official Google identity is bundled `product_oauth.json`; see [LOCAL_FIRST_INTEGRATIONS.md](../LOCAL_FIRST_INTEGRATIONS.md).
 
 ### Phase 3 — Search Provider Ladder ✅
 

@@ -27,6 +27,7 @@ class PresenceNode(BaseModel):
     last_seen_at: datetime | None = None
     active: bool = False
     device_id: str | None = None
+    disconnected: bool = False
 
 
 class PresenceView(BaseModel):
@@ -36,6 +37,14 @@ class PresenceView(BaseModel):
 
 class RevokeDeviceResponse(BaseModel):
     revoked: bool
+
+
+class DisconnectDeviceResponse(BaseModel):
+    disconnected: bool
+
+
+class ResumeDeviceResponse(BaseModel):
+    resumed: bool
 
 
 class AssignNodeRoomRequest(BaseModel):

@@ -2,7 +2,7 @@
 
 **Status:** Proposed
 **Date:** 2026-06-11
-**Related:** `docs/research/ONBOARDING_EXPERIENCE_REVIEW.md`, `backend/core/credentials/`, `backend/core/setup/`
+**Related:** `docs/research/ONBOARDING_EXPERIENCE_REVIEW.md`, `docs/proposals/LOCAL_FIRST_INTEGRATIONS.md`, `backend/core/credentials/`, `backend/core/setup/`
 
 ---
 
@@ -68,7 +68,7 @@ Playbooks gain an optional `assist:` section (per-step URLs/selectors/expected p
 
 ### Tier 2 — Agentic navigation (opt-in, narrow)
 
-Full agent-driven navigation (browser-use-style) for the genuinely tedious flows — e.g. Google Cloud's *create project → enable API → configure consent screen → create OAuth client* sequence, which today costs hours and is the single worst setup in the project (`INTEGRATION_SETUP.md`'s "4-hour ceremony").
+Full agent-driven navigation (browser-use-style) for remaining API-key consoles and the Advanced/fork OAuth-app-creation path. Official Google connect no longer uses Cloud Console — see [LOCAL_FIRST_INTEGRATIONS.md](./LOCAL_FIRST_INTEGRATIONS.md). The old `INTEGRATION_SETUP.md` "4-hour ceremony" is Advanced only.
 
 Hard constraints, non-negotiable:
 
@@ -80,7 +80,7 @@ Hard constraints, non-negotiable:
 
 The LLM plans and acts on *page structure*; secrets flow harness → `CredentialStore` without model visibility — the same boundary the `sensitive_data` patterns enforce.
 
-Tier 2 is justified by exactly one class of flow today (OAuth app creation in cloud consoles). If the Integration Foundry proposal's ecosystem-OAuth work removes that need, Tier 2 may never need to ship — which is the right kind of optionality.
+Tier 2 is justified by remaining cloud-console ceremonies (forks, Advanced BYO clients, other providers). Official Google connect is already provider sign-in; if later product clients cover the rest, Tier 2 may never need to ship.
 
 ---
 
@@ -122,7 +122,7 @@ Tier 0 has **no new dependencies**. Tier 1/2 add Playwright, isolated behind one
 
 **Phase 3 — Agentic flows (Tier 2, opt-in)**
 - Agent-planned navigation under the constraint set above
-- Target: OAuth app creation ceremonies only; re-evaluate need after ecosystem-OAuth work
+- **Target:** remaining OAuth-app-creation ceremonies (Advanced/forks, other providers); re-evaluate after more product clients ship
 
 ---
 

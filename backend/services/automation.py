@@ -312,6 +312,15 @@ class AutomationService:
         """True if the global automation pause is active at `now`."""
         return self._paused_until is not None and now < self._paused_until
 
+    def pause_observation(self, now: datetime | None = None) -> str | None:
+        """Model-facing hold when the engine will not fire, or None when live."""
+        if not self.is_paused(now or datetime.now(timezone.utc)):
+            return None
+        return (
+            "External automations are globally paused. Matching rules stay active "
+            "but will not fire. Call automations.resume_all."
+        )
+
     def iter_upcoming_protocol_fires(
         self, now: datetime, window_end: datetime
     ) -> list[dict]:

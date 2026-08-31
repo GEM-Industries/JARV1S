@@ -53,6 +53,7 @@ class _ToolIndexEntry:
     plugin: str
     description: str
     signature: str
+    parameter_names: list[str]
     required_parameter_names: list[str]
     parameters: dict[str, str]
     search_text: str
@@ -75,6 +76,7 @@ class DiscoveredTool(BaseModel):
     name: str
     plugin: str
     description: str
+    signature: str = ""
     parameters: dict[str, str] = Field(default_factory=dict)
 
 
@@ -293,6 +295,15 @@ def _search_tokens(text: str) -> set[str]:
     return set(_TOKEN_RE.findall(text.replace("_", " ").lower()))
 
 
+def _card_parameters(entry: _ToolIndexEntry) -> dict[str, str]:
+    required = set(entry.required_parameter_names)
+    parameters = dict(entry.parameters)
+    for name in entry.parameter_names:
+        if name not in parameters:
+            parameters[name] = "required" if name in required else "optional"
+    return parameters
+
+
 def _tool_card(fqn: str, entry: _ToolIndexEntry) -> DiscoveredTool:
     tool_name = fqn.split(".", 1)[1]
     return DiscoveredTool(
@@ -300,7 +311,8 @@ def _tool_card(fqn: str, entry: _ToolIndexEntry) -> DiscoveredTool:
         name=tool_name,
         plugin=entry.plugin,
         description=entry.description,
-        parameters=entry.parameters,
+        signature=entry.signature,
+        parameters=_card_parameters(entry),
     )
 
 
@@ -339,6 +351,7 @@ async def _ensure_tool_index() -> None:
             plugin=definition.plugin,
             description=first_line,
             signature=sig_str,
+            parameter_names=param_names,
             required_parameter_names=required_param_names,
             parameters=param_docs,
             search_text=text,
@@ -366,6 +379,7 @@ async def _ensure_tool_vectors() -> None:
             plugin=entry.plugin,
             description=entry.description,
             signature=entry.signature,
+            parameter_names=entry.parameter_names,
             required_parameter_names=entry.required_parameter_names,
             parameters=entry.parameters,
             search_text=entry.search_text,
@@ -694,7 +708,7 @@ class SystemPlugin(JarvisPlugin):
         """Search mounted jarvis.* tools by name/docs, with semantic fallback.
 
         Use when a needed capability is not among the tools offered this turn.
-        Results include the exact FQN and parameter hints. The runtime offers
+        Results include the exact FQN, calling signature, and parameter hints. The runtime offers
         returned tools on the next iteration — call the newly offered tool then.
         If no mounted result fits and the user needs an external service, try
         composio.search_catalog next.
@@ -1107,21 +1121,52 @@ class SystemPlugin(JarvisPlugin):
     @tool
     async def connect_integration(self, name: str) -> ToolResult | CapabilityErrorDetail:
         """
-        Start the connection flow for any integration (OAuth or Composio).
-        For Google/Microsoft-backed integrations (calendar, gmail), pushes an OAuth setup widget.
-        For Composio integrations (spotify, github, slack, notion), sends a Connect Link widget.
+        Start the connection flow for any integration (OAuth, this Mac, or Composio).
+        Calendar on the Host Mac requests macOS Calendar access. Google/Microsoft/Spotify-backed
+        integrations (gmail, spotify, or calendar off-Host) push an OAuth setup widget.
+        For Composio integrations (github, slack, notion), sends a Connect Link widget.
         "Connect Calendar", "Set up Google auth", "Link my Spotify" → this tool.
-        name: the integration name (e.g. 'calendar', 'gmail', 'spotify') or provider ('google').
+        name: the integration name (e.g. 'calendar', 'gmail', 'spotify') or provider ('google', 'macos').
         VOICE: Say "I've sent you a setup widget — follow the steps on screen."
         """
         from core.integrations.manager import integrations as integrations_mgr
 
         name = name.strip().lower().replace(" ", "_")
 
+        if name in {"calendar", "macos"}:
+            from plugins.calendar.providers.eventkit import (
+                CALENDAR_ACCESS_DENIED,
+                authorize_macos_calendar,
+                host_calendar_configured,
+                macos_calendar_denied,
+                macos_calendar_message,
+                macos_calendar_status,
+            )
+
+            if host_calendar_configured():
+                try:
+                    needs_macos = (
+                        name == "macos"
+                        or await macos_calendar_status() != "authorized"
+                    )
+                except Exception:
+                    needs_macos = True
+                if needs_macos:
+                    try:
+                        status = await authorize_macos_calendar()
+                    except Exception as exc:
+                        return _fail(f"Could not request Calendar access on this Mac: {exc}")
+                    if macos_calendar_denied(status):
+                        return _fail(CALENDAR_ACCESS_DENIED, "permission_needed")
+                    return ToolResult(content=macos_calendar_message(status))
+
         provider = integrations_mgr.resolve_oauth_provider(name)
 
         if provider:
-            return await self._connect_oauth_provider(provider)
+            from core.auth.providers import BUILTIN_PROVIDERS
+
+            plugin = None if name in BUILTIN_PROVIDERS else name
+            return await self._connect_oauth_provider(provider, plugin=plugin)
 
         from core.integrations.lifecycle import (
             IntegrationLifecycleError,
@@ -1150,29 +1195,27 @@ class SystemPlugin(JarvisPlugin):
             ui=[envelope],
         )
 
-    async def _connect_oauth_provider(self, provider: str) -> ToolResult:
-        """Build the OAuthWidget ToolResult for a bespoke OAuth provider (google, microsoft)."""
+    async def _connect_oauth_provider(
+        self, provider: str, *, plugin: str | None = None
+    ) -> ToolResult:
+        """Build the OAuthWidget ToolResult for a bespoke OAuth provider."""
         from core.auth.manager import auth_manager
         from core.auth.providers import is_connectable
 
-        account_email = None
-        try:
-            token = await auth_manager.get_token(provider)
-            account_email = token.account_email
-        except Exception:
-            pass
-
-        if account_email:
-            return ToolResult(content=f"{provider.title()} is already connected as {account_email}.")
+        token = await auth_manager.peek_grant(provider)
+        if token:
+            return ToolResult(
+                content=f"{provider.title()} is already connected as {token.account_email}."
+            )
 
         connectable = await is_connectable(provider)
+        data: dict = {"provider": provider}
+        if plugin:
+            data["plugin"] = plugin
         envelope = UIEnvelope(
             widget_id=generate_id(f"oauth-{provider}-"),
             component="OAuthWidget",
-            data={
-                "provider": provider,
-                "account_email": account_email,
-            },
+            data=data,
             layout=WidgetLayout(size=WidgetSize.WIDE, priority=15),
             title=f"{provider.title()} OAuth",
         )
@@ -1198,15 +1241,18 @@ class SystemPlugin(JarvisPlugin):
         from core.integrations.manager import integrations
         normalized = name.strip().lower()
 
-        if normalized in integrations.get_bespoke_providers():
-            from core.auth.manager import auth_manager
-            await auth_manager.delete_provider(normalized)
-            return f"Disconnected {name}. You'll need to re-authorize next time you use a {name} integration."
-
         from core.integrations.lifecycle import (
             IntegrationLifecycleError,
+            disconnect_grant,
             disconnect_integration as disconnect_integration_lifecycle,
         )
+
+        if normalized in integrations.get_bespoke_providers():
+            try:
+                await disconnect_grant(normalized)
+            except IntegrationLifecycleError as e:
+                return str(e)
+            return f"Disconnected {name}. You'll need to re-authorize next time you use a {name} integration."
 
         try:
             result = await disconnect_integration_lifecycle(name)
@@ -1223,8 +1269,8 @@ class SystemPlugin(JarvisPlugin):
         Force-reset a broken Composio integration by purging its stale MCP server and auth config,
         then reconnecting from scratch. Use when an integration shows as connected but tools fail
         with auth errors like "Auth config could not be resolved".
-        name: the Composio toolkit slug (e.g. 'spotify', 'github', 'slack').
-        "Fix Spotify auth", "Reset Spotify connection", "Spotify tools aren't working" → this tool.
+        name: the Composio toolkit slug (e.g. 'github', 'slack').
+        "Fix GitHub auth", "Reset Slack connection" → this tool.
         """
         from core.integrations.composio_gateway import get_composio_gateway
         from core.integrations.lifecycle import (

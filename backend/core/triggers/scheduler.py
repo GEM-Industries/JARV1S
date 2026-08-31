@@ -13,7 +13,7 @@ from typing import Optional
 from services.database.mongodb import mongodb
 from services.events import Event, EventType, event_bus
 
-from core.triggers.lifecycle import rule_doc_allows_dispatch
+from core.triggers.lifecycle import is_scheduler_managed, rule_doc_allows_dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class TriggerScheduler:
         if self.running:
             return
         await self._recover_orphans()
+        await self._rematerialize_missing_recurring()
         self.running = True
         self._task = asyncio.create_task(self._poll_loop())
         logger.info("TriggerScheduler started")
@@ -204,6 +205,30 @@ class TriggerScheduler:
             logger.info(
                 "Recovered %d orphaned trigger instances to awaiting_delivery",
                 result.modified_count,
+            )
+
+    async def _rematerialize_missing_recurring(self) -> None:
+        """Create the next pending occurrence for scheduler series that have none."""
+        now = datetime.now(timezone.utc)
+        cursor = mongodb.db.trigger_rules.find(
+            {
+                "enabled": True,
+                "surface": True,
+                "management.provider": "scheduler",
+                "origin.kind": {"$in": ["time", "interval"]},
+                "origin.recurrence": {"$nin": [None, ""]},
+            }
+        )
+        rules = await cursor.to_list(None)
+        for rule_doc in rules:
+            if not is_scheduler_managed(rule_doc):
+                continue
+            if not rule_doc_allows_dispatch(rule_doc, now=now):
+                continue
+            await self._maybe_schedule_next(
+                rule_doc["id"],
+                {"owner_id": rule_doc["owner_id"]},
+                now,
             )
 
 

@@ -62,9 +62,17 @@ async def _recent_tasks(owner_id: str, limit: int) -> list[ActivityItem]:
         {"owner_id": owner_id},
         {"events": 0, "_id": 0},
     ).sort("created_at", -1).limit(limit)
-    docs = await cursor.to_list(length=limit)
-    items: list[ActivityItem] = []
+    docs = await cursor.to_list(length=limit * 4)
+    collapsed: list[dict] = []
+    seen: set[str] = set()
     for doc in docs:
+        key = str(doc.get("work_id") or doc.get("task_id") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        collapsed.append(doc)
+    items: list[ActivityItem] = []
+    for doc in collapsed[:limit]:
         status = doc.get("status", "running")
         if status == "running":
             outcome: ActivityOutcome = "running"
@@ -72,7 +80,12 @@ async def _recent_tasks(owner_id: str, limit: int) -> list[ActivityItem]:
             outcome = "failed"
         else:
             outcome = "completed"
-        summary = (doc.get("progress_summary") or doc.get("prompt") or "Background task")[:SUMMARY_CHARS]
+        summary = (
+            doc.get("title")
+            or doc.get("progress_summary")
+            or doc.get("prompt")
+            or "Working"
+        )[:SUMMARY_CHARS]
         ts = doc.get("completed_at") or doc.get("created_at")
         when, sort_at = _time_fields_from_dt(ts)
         items.append(

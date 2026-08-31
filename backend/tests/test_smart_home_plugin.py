@@ -11,7 +11,7 @@ import pytest
 
 from core.auth.device_models import DeviceCredentialSummary, DeviceLocation
 import plugins.smart_home as smart_home
-from plugins.smart_home import SmartHomePlugin
+from plugins.smart_home import SmartHomePlugin, _state_mismatches
 from plugins.smart_home.domains import (
     brightness_pct_from_ha,
     capabilities_for_entity,
@@ -464,6 +464,40 @@ def test_clamp_light_params_prefers_rgb_on_conflict() -> None:
     assert result == {"rgb_color": [255, 128, 0]}
 
 
+def test_clamp_light_params_maps_warm_white_to_kelvin() -> None:
+    entity = InventoryEntity(
+        entity_id="light.rgb_bulb",
+        name="RGB Bulb",
+        domain="light",
+        state="on",
+        supported_color_modes=["color_temp", "rgb"],
+        min_color_temp_kelvin=2000,
+        max_color_temp_kelvin=6500,
+    )
+    assert clamp_light_params(entity, {"color_name": "Warm White"}) == {
+        "color_temp_kelvin": 2700
+    }
+    assert clamp_light_params(entity, {"color_name": "orange"}) == {
+        "rgb_color": [255, 146, 20]
+    }
+    assert clamp_light_params(entity, {"color_name": "vivid orange"}) == {
+        "color_name": "orange"
+    }
+
+
+def test_clamp_light_params_keeps_brightness_when_hue_unsupported() -> None:
+    entity = InventoryEntity(
+        entity_id="light.bedroom_1",
+        name="Bedroom 1",
+        domain="light",
+        state="on",
+        supported_color_modes=["color_temp"],
+    )
+    assert clamp_light_params(
+        entity, {"rgb_color": [255, 128, 0], "brightness_pct": 40}
+    ) == {"brightness_pct": 40}
+
+
 def test_clamp_light_params_accepts_color_name_and_rgb_dict() -> None:
     entity = InventoryEntity(
         entity_id="light.rgb_bulb",
@@ -490,6 +524,51 @@ def test_clamp_light_params_rejects_legacy_light_params() -> None:
     )
     with pytest.raises(ValueError, match="Unsupported light parameter"):
         clamp_light_params(entity, {"brightness": 20})
+
+
+def test_clamp_light_params_parses_transition_duration() -> None:
+    entity = InventoryEntity(
+        entity_id="light.bedroom_1",
+        name="Bedroom 1",
+        domain="light",
+        state="off",
+        supported_color_modes=["brightness"],
+    )
+    assert clamp_light_params(entity, {"transition": "15 minutes"}) == {
+        "transition": 900
+    }
+    assert clamp_light_params(entity, {"transition": 10}) == {"transition": 10}
+    with pytest.raises(ValueError, match="Could not parse transition"):
+        clamp_light_params(entity, {"transition": "warm"})
+
+
+@pytest.mark.parametrize(
+    ("state", "expected", "payload", "want"),
+    [
+        (
+            {"state": "on", "attributes": {"brightness": 1}},
+            "on",
+            {"brightness_pct": 100, "transition": 900},
+            [],
+        ),
+        (
+            {"state": "on", "attributes": {}},
+            "off",
+            {"transition": 900},
+            [],
+        ),
+        (
+            {"state": "off", "attributes": {}},
+            "on",
+            {"transition": 900},
+            ["state=off"],
+        ),
+    ],
+)
+def test_state_mismatches_skips_light_levels_while_fading(
+    state: dict, expected: str, payload: dict, want: list[str]
+) -> None:
+    assert _state_mismatches(state, expected, payload) == want
 
 
 def test_entity_to_device_summary_includes_capabilities_and_area() -> None:
@@ -604,6 +683,14 @@ def test_search_inventory_matches_plural_domains_and_spoken_numbers() -> None:
     assert [m.entity_id for m in search_inventory(snapshot, "ambient light")] == [
         "light.bedroom_2"
     ]
+    assert [m.entity_id for m in search_inventory(snapshot, "Bedroom 1 and Bedroom 2")] == [
+        "light.bedroom_1",
+        "light.bedroom_2",
+    ]
+    assert [m.entity_id for m in search_inventory(snapshot, "dim the bedroom lights")] == [
+        "light.bedroom_1",
+        "light.bedroom_2",
+    ]
 
 
 def _mixed_room_snapshot() -> InventorySnapshot:
@@ -654,6 +741,21 @@ def test_parse_device_query_recognizes_global_light_scope() -> None:
     assert parsed.scope_all is True
     assert parsed.domain == "light"
     assert parsed.tokens == frozenset()
+    assert parsed.room_reference is False
+
+
+def test_parse_device_query_lights_in_here_is_room_reference() -> None:
+    parsed = parse_device_query("lights in here")
+    assert parsed.room_reference is True
+    assert parsed.domain == "light"
+    assert parsed.tokens == frozenset()
+
+
+def test_parse_device_query_strips_dim_verb_from_tokens() -> None:
+    parsed = parse_device_query("dim the bedroom lights")
+    assert parsed.domain == "light"
+    assert parsed.brightness_direction == "dimmer"
+    assert parsed.tokens == frozenset({"bedroom"})
 
 
 def test_search_inventory_all_lights_in_house_matches_only_lights() -> None:
@@ -697,6 +799,12 @@ def test_search_inventory_living_room_lights_scopes_to_area() -> None:
     snapshot = _mixed_room_snapshot()
     matches = search_inventory(snapshot, "living room lights")
     assert [m.entity_id for m in matches] == ["light.living_room"]
+
+
+def test_search_inventory_lights_in_here_uses_area_scope() -> None:
+    snapshot = _mixed_room_snapshot()
+    matches = search_inventory(snapshot, "lights in here", area_id="office")
+    assert [m.entity_id for m in matches] == ["light.office"]
 
 
 def test_search_inventory_office_fan_does_not_match_lights() -> None:
@@ -969,7 +1077,7 @@ async def test_control_devices_accepts_home_assistant_color_name(tool_context) -
             "light",
             "turn_on",
             ["light.grid_bulb_1", "light.grid_bulb_2"],
-            {"color_name": "green"},
+            {"rgb_color": [38, 255, 56]},
         )
     ]
 
@@ -1069,7 +1177,52 @@ async def test_adjust_lights_warmer_lowers_kelvin(tool_context) -> None:
 
 
 @pytest.mark.asyncio
-async def test_adjust_lights_rejects_warmth_and_named_color(tool_context) -> None:
+async def test_adjust_lights_named_color_sets_destination(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = TuyaFakeHAClient()
+
+    result = await plugin.adjust_lights(
+        "lights",
+        color="orange",
+        smart_home=client,
+    )
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        (
+            "light",
+            "turn_on",
+            ["light.grid_bulb_1", "light.grid_bulb_2"],
+            {"rgb_color": [255, 146, 20]},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adjust_lights_color_wins_over_warmth(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = TuyaFakeHAClient()
+
+    result = await plugin.adjust_lights(
+        "lights",
+        warmth="warmer",
+        color="orange",
+        smart_home=client,
+    )
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        (
+            "light",
+            "turn_on",
+            ["light.grid_bulb_1", "light.grid_bulb_2"],
+            {"rgb_color": [255, 146, 20]},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adjust_lights_orange_on_ct_only_uses_candle(tool_context) -> None:
     plugin = SmartHomePlugin()
     client = FakeHAClient()
 
@@ -1080,10 +1233,27 @@ async def test_adjust_lights_rejects_warmth_and_named_color(tool_context) -> Non
         smart_home=client,
     )
 
-    assert _text(result) == (
-        "Choose either warmth for white balance or color for a named hue, not both."
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        ("light", "turn_on", ["light.living_room"], {"color_temp_kelvin": 2000})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adjust_lights_warm_white_uses_kelvin(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    result = await plugin.adjust_lights(
+        "living",
+        color="warm white",
+        smart_home=client,
     )
-    assert client.service_calls == []
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        ("light", "turn_on", ["light.living_room"], {"color_temp_kelvin": 2700})
+    ]
 
 
 @pytest.mark.asyncio
@@ -1132,19 +1302,19 @@ async def test_adjust_lights_normalizes_more_color_phrase(tool_context) -> None:
             "light",
             "turn_on",
             ["light.grid_bulb_1"],
-            {"rgb_color": [255, 187, 131]},
+            {"rgb_color": [255, 197, 130]},
         ),
         (
             "light",
             "turn_on",
             ["light.grid_bulb_2"],
-            {"rgb_color": [56, 255, 7]},
+            {"rgb_color": [55, 255, 5]},
         ),
     ]
 
 
 @pytest.mark.asyncio
-async def test_adjust_lights_validates_all_targets_before_control(tool_context) -> None:
+async def test_adjust_lights_skips_targets_without_hue(tool_context) -> None:
     plugin = SmartHomePlugin()
     client = TuyaFakeHAClient()
 
@@ -1160,12 +1330,20 @@ async def test_adjust_lights_validates_all_targets_before_control(tool_context) 
 
     result = await plugin.adjust_lights(
         "lights",
-        color="more orange",
+        color="more blue",
         smart_home=client,
     )
 
-    assert getattr(result, "code", None) == "tool_error"
-    assert client.service_calls == []
+    assert "Home Assistant reports" in _text(result)
+    assert "Skipped Smart Bulb 2" in _text(result)
+    assert client.service_calls == [
+        (
+            "light",
+            "turn_on",
+            ["light.grid_bulb_1"],
+            {"rgb_color": [255, 221, 133]},
+        )
+    ]
 
 
 def test_parse_color_phrase_detects_relative_hue() -> None:
@@ -1186,18 +1364,80 @@ def test_resolve_hue_adjustment_shifts_rgb_toward_anchor() -> None:
         }
     )
     result = resolve_hue_adjustment("more orange", "slight", live)
-    assert result == {"rgb_color": [56, 255, 7]}
+    assert result == {"rgb_color": [55, 255, 5]}
 
 
-def test_resolve_hue_adjustment_absolute_uses_canonical_ha_color_name() -> None:
+def test_resolve_hue_adjustment_orange_uses_rgb_even_when_ct_supported() -> None:
     live = live_light_state_from_ha(
         {
             "entity_id": "light.bedroom",
             "state": "off",
-            "attributes": {"supported_color_modes": ["rgb", "color_temp"]},
+            "attributes": {
+                "supported_color_modes": ["rgb", "color_temp"],
+                "min_color_temp_kelvin": 2700,
+                "max_color_temp_kelvin": 6500,
+            },
         }
     )
-    assert resolve_hue_adjustment("orange", "slight", live) == {"color_name": "orange"}
+    assert resolve_hue_adjustment("orange", "slight", live) == {
+        "rgb_color": [255, 146, 20]
+    }
+    assert resolve_hue_adjustment("vivid orange", "slight", live) == {
+        "color_name": "orange"
+    }
+
+
+def test_resolve_hue_adjustment_named_hues_are_saturated() -> None:
+    live = live_light_state_from_ha(
+        {
+            "entity_id": "light.bedroom",
+            "state": "on",
+            "attributes": {"supported_color_modes": ["rgb"]},
+        }
+    )
+    assert resolve_hue_adjustment("orange", "slight", live) == {
+        "rgb_color": [255, 146, 20]
+    }
+    assert resolve_hue_adjustment("green", "slight", live) == {
+        "rgb_color": [38, 255, 56]
+    }
+    assert resolve_hue_adjustment("yellow", "slight", live) == {
+        "rgb_color": [255, 239, 20]
+    }
+    assert resolve_hue_adjustment("blue", "slight", live) == {
+        "rgb_color": [31, 158, 255]
+    }
+
+
+def test_resolve_hue_adjustment_warm_white_uses_kelvin() -> None:
+    live = live_light_state_from_ha(
+        {
+            "entity_id": "light.bedroom",
+            "state": "on",
+            "attributes": {
+                "supported_color_modes": ["rgb", "color_temp"],
+                "min_color_temp_kelvin": 2000,
+                "max_color_temp_kelvin": 6500,
+            },
+        }
+    )
+    assert resolve_hue_adjustment("warm white", "slight", live) == {
+        "color_temp_kelvin": 2700
+    }
+
+
+def test_resolve_hue_adjustment_skips_hue_on_color_temp_only() -> None:
+    live = live_light_state_from_ha(
+        {
+            "entity_id": "light.bedroom",
+            "state": "on",
+            "attributes": {"supported_color_modes": ["color_temp"]},
+        }
+    )
+    assert resolve_hue_adjustment("blue", "slight", live) is None
+    assert resolve_hue_adjustment("orange", "slight", live) == {
+        "color_temp_kelvin": 2000
+    }
 
 
 @pytest.mark.asyncio
@@ -1218,13 +1458,13 @@ async def test_adjust_lights_dimmer_and_more_orange(tool_context) -> None:
             "light",
             "turn_on",
             ["light.grid_bulb_1"],
-            {"rgb_color": [255, 187, 131], "brightness_pct": 1},
+            {"rgb_color": [255, 197, 130], "brightness_pct": 1},
         ),
         (
             "light",
             "turn_on",
             ["light.grid_bulb_2"],
-            {"rgb_color": [56, 255, 7], "brightness_pct": 1},
+            {"rgb_color": [55, 255, 5], "brightness_pct": 1},
         ),
     ]
 
@@ -1257,6 +1497,72 @@ async def test_adjust_lights_brightness_delta_uses_live_state(tool_context) -> N
 
 
 @pytest.mark.asyncio
+async def test_adjust_lights_direction_uses_amount_steps(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    async def _live_state(entity_id: str):
+        state = await FakeHAClient.get_state(client, entity_id)
+        if entity_id != "light.living_room" or entity_id in client.attribute_overrides:
+            return state
+        attrs = dict(state["attributes"])
+        attrs["brightness"] = 128
+        return {**state, "attributes": attrs}
+
+    client.get_state = _live_state
+
+    result = await plugin.adjust_lights(
+        "living",
+        direction="dimmer",
+        amount="normal",
+        smart_home=client,
+    )
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        ("light", "turn_on", ["light.living_room"], {"brightness_pct": 30})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adjust_lights_dim_query_does_not_require_direction(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    async def _live_state(entity_id: str):
+        state = await FakeHAClient.get_state(client, entity_id)
+        if entity_id != "light.living_room" or entity_id in client.attribute_overrides:
+            return state
+        attrs = dict(state["attributes"])
+        attrs["brightness"] = 128
+        return {**state, "attributes": attrs}
+
+    client.get_state = _live_state
+
+    result = await plugin.adjust_lights(
+        "dim the living room lights",
+        amount="normal",
+        smart_home=client,
+    )
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        ("light", "turn_on", ["light.living_room"], {"brightness_pct": 30})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adjust_lights_amount_alone_names_recovery(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    result = await plugin.adjust_lights("living", amount="normal", smart_home=client)
+
+    assert "direction=" in _text(result)
+    assert client.service_calls == []
+
+
+@pytest.mark.asyncio
 async def test_control_lights_in_here_scopes_to_current_room(tool_context) -> None:
     plugin = SmartHomePlugin()
     client = FakeHAClient()
@@ -1269,6 +1575,37 @@ async def test_control_lights_in_here_scopes_to_current_room(tool_context) -> No
 
     assert "Home Assistant reports" in _text(result)
     assert client.service_calls == [("light", "turn_off", ["light.living_room"], {})]
+
+
+@pytest.mark.asyncio
+async def test_control_lights_lights_in_here_scopes_to_current_room(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    with patch(
+        "plugins.smart_home.resolve_area_from_context",
+        AsyncMock(return_value="living_room"),
+    ):
+        result = await plugin.control_lights(
+            "lights in here", "off", smart_home=client
+        )
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [("light", "turn_off", ["light.living_room"], {})]
+
+
+@pytest.mark.asyncio
+async def test_control_lights_unmatched_query_lists_rooms(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    result = await plugin.control_lights(
+        "master bedroom lights", "on", smart_home=client
+    )
+
+    message = _text(result)
+    assert "No lights matched 'master bedroom lights'" in message
+    assert "Rooms:" in message
 
 
 @pytest.mark.asyncio
@@ -1287,6 +1624,48 @@ async def test_control_lights_in_here_brightness_rides_on_turn_on(tool_context) 
     assert "Home Assistant reports" in _text(result)
     assert client.service_calls == [
         ("light", "turn_on", ["light.living_room"], {"brightness_pct": 30})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_control_lights_passes_transition_seconds(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    result = await plugin.control_lights(
+        "living room",
+        "on",
+        brightness_pct=100,
+        transition="15 minutes",
+        smart_home=client,
+    )
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        (
+            "light",
+            "turn_on",
+            ["light.living_room"],
+            {"brightness_pct": 100, "transition": 900},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_control_lights_warm_white_uses_kelvin(tool_context) -> None:
+    plugin = SmartHomePlugin()
+    client = FakeHAClient()
+
+    result = await plugin.control_lights(
+        "living room",
+        "on",
+        color_name="warm white",
+        smart_home=client,
+    )
+
+    assert "Home Assistant reports" in _text(result)
+    assert client.service_calls == [
+        ("light", "turn_on", ["light.living_room"], {"color_temp_kelvin": 2700})
     ]
 
 

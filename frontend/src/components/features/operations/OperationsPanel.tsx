@@ -373,13 +373,11 @@ export const OperationsPanelContent: React.FC = () => {
       paused_until: patch.paused_until === undefined
         ? item.paused_until
         : patch.paused_until,
-      status: patch.enabled === false
-        ? 'disabled'
-        : patch.paused_until
-          ? 'paused'
-          : patch.enabled === true || patch.paused_until === null
-            ? 'active'
-            : item.status,
+      status: patch.enabled === false || patch.paused_until
+        ? 'paused'
+        : patch.enabled === true || patch.paused_until === null
+          ? 'active'
+          : item.status,
     }
     setBusySetups((current) => new Set(current).add(item.resource_ref))
     setSetupErrors((current) => {

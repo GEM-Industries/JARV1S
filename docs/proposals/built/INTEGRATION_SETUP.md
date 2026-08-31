@@ -2,7 +2,8 @@
 
 **Status:** Built (Phases 1–3)  
 **Date:** 2026-03-03  
-**Updated:** 2026-07 (Smart Home product connect via Smart Home panel; contributor CLI `task setup:home` remains for bootstrap/onboard)
+**Updated:** 2026-07 (Smart Home product connect via Smart Home panel; contributor CLI `task setup:home` remains for bootstrap/onboard)  
+**Superseded by:** [LOCAL_FIRST_INTEGRATIONS.md](../LOCAL_FIRST_INTEGRATIONS.md) for the connection ladder (OS-native → direct OAuth → cloud connector). This doc remains the shipped MCP auto-bridge / Composio gateway history. Self-managed OAuth is no longer the product default; Composio mounts fail closed without a `tools` allowlist.
 ---
 
 ## Problem
@@ -194,7 +195,7 @@ servers:
     # no utterances — curated routing files or utterance_cache fallback supply them
 ```
 
-**Allowlist (optional):** A `tools` allowlist restricts which tools are mounted from a server. If omitted, all fetched tools are mounted. Routing is plugin-level today: if the plugin matches, all mounted tools for that plugin are promoted to the tail.
+**Allowlist:** A `tools` allowlist restricts which tools are mounted from a server. For Composio, an absent or empty allowlist mounts nothing. Routing is plugin-level today: if the plugin matches, all mounted tools for that plugin are promoted to the tail.
 
 The full-density tail token cost scales with how many *plugins* the active routing policy matches (voice default: max 3, budget-bounded) and how many tools those plugins mount. Large toolkits should use allowlists or bespoke wrappers for hot paths; otherwise a routed plugin can still add a large tail.
 

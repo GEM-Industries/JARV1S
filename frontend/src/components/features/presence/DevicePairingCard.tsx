@@ -10,6 +10,8 @@ import { getHostStatus } from '../../../runtime/desktopBridge'
 import { isDesktopApp } from '../../../runtime/clientSurface'
 import { Button } from '../../ui/Button'
 import { Disclosure } from '../../ui/Disclosure'
+import { pairingExpiryLabel } from './pairing'
+import { SetupCard } from './SetupCard'
 
 interface IssuedPairing {
   code: string
@@ -23,14 +25,6 @@ function buildPairingUrl(code: string, remoteBase?: string | null): string {
   url.searchParams.set('pair', code)
   url.searchParams.set('jarvis_surface', 'phone')
   return url.toString()
-}
-
-function expiryLabel(expiresAt: string, now: number): string {
-  const remainingSeconds = Math.max(0, Math.ceil((new Date(expiresAt).getTime() - now) / 1000))
-  if (remainingSeconds === 0) return 'Pairing code expired'
-  const minutes = Math.floor(remainingSeconds / 60)
-  const seconds = String(remainingSeconds % 60).padStart(2, '0')
-  return `Expires in ${minutes}:${seconds}`
 }
 
 interface DevicePairingCardProps {
@@ -51,6 +45,7 @@ export const DevicePairingCard: React.FC<DevicePairingCardProps> = ({
   const [qrSrc, setQrSrc] = useState<string | null>(null)
   const [qrFailed, setQrFailed] = useState(false)
   const [privateAccessRequired, setPrivateAccessRequired] = useState(false)
+  const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(Date.now())
 
   useEffect(() => {
@@ -105,6 +100,7 @@ export const DevicePairingCard: React.FC<DevicePairingCardProps> = ({
         expires_at: result.expires_at,
         pairing_url,
       })
+      setExpanded(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not issue pairing code')
     } finally {
@@ -121,17 +117,13 @@ export const DevicePairingCard: React.FC<DevicePairingCardProps> = ({
   const expired = issued ? new Date(issued.expires_at).getTime() <= now : false
 
   return (
-    <section className="flex flex-col gap-4 overflow-hidden rounded-panel bg-surface/20 p-4">
-      <div className="flex items-start gap-3">
-        <DeviceMobileIcon size={18} className="mt-0.5 shrink-0 text-brand" />
-        <div className="min-w-0 flex-1">
-          <h3 className="type-label text-foreground">Connect your phone</h3>
-          <p className="mt-0.5 type-meta text-foreground-subtle">
-            Pair once, then talk to JARV1S from your phone.
-          </p>
-        </div>
-      </div>
-
+    <SetupCard
+      icon={<DeviceMobileIcon size={18} className="shrink-0 text-brand" />}
+      title="Phone"
+      subtitle="Pair once, then talk to JARV1S from your phone"
+      expanded={expanded}
+      onToggle={() => setExpanded((value) => !value)}
+    >
       {(disabledReason || error) && (
         <div className="flex flex-col gap-2 overflow-hidden rounded-control bg-status-warning/10 px-3 py-3">
           <p className="type-body text-status-warning">{error || disabledReason}</p>
@@ -198,7 +190,7 @@ export const DevicePairingCard: React.FC<DevicePairingCardProps> = ({
             className={`text-center type-meta ${expired ? 'text-status-warning' : 'text-foreground-subtle'}`}
             role="status"
           >
-            {expiryLabel(issued.expires_at, now)}
+            {pairingExpiryLabel(issued.expires_at, now, 'Pairing code expired')}
           </p>
 
           {expired ? (
@@ -232,6 +224,6 @@ export const DevicePairingCard: React.FC<DevicePairingCardProps> = ({
           )}
         </div>
       )}
-    </section>
+    </SetupCard>
   )
 }

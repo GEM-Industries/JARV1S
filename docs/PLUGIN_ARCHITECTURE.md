@@ -1,14 +1,12 @@
 # Plugin and Tool Architecture
 
 This is the canonical contract for JARV1S plugins and the capability runtime
-around them. It defines the boundary; authoring details remain in
-`.cursor/rules/plugin-tool-conventions.mdc`.
-
-This document describes both the boundary JARV1S preserves and the target runtime
-needed to enforce it. The production loop emits structured capability calls
-through one dispatcher and returns JSON-safe observations to the model.
-Process isolation remains a later target listed in **Build Next**. See
+around them. Authoring details remain in
+`.cursor/rules/plugin-tool-conventions.mdc`. See
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the turn pipeline.
+
+The production loop emits structured capability calls through one dispatcher
+and returns JSON-safe observations to the model.
 
 ## Decision
 
@@ -22,19 +20,6 @@ belongs to the harness. MCP tools and first-party plugins must enter the same
 capability contract. MCP is an integration protocol, not a second agent
 architecture.
 
-Target runtime:
-```text
-Model
-  -> provider-neutral model events
-  -> CapabilityCall
-  -> isolated execution runtime
-  -> capability dispatcher
-       schema validation, identity, permission, consent, tracing, budgets
-  -> first-party plugin or stateless MCP adapter
-  -> typed observation and verified receipts
-```
-
-Current runtime:
 ```text
 Model -> LiteLLM tools= -> complete wire tool calls
       -> registry name resolution -> CapabilityCall
@@ -43,8 +28,9 @@ Model -> LiteLLM tools= -> complete wire tool calls
       -> JSON-safe observation + harness invocation ledger in turn/task traces
 ```
 
-UI widget actions call the same dispatcher for validation, but do not open a
-turn ledger; turn/task tracing remains owned by the agent loop.
+`mode="code"` is a separate isolated coding runtime (Cursor or Claude Code),
+not a second `jarvis.*` loop. UI widget actions call the same dispatcher for
+validation, but do not open a turn ledger.
 
 The agent loop stays simple: generate, execute, observe, and repeat. Complexity
 belongs in capability contracts, context management, permissions, and
@@ -94,12 +80,10 @@ Canonical entry points reduce overlapping tool choice:
   not replace domain creation or editing tools.
 
 Public tools are user-shaped jobs, not provider endpoints. MCP and Composio
-are providers until a bespoke plugin of the same name wins. UI is a side
+are providers until a bespoke plugin of the same name wins. An absent Composio
+`tools` allowlist mounts nothing. UI is a side
 channel of the domain tool: reads and mutations that have a widget attach it
 themselves; do not add a second `render_*` decision for the same data.
-
-The current cross-plugin conformance audit and prioritized gaps live in
-[`PLUGIN_CONFORMANCE.md`](./PLUGIN_CONFORMANCE.md).
 
 ## Tool Contract
 
@@ -162,7 +146,9 @@ search-result envelope or base class.
 
 Mutations treat model-generated arguments as untrusted input:
 
-1. Resolve or fetch the target.
+1. Resolve or fetch the target. Domain tools that own the mutation resolve
+   user-shaped targets through `resolve_managed_setup`; they must not require a
+   prior `setups.find` solely to recover an opaque id.
 2. Validate scope, expected guards, and the full intended state.
 3. Apply consent at the domain edge when required.
 4. Perform the side effect.
@@ -238,34 +224,15 @@ MCP tools are mounted eagerly today; only their inclusion in the per-turn
 Direct turns and `dispatch(mode="jarvis")` use `jarvis.*`;
 `dispatch(mode="code")` is a separate isolated coding runtime.
 
-### Target enforcement
+### Isolation and permissions
 
-The target runtime must enforce these responsibilities end to end:
+`dispatch(mode="jarvis")` uses the same in-process `jarvis.*` catalog as
+direct turns, with consent via `_consent_resolver`. `dispatch(mode="code")`
+is an isolated vendor SDK: JARV1S owns named work, receipts, and triggers;
+the worker does not call in-process plugins.
 
-- **Isolation.** Generated code runs without ambient filesystem, process,
-  network, environment, credential, or import access. Its only capabilities are
-  typed proxies granted by the dispatcher.
-- **Permissions outside code.** Identity, trust level, plugin enablement,
-  consent, rate limits, and side-effect policy are enforced for every nested
-  invocation.
-- **Progressive disclosure.** Keep plugin-level routing, per-turn `tools=`
-  schemas, and explicit tool discovery. Large MCP catalogs remain lazy.
-- **Structured observations.** Preserve typed values and per-call outcomes;
-  stdout is diagnostic output, not the execution contract.
-- **Budgets and recovery.** Enforce turns, time, output, tool calls, fan-out,
-  and context budget inside the loop. Compact or offload state before dropping
-  it, and retry only bounded transient failures.
-- **Explicit durable state.** Conversations, tasks, approvals, artifacts, and
-  long-running application state live outside model context. Stateful services
-  return explicit handles that later calls must pass back.
-- **Traceability.** Correlate each model iteration, code run, nested tool call,
-  approval, provider error, and final delivery under the turn or task ID.
-
-Stateless MCP is the preferred remote integration boundary. JARV1S still owns
-identity, permissions, context, consent, and durable workflow state. Remote
-servers receive only the context required for a call. Stateful services return
-explicit resource or task handles that later calls pass back rather than hiding
-workflow state in the transport session.
+Identity, plugin enablement, consent, and side-effect policy stay outside
+the model. Large MCP catalogs stay lazy in the per-turn `tools=` set.
 
 ## Improvement Contract
 
@@ -301,41 +268,32 @@ The current architecture already has foundations worth keeping:
 
 ## Build Next
 
-These remaining gaps close the distance between the target contract above and
-the current in-process dispatcher. Structured capability calls, typed plugin
-returns, and the CodeAct/prefix path are done.
-
 1. **Evidence contracts** (active reliability work): domain
    lookups must distinguish complete absence, ambiguity, and incomplete
    coverage via the shared `match_status` / `coverage` vocabulary;
    mutations must resolve a scoped target before write and return
-   confirmed receipts. Implement first in plugins that already fail in
-   production (e.g. calendar find, scoped alarm/reminder edits)—via plugin
-   conformance, not more harness machinery. Calendar, scheduler, and Gmail
-   now provide the first domain-owned evidence/scope contracts; the scorecard
-   tracks remaining plugin-specific gaps.
+   confirmed receipts. Calendar, scheduler, and Gmail already provide
+   domain-owned evidence/scope contracts; remaining gaps stay in the
+   owning plugin, not a second harness.
 2. **Mid-loop context/budget recovery and failure-derived evals**, using the
    ledger-backed traces to validate narrow harness and plugin changes
    without regressions.
 
-Do not add a second universal structured-tool agent loop, a generic plugin DSL,
-or broad workflow tools before these gaps are addressed and measured.
+Do not add a second agent loop, a generic plugin DSL, or broad workflow
+tools before these gaps are addressed.
 
 ## Related Guidance
 
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md) — current runtime and turn pipeline.
+- [`CORE_TOOLS.md`](./CORE_TOOLS.md) — plugin inventory and `tools=` disclosure.
 - [`BACKGROUND_AGENTS.md`](./BACKGROUND_AGENTS.md) — `dispatch()` execution
   modes and task lifecycle.
+- [`AGENT_HOME.md`](./AGENT_HOME.md) — user-owned prompt, skills, and extra MCP.
 - [Plugin and Tool Conventions](../.cursor/rules/plugin-tool-conventions.mdc) —
   authoring recipes and return shapes.
-- [Harness Engineering for Self-Improvement](https://lilianweng.github.io/posts/2026-07-04-harness/) —
-  evidence-driven, bounded harness improvement.
 - [Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents)
   and [Writing Effective Tools for Agents](https://www.anthropic.com/engineering/writing-tools-for-agents) —
   simple loops, agent-computer interfaces, and tool evals.
-- [Executable Code Actions Elicit Better LLM Agents](https://arxiv.org/abs/2402.01030) —
-  CodeAct composition, iterative observations, and sandbox tradeoffs.
 - [MCP Architecture](https://modelcontextprotocol.io/specification/draft/architecture) —
-  host-owned orchestration, scoped server context, and stateless capability
-  exchange.
+  host-owned orchestration and scoped server context.
 

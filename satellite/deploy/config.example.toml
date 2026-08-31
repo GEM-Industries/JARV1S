@@ -2,7 +2,7 @@
 # Tailnet:   wss://<machine>.<tailnet>.ts.net/api/v1/ws
 # Public:    wss://<domain>/api/v1/ws
 backend_url = "ws://jarvis-brain.local:8000/api/v1/ws"
-device_token = "jarvis_dev_dev-xxxxxxxx_your-token-from-task-devices-satellite-token"
+device_token = "jarvis_dev_dev-xxxxxxxx_from-jarvis-satellite-pair"
 timezone = "Australia/Sydney"
 node_id = "jarvis-satellite-1"
 node_label = "Bedroom Satellite"

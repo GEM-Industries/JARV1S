@@ -8,7 +8,7 @@ Archival events: timestamped docs in 'memories' collection, searched via embeddi
 import difflib
 import logging
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List
 
 from pydantic import BaseModel
 
@@ -77,7 +77,7 @@ async def get_recent_events_block(owner_id: str) -> str | None:
     lines = [doc["event"] for doc in docs if doc.get("event")]
     if not lines:
         return None
-    return "[RECENT EVENTS]\n" + "\n".join(f"- {l}" for l in lines)
+    return "[RECENT EVENTS]\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def _find_match(query: str, facts: List["Fact"]) -> int | None:
@@ -115,11 +115,10 @@ class ProfilePlugin(JarvisPlugin):
     @tool
     async def add_memory(self, fact: str) -> ToolResult | CapabilityErrorDetail:
         """
-        Store a permanent fact about the user. Visible in [USER CONTEXT] every turn.
+        Store one stable, user-scoped fact or preference likely to improve future help.
         Write dense, third-person: "Allergic to shellfish", "Wife is Sarah", "Prefers Celsius".
-        Only store things that will still be true next month.
+        Only store clearly stated information likely to remain true next month.
         NOT for events, appointments, or time-bound info — use remember() for those.
-        Storage is invisible — never mention it aloud.
         """
         facts = await db.load_models(TOOL_NAME, Fact, key="facts")
 
@@ -204,11 +203,9 @@ class ProfilePlugin(JarvisPlugin):
     @tool
     async def remember(self, event: str, context: str = "", expires_at: str = "") -> str:
         """
-        Log a timestamped event for later recall.
-        Use for appointments, mentions, decisions, or anything with a date/deadline.
-        "Meeting with Dave on Friday", "Dentist next Thursday", "Asked about Tokyo flights".
+        Log one event, plan, or decision for later recall, never requested future work.
+        Requested reminders, tasks, schedules, and habit tracking use their domain tools.
         NOT for permanent identity facts — use add_memory() for those.
-        Storage is invisible — never mention it aloud.
 
         Args:
             expires_at: Optional. ISO-8601 datetime (UTC) after which this event auto-deletes.
@@ -245,7 +242,9 @@ class ProfilePlugin(JarvisPlugin):
         docs = await mongodb.db[MEMORIES_COLLECTION].find(
             {"owner_id": owner_id},
             {"_id": 1, "event": 1, "embedding": 1},
-        ).sort("created_at", -1).limit(_MAX_RECALL_DOCS).to_list(length=_MAX_RECALL_DOCS)
+        ).sort("created_at", -1).limit(_MAX_RECALL_DOCS).to_list(
+            length=_MAX_RECALL_DOCS
+        )
 
         if not docs:
             return _fail("No archived events to forget.")
@@ -267,7 +266,7 @@ class ProfilePlugin(JarvisPlugin):
     @tool
     async def recall(self, query: str, limit: int = 5) -> List[MemoryEntry]:
         """
-        Search past events AND conversation history by meaning.
+        Search past events and conversation history by meaning before reconstructing a memory.
         Use when the user asks about something from a previous session — "did I mention X?",
         "what did we discuss about Y last week?". Searches both archived events and recent
         conversation turns (last 90 days).
@@ -287,7 +286,9 @@ class ProfilePlugin(JarvisPlugin):
         mem_docs = await mongodb.db[MEMORIES_COLLECTION].find(
             {"owner_id": owner_id},
             {"event": 1, "context": 1, "created_at": 1, "expires_at": 1, "embedding": 1},
-        ).sort("created_at", -1).limit(_MAX_RECALL_DOCS).to_list(length=_MAX_RECALL_DOCS)
+        ).sort("created_at", -1).limit(_MAX_RECALL_DOCS).to_list(
+            length=_MAX_RECALL_DOCS
+        )
 
         for doc in mem_docs:
             score = embedding_service.cosine_similarity(query_vec, doc["embedding"])
@@ -306,7 +307,7 @@ class ProfilePlugin(JarvisPlugin):
                 "content": {"$not": {"$regex": r"^\s*<tool_result>"}},
             },
             {"content": 1, "timestamp": 1, "embedding": 1, "role": 1},
-        ).sort("timestamp", -1).limit(_MAX_RECALL_DOCS).to_list(length=_MAX_RECALL_DOCS)
+        ).sort("timestamp", -1).to_list(length=None)
 
         for doc in conv_docs:
             score = embedding_service.cosine_similarity(query_vec, doc["embedding"])

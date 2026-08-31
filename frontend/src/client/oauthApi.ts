@@ -1,6 +1,5 @@
 /**
- * REST client for the bespoke OAuth management API.
- * Used only by OAuthWidget — kept separate from JarvisClient (WebSocket-only).
+ * REST client for bespoke Google/Microsoft OAuth.
  */
 
 import { authorizedFetch } from './http'
@@ -43,6 +42,7 @@ export interface ProviderStatus {
   connectable: boolean
   connected: boolean
   account_email: string | null
+  config_mode?: 'product' | 'self_managed' | null
 }
 
 export interface AuthorizeResult {
@@ -61,8 +61,16 @@ export const oauthApi = {
     })
   },
 
-  authorize(provider: string, origin: string): Promise<AuthorizeResult> {
-    return request<AuthorizeResult>('POST', `/providers/${provider}/authorize`, { origin })
+  authorize(
+    provider: string,
+    origin: string,
+    options?: { plugin?: string; scopes?: string[] },
+  ): Promise<AuthorizeResult> {
+    return request<AuthorizeResult>('POST', `/providers/${provider}/authorize`, {
+      origin,
+      ...(options?.plugin ? { plugin: options.plugin } : {}),
+      ...(options?.scopes?.length ? { scopes: options.scopes } : {}),
+    })
   },
 
   deleteProvider(provider: string): Promise<{ status: string }> {

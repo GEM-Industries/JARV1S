@@ -11,6 +11,15 @@ function isAssistantPart(item: TranscriptItem): boolean {
   )
 }
 
+function clusterTurnId(items: TranscriptItem[]): string | undefined {
+  return items.find((item) => item.turn_id)?.turn_id
+}
+
+function continuesAssistantTurn(cluster: TranscriptItem[], next: TranscriptItem): boolean {
+  const clusterId = clusterTurnId(cluster)
+  return !(clusterId && next.turn_id && clusterId !== next.turn_id)
+}
+
 export function groupTranscriptTurns(items: TranscriptItem[]): TranscriptTurn[] {
   const turns: TranscriptTurn[] = []
 
@@ -27,7 +36,7 @@ export function groupTranscriptTurns(items: TranscriptItem[]): TranscriptTurn[] 
 
     if (isAssistantPart(item)) {
       const previous = turns[turns.length - 1]
-      if (previous?.kind === 'assistant') {
+      if (previous?.kind === 'assistant' && continuesAssistantTurn(previous.items, item)) {
         previous.items.push(item)
       } else {
         turns.push({ kind: 'assistant', id: item.id, items: [item] })
@@ -36,6 +45,13 @@ export function groupTranscriptTurns(items: TranscriptItem[]): TranscriptTurn[] 
   }
 
   return turns
+}
+
+export function isUnsolicitedTurn(
+  previous: TranscriptTurn | undefined,
+  turn: TranscriptTurn,
+): boolean {
+  return turn.kind === 'assistant' && previous?.kind !== 'user'
 }
 
 export function turnTimestamp(turn: TranscriptTurn): number {

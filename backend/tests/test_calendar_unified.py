@@ -25,13 +25,11 @@ class _FakeProvider:
     def __init__(
         self,
         name: str,
-        account: str,
         events=None,
         fail_list: bool = False,
         incomplete: bool = False,
     ):
         self.name = name
-        self._account = account
         self._events = events or []
         self._fail_list = fail_list
         self._incomplete = incomplete
@@ -47,9 +45,8 @@ class _FakeProvider:
         self.list_calls.append(max_results)
         if self._fail_list:
             raise RuntimeError(f"{self.name} list failed")
-        # Providers are responsible for stamping account themselves.
         stamped = [
-            event.model_copy(update={"account": self._account})
+            event.model_copy(update={"account": self.name})
             for event in self._events
         ]
         return ProviderEventBatch(
@@ -79,36 +76,51 @@ def _event(id_: str, start: str, title: str = "evt") -> CalendarEvent:
 
 class TestResolveAccount:
     def test_single_provider_none_account_returns_that_provider(self):
-        p = _FakeProvider("google", "personal")
+        p = _FakeProvider("google")
         u = UnifiedCalendarClient([p])
         assert u.resolve_account(None) is p
 
     def test_multi_provider_none_account_raises(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         u = UnifiedCalendarClient([p1, p2])
-        with pytest.raises(ValueError, match="account='personal'"):
+        with pytest.raises(ValueError, match="google"):
             u.resolve_account(None)
 
-    def test_known_label_routes(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+    def test_known_name_routes(self):
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         u = UnifiedCalendarClient([p1, p2])
-        assert u.resolve_account("personal") is p1
-        assert u.resolve_account("work") is p2
+        assert u.resolve_account("google") is p1
+        assert u.resolve_account("microsoft") is p2
 
-    def test_unknown_label_raises(self):
-        p1 = _FakeProvider("google", "personal")
+    def test_unknown_name_raises(self):
+        p1 = _FakeProvider("google")
         u = UnifiedCalendarClient([p1])
-        with pytest.raises(ValueError, match="Unknown account label 'family'"):
+        with pytest.raises(ValueError, match="Unknown account 'family'"):
             u.resolve_account("family")
 
-    def test_label_pointing_to_disconnected_provider_raises(self, monkeypatch):
-        # Only Google connected; ACCOUNT_PROVIDERS still maps work->microsoft.
-        p1 = _FakeProvider("google", "personal")
+    def test_name_for_disconnected_provider_raises_value_error(self):
+        p1 = _FakeProvider("google")
         u = UnifiedCalendarClient([p1])
-        with pytest.raises(NeedsReauth):
-            u.resolve_account("work")
+        with pytest.raises(ValueError, match="microsoft"):
+            u.resolve_account("microsoft")
+
+    def test_eventkit_plus_google_none_account_writes_google(self):
+        macos = _FakeProvider("macos")
+        google = _FakeProvider("google")
+        u = UnifiedCalendarClient([macos, google])
+        assert u.resolve_account(None) is google
+        assert u.resolve_account("macos") is macos
+
+    def test_eventkit_google_microsoft_none_account_raises(self):
+        u = UnifiedCalendarClient([
+            _FakeProvider("macos"),
+            _FakeProvider("google"),
+            _FakeProvider("microsoft"),
+        ])
+        with pytest.raises(ValueError, match="google"):
+            u.resolve_account(None)
 
     def test_empty_providers_raises_needs_reauth(self):
         with pytest.raises(NeedsReauth):
@@ -122,11 +134,11 @@ class TestListEvents:
     @pytest.mark.asyncio
     async def test_fan_out_merges_and_sorts(self):
         p1 = _FakeProvider(
-            "google", "personal",
+            "google",
             events=[_event("g1", "2026-05-01T10:00:00"), _event("g2", "2026-05-01T08:00:00")],
         )
         p2 = _FakeProvider(
-            "microsoft", "work",
+            "microsoft",
             events=[_event("m1", "2026-05-01T09:00:00")],
         )
         u = UnifiedCalendarClient([p1, p2])
@@ -137,23 +149,23 @@ class TestListEvents:
         assert result.coverage == "complete"
         assert result.match_status == "multiple"
         # Providers stamped account on their own events.
-        assert {e.account for e in result.events} == {"personal", "work"}
+        assert {e.account for e in result.events} == {"google", "microsoft"}
 
     @pytest.mark.asyncio
     async def test_dedup_uses_account_plus_id(self):
         # Same id on different providers must stay distinct.
-        p1 = _FakeProvider("google", "personal", events=[_event("shared", "2026-05-01T10:00:00")])
-        p2 = _FakeProvider("microsoft", "work", events=[_event("shared", "2026-05-01T10:00:00")])
+        p1 = _FakeProvider("google", events=[_event("shared", "2026-05-01T10:00:00")])
+        p2 = _FakeProvider("microsoft", events=[_event("shared", "2026-05-01T10:00:00")])
         u = UnifiedCalendarClient([p1, p2])
 
         result = await u.list_events("2026-05-01T00:00:00", "2026-05-02T00:00:00")
         assert len(result.events) == 2
-        assert {e.account for e in result.events} == {"personal", "work"}
+        assert {e.account for e in result.events} == {"google", "microsoft"}
 
     @pytest.mark.asyncio
     async def test_one_provider_failure_does_not_fail_read(self):
-        p1 = _FakeProvider("google", "personal", events=[_event("g1", "2026-05-01T10:00:00")])
-        p2 = _FakeProvider("microsoft", "work", fail_list=True)
+        p1 = _FakeProvider("google", events=[_event("g1", "2026-05-01T10:00:00")])
+        p2 = _FakeProvider("microsoft", fail_list=True)
         u = UnifiedCalendarClient([p1, p2])
 
         result = await u.list_events("2026-05-01T00:00:00", "2026-05-02T00:00:00")
@@ -165,7 +177,6 @@ class TestListEvents:
     async def test_provider_internal_partial_read_is_visible(self):
         provider = _FakeProvider(
             "google",
-            "personal",
             events=[_event("g1", "2026-05-01T10:00:00")],
             incomplete=True,
         )
@@ -182,7 +193,7 @@ class TestListEvents:
     @pytest.mark.asyncio
     async def test_max_results_cap(self):
         p1 = _FakeProvider(
-            "google", "personal",
+            "google",
             events=[_event(f"g{i}", f"2026-05-01T{i:02d}:00:00") for i in range(10)],
         )
         u = UnifiedCalendarClient([p1])
@@ -195,7 +206,7 @@ class TestListEvents:
 
     @pytest.mark.asyncio
     async def test_empty_results_do_not_retry_with_expanded_limit(self):
-        p1 = _FakeProvider("google", "personal", events=[])
+        p1 = _FakeProvider("google", events=[])
         u = UnifiedCalendarClient([p1])
 
         result = await u.list_events(
@@ -209,7 +220,7 @@ class TestListEvents:
 
     @pytest.mark.asyncio
     async def test_all_provider_failures_raise_without_expanded_retry(self):
-        p1 = _FakeProvider("google", "personal", fail_list=True)
+        p1 = _FakeProvider("google", fail_list=True)
         u = UnifiedCalendarClient([p1])
 
         with pytest.raises(RuntimeError):
@@ -225,7 +236,6 @@ class TestSearchEvents:
     async def test_fuzzy_fallback_recovers_small_spelling_error(self):
         provider = _FakeProvider(
             "google",
-            "personal",
             events=[_event("dentist", "2026-05-01T10:00:00", title="Dentist appointment")],
         )
         client = UnifiedCalendarClient([provider])
@@ -244,7 +254,6 @@ class TestSearchEvents:
     async def test_tokenized_provider_search_and_local_filter(self):
         provider = _FakeProvider(
             "google",
-            "personal",
             events=[
                 _event("mum", "2026-05-10", title="Mums birthday"),
                 _event("other", "2026-05-11", title="Team offsite"),
@@ -272,7 +281,7 @@ class TestSearchEvents:
                 for i in range(600)
             ],
         ]
-        provider = _FakeProvider("google", "personal", events=events)
+        provider = _FakeProvider("google", events=events)
         # Force provider search to miss so inventory fallback runs.
         provider.search_events = AsyncMock(return_value=ProviderEventBatch(events=[]))
         client = UnifiedCalendarClient([provider])
@@ -296,57 +305,57 @@ class TestSearchEvents:
 class TestWriteRouting:
     @pytest.mark.asyncio
     async def test_create_event_routes_by_account(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         p1.create_event.return_value = EventConfirmation(
-            id="p1", title="t", start="s", end="e", account="personal",
+            id="p1", title="t", start="s", end="e", account="google",
         )
         p2.create_event.return_value = EventConfirmation(
-            id="p2", title="t", start="s", end="e", account="work",
+            id="p2", title="t", start="s", end="e", account="microsoft",
         )
         u = UnifiedCalendarClient([p1, p2])
 
-        result = await u.create_event(title="t", start="2026-05-01T10:00:00", account="work")
+        result = await u.create_event(title="t", start="2026-05-01T10:00:00", account="microsoft")
         p2.create_event.assert_awaited_once()
         p1.create_event.assert_not_awaited()
         assert result.id == "p2"
 
     @pytest.mark.asyncio
     async def test_update_event_routes_by_account(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         p2.update_event.return_value = EventConfirmation(
-            id="e1", title="t", start="s", end="e", account="work",
+            id="e1", title="t", start="s", end="e", account="microsoft",
         )
         u = UnifiedCalendarClient([p1, p2])
 
-        await u.update_event(event_id="e1", account="work", title="new")
+        await u.update_event(event_id="e1", account="microsoft", title="new")
         p2.update_event.assert_awaited_once()
         p1.update_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_delete_event_routes_by_account(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         p1.delete_event.return_value = "Deleted."
         u = UnifiedCalendarClient([p1, p2])
 
-        await u.delete_event(event_id="x", account="personal")
+        await u.delete_event(event_id="x", account="google")
         p1.delete_event.assert_awaited_once_with("x")
         p2.delete_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_event_unknown_account_raises(self):
-        p1 = _FakeProvider("google", "personal")
+        p1 = _FakeProvider("google")
         u = UnifiedCalendarClient([p1])
         with pytest.raises(ValueError):
             await u.create_event(title="t", start="2026-05-01T10:00:00", account="family")
 
     @pytest.mark.asyncio
     async def test_single_provider_omit_account_works(self):
-        p1 = _FakeProvider("google", "personal")
+        p1 = _FakeProvider("google")
         p1.create_event.return_value = EventConfirmation(
-            id="p1", title="t", start="s", end="e", account="personal",
+            id="p1", title="t", start="s", end="e", account="google",
         )
         u = UnifiedCalendarClient([p1])
 
@@ -360,30 +369,30 @@ class TestWriteRouting:
 class TestGetEvent:
     @pytest.mark.asyncio
     async def test_get_event_with_account_routes_direct(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         p2.get_event.return_value = _event("evt", "2026-05-01T10:00:00").model_copy(
-            update={"account": "work"}
+            update={"account": "microsoft"}
         )
         u = UnifiedCalendarClient([p1, p2])
 
-        result = await u.get_event("evt", account="work")
+        result = await u.get_event("evt", account="microsoft")
         p2.get_event.assert_awaited_once_with("evt")
         p1.get_event.assert_not_awaited()
-        assert result.account == "work"
+        assert result.account == "microsoft"
 
     @pytest.mark.asyncio
     async def test_get_event_without_account_tries_each_provider(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         p1.get_event.side_effect = RuntimeError("not found")
         p2.get_event.return_value = _event("evt", "2026-05-01T10:00:00").model_copy(
-            update={"account": "work"}
+            update={"account": "microsoft"}
         )
         u = UnifiedCalendarClient([p1, p2])
 
         result = await u.get_event("evt")
-        assert result.account == "work"
+        assert result.account == "microsoft"
         p1.get_event.assert_awaited_once()
         p2.get_event.assert_awaited_once()
 
@@ -394,8 +403,8 @@ class TestGetEvent:
 class TestRefresh:
     @pytest.mark.asyncio
     async def test_refresh_calls_each_provider(self):
-        p1 = _FakeProvider("google", "personal")
-        p2 = _FakeProvider("microsoft", "work")
+        p1 = _FakeProvider("google")
+        p2 = _FakeProvider("microsoft")
         u = UnifiedCalendarClient([p1, p2])
 
         await u.refresh()
@@ -404,7 +413,7 @@ class TestRefresh:
 
     @pytest.mark.asyncio
     async def test_refresh_failure_propagates(self):
-        p1 = _FakeProvider("google", "personal")
+        p1 = _FakeProvider("google")
         p1.refresh.side_effect = NeedsReauth("google")
         u = UnifiedCalendarClient([p1])
 

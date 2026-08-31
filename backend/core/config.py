@@ -7,7 +7,7 @@ environment variables with sensible defaults.
 
 import os
 from enum import Enum
-from typing import List, Literal, Optional, Dict
+from typing import List, Literal, Optional
 from pathlib import Path
 from pydantic import BaseModel, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -78,10 +78,14 @@ class VoiceConfig(BaseModel):
     wakeword_speaker_profile_path: str | None = None
     # Provisional TitaNet operating point; keep model-specific.
     wakeword_speaker_threshold: float = 0.21
-    # Cosine threshold for barge-in owner gating. Calibrated separately from wake
-    # because free-speech candidates are not wake-phrase windows.
-    # Five-of-eight duplex cross-validation: ~95% owner recall and ~5% FA.
+    # Cosine threshold for barge-in owner gating. Calibrate separately from wake
+    # with eval_barge_in_speaker.py (max cosine, full clip). Do not retune from
+    # live host.log.
     barge_in_speaker_threshold: float = 0.21
+    # Live barge-in only. peek_turn_speech_audio() is already VAD-onset-forward;
+    # cap that so the 1.5s STT wait does not embed later TTS in the mic.
+    # The scoreboard mixes TTS into files instead and scores the full clip.
+    barge_in_speaker_onset_seconds: float = 0.8
     wakeword_speaker_num_threads: int = 1
     # Stream STT while the user speaks.
     stt_streaming_enabled: bool = True
@@ -263,24 +267,12 @@ class Settings(BaseSettings):
         None  # Self-hosted SearXNG base URL, e.g. http://127.0.0.1:8080
     )
 
-    # MCP Auto-Bridge — path to mcp_servers.yaml (relative to BASE_DIR)
-    MCP_SERVERS_CONFIG: Optional[Path] = BASE_DIR / "mcp_servers.yaml"
+    # MCP Auto-Bridge — packaged mcp_servers.json
+    MCP_SERVERS_CONFIG: Path = BASE_DIR / "mcp_servers.json"
 
     # Smart Home (Home Assistant) — direct REST/WebSocket client
     HA_URL: Optional[str] = None
     HA_TOKEN: Optional[str] = None
-    # Legacy MCP bridge settings (deprecated — use HA_URL + HA_TOKEN)
-    HA_MCP_SERVER_PATH: Optional[str] = None
-    HA_MCP_TOKEN: Optional[str] = None
-
-    # Composio — declared here so Pydantic doesn't reject it as an extra field.
-    # Product path stores COMPOSIO_API_KEY via Settings → Credentials UI (CredentialStore).
-    # First-party OAuth app metadata (product path — no per-user Cloud Console setup).
-    GOOGLE_OAUTH_CLIENT_ID: Optional[str] = None
-    GOOGLE_OAUTH_CLIENT_SECRET: Optional[str] = (
-        None  # Public desktop-app metadata when required by Google.
-    )
-    MICROSOFT_OAUTH_CLIENT_ID: Optional[str] = None
 
     COMPOSIO_API_KEY: Optional[str] = (
         None  # Deprecated in .env — manage via Settings → Credentials.
@@ -298,14 +290,9 @@ class Settings(BaseSettings):
     # Composio webhook HMAC secret — emergency/contributor override. Product
     # runtime persists the secret in CredentialStore after subscription create/rotate.
     COMPOSIO_WEBHOOK_SECRET: Optional[str] = None
-
-    # Multi-Provider Calendar — default label -> provider mapping used only when
-    # no runtime mapping exists in MongoDB yet (first boot / before any connect).
-    # The runtime mapping is owned by backend/core/auth/account_labels.py.
-    ACCOUNT_PROVIDERS: Dict[str, str] = {
-        "personal": "google",
-        "work": "microsoft",
-    }
+    # Host EventKit loopback. Injected by the desktop supervisor; empty off-Host.
+    HOST_CALENDAR_URL: str = ""
+    HOST_CALENDAR_TOKEN: str = ""
 
     model_config = SettingsConfigDict(
         case_sensitive=False,

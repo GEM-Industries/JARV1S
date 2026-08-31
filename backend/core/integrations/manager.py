@@ -25,6 +25,14 @@ class NeedsReauth(Exception):
         super().__init__(f"Integration '{integration}' requires re-authorization.")
 
 
+class OsPermissionNeeded(Exception):
+    """Raised when an OS permission (not OAuth) is missing or was denied."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
 class IntegrationManager:
     """
     Centralized manager for external service clients.
@@ -50,8 +58,8 @@ class IntegrationManager:
         self._refresh_hooks: Dict[str, Optional[Callable]] = {}
         self._providers: Dict[str, Optional[str]] = {}
         self._required_scopes: Dict[str, Optional[list]] = {}
-        self._aux_scopes: Dict[str, set[str]] = {}
         self._aux_provider_integrations: Dict[str, set[str]] = {}
+        self._aux_plugin_scopes: Dict[str, Dict[str, set[str]]] = {}
         self._auth_manager = None
 
     def set_auth_manager(self, auth_manager) -> None:
@@ -195,6 +203,11 @@ class IntegrationManager:
             return self._order_providers(providers)
         return []
 
+    def names_for_provider(self, provider: str) -> list[str]:
+        names = {name for name, bound in self._providers.items() if bound == provider}
+        names.update(self._aux_provider_integrations.get(provider, set()))
+        return sorted(names)
+
     def _order_providers(self, providers: set[str]) -> list[str]:
         ordered: list[str] = []
         for candidate in ("google", "microsoft"):
@@ -208,26 +221,32 @@ class IntegrationManager:
         for name, prov in self._providers.items():
             if prov == provider and self._required_scopes.get(name):
                 scopes.update(self._required_scopes[name])
-        scopes.update(self._aux_scopes.get(provider, set()))
+        for plugin_map in self._aux_plugin_scopes.values():
+            scopes.update(plugin_map.get(provider, set()))
+        return sorted(scopes)
+
+    def get_scopes_for_plugin(self, plugin: str, provider: str) -> list[str]:
+        scopes: set[str] = set()
+        if self._providers.get(plugin) == provider:
+            scopes.update(self._required_scopes.get(plugin) or [])
+        scopes.update(self._aux_plugin_scopes.get(plugin, {}).get(provider, set()))
         return sorted(scopes)
 
     def register_aux_provider_scopes(
         self,
         provider: str,
         scopes: list[str],
-        integration_name: str | None = None,
+        integration_name: str,
     ) -> None:
         if not scopes:
             return
-        bucket = self._aux_scopes.setdefault(provider, set())
-        bucket.update(scopes)
-        if integration_name:
-            integrations = self._aux_provider_integrations.setdefault(provider, set())
-            integrations.add(integration_name)
+        self._aux_provider_integrations.setdefault(provider, set()).add(integration_name)
+        plugin_bucket = self._aux_plugin_scopes.setdefault(integration_name, {})
+        plugin_bucket.setdefault(provider, set()).update(scopes)
 
     def get_bespoke_providers(self) -> set[str]:
         names = {p for p in self._providers.values() if p}
-        names.update(self._aux_scopes.keys())
+        names.update(self._aux_provider_integrations.keys())
         return names
 
     def is_available(self, name: str) -> bool:
@@ -251,6 +270,11 @@ class IntegrationManager:
         self._providers.pop(name, None)
         self._required_scopes.pop(name, None)
         self._config_keys.pop(name, None)
+        self._aux_plugin_scopes.pop(name, None)
+        for provider, plugins in list(self._aux_provider_integrations.items()):
+            plugins.discard(name)
+            if not plugins:
+                self._aux_provider_integrations.pop(provider, None)
 
     async def shutdown(self) -> None:
         await self.reset()

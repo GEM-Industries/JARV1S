@@ -13,9 +13,46 @@ Process lifecycle is managed here:
 import asyncio
 import json
 import logging
+import os
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional
 
+from core.integrations.mcp.config import interpolate_env_value
+
 logger = logging.getLogger(__name__)
+
+_SAFE_ENV_KEYS = frozenset({
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "TERM",
+    "TZ",
+    "XDG_RUNTIME_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+})
+
+
+def stdio_child_environment(
+    configured: Mapping[str, str] | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a stdio MCP child env: safe base keys plus explicit config only."""
+    source = os.environ if environ is None else environ
+    env = {key: source[key] for key in _SAFE_ENV_KEYS if key in source}
+    for key, value in (configured or {}).items():
+        env[key] = interpolate_env_value(value, source)
+    return env
 
 _live_clients: list["MCPClient"] = []
 
@@ -70,8 +107,7 @@ class MCPClient:
 
     async def start(self) -> None:
         """Spawn the MCP server subprocess and perform the JSON-RPC initialize handshake."""
-        import os
-        proc_env = {**os.environ, **(self._env or {})}
+        proc_env = stdio_child_environment(self._env)
 
         self._process = await asyncio.create_subprocess_exec(
             *self._command,

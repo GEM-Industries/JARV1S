@@ -59,6 +59,9 @@ class MongoDBService:
             ("metadata.turn_id", -1),
         ])
         await self.db.conversations.create_index([("owner_id", 1), ("metadata.node_id", 1), ("source", 1), ("timestamp", -1)])
+        await self.db.conversation_windows.create_index(
+            [("owner_id", 1), ("node_id", 1)], unique=True
+        )
         await self.db.conversations.create_index([("owner_id", 1), ("metadata.instance_id", 1), ("timestamp", 1)])
         await self.db.conversations.create_index("embedding", sparse=True)
         await self.db.conversations.create_index("metadata.turn_id", sparse=True)
@@ -134,6 +137,10 @@ class MongoDBService:
         await self.db.background_tasks.create_index("task_id", unique=True)
         await self.db.background_tasks.create_index("owner_id")
         await self.db.background_tasks.create_index([("owner_id", 1), ("created_at", -1), ("task_id", -1)])
+        await self.db.background_tasks.create_index([("owner_id", 1), ("work_id", 1), ("created_at", -1)])
+        await self.db.background_tasks.create_index(
+            [("owner_id", 1), ("open", 1), ("created_at", -1)]
+        )
         await self.db.background_tasks.create_index("status")
         await self.db.background_tasks.create_index("trigger_ref", sparse=True)
         await self.db.background_tasks.create_index(
@@ -324,6 +331,39 @@ class MongoDBService:
             logger.warning("Error loading last spoken response: %s", e)
             return None
 
+    async def _embed_completed_user_turn(
+        self,
+        collection: Any,
+        owner_id: str,
+        turn_id: str,
+    ) -> None:
+        """Best-effort indexing for cross-session recall."""
+        try:
+            row = await collection.find_one(
+                {
+                    "owner_id": owner_id,
+                    "role": "user",
+                    "metadata.turn_id": turn_id,
+                    "embedding": {"$exists": False},
+                },
+                {"_id": 1, "content": 1},
+            )
+            text = extract_text_content(row.get("content", "")) if row else ""
+            if len(text) <= 20:
+                return
+
+            from services.embeddings import embedding_service
+
+            await collection.update_one(
+                {"_id": row["_id"], "embedding": {"$exists": False}},
+                {"$set": {"embedding": embedding_service.embed_one(text[:512])}},
+            )
+        except Exception as error:
+            logger.warning(
+                "Embedding completed user turn failed (non-fatal): %s",
+                error,
+            )
+
     async def mark_user_turn_status(
         self,
         owner_id: str,
@@ -342,6 +382,8 @@ class MongoDBService:
                 {"owner_id": owner_id, "role": "user", "metadata.turn_id": turn_id},
                 {"$set": update},
             )
+            if status == "completed":
+                await self._embed_completed_user_turn(collection, owner_id, turn_id)
         except Exception as e:
             logger.warning("Error marking user turn status: %s", e)
             raise
@@ -442,7 +484,36 @@ class MongoDBService:
 
         Long-term storage remains owner-wide. This only decides how much already
         node-scoped short-term history should be injected into the next prompt.
+        An explicit reset is a floor on top of the inactivity gap.
         """
+        inactivity_start = await self._resolve_inactivity_window_start(
+            owner_id,
+            node_id,
+            gap=gap,
+            now=now,
+            limit=limit,
+            exclude_turn_id=exclude_turn_id,
+            visible_deliveries=visible_deliveries,
+        )
+        reset_at = await self.get_conversation_window_reset(owner_id, node_id)
+        candidates = [
+            ts for ts in (inactivity_start, reset_at) if isinstance(ts, datetime)
+        ]
+        if not candidates:
+            return None
+        return max(candidates)
+
+    async def _resolve_inactivity_window_start(
+        self,
+        owner_id: str,
+        node_id: Optional[str],
+        *,
+        gap: timedelta,
+        now: Optional[datetime] = None,
+        limit: int = 200,
+        exclude_turn_id: Optional[str] = None,
+        visible_deliveries: Optional[List[str]] = None,
+    ) -> Optional[datetime]:
         if gap.total_seconds() <= 0:
             return None
 
@@ -549,16 +620,41 @@ class MongoDBService:
             logger.error("Error in backfill_conversation_embeddings: %s", e)
             return 0
 
-    async def clear_conversation_history(self, owner_id: str) -> int:
-        """Delete all conversation history for an owner. Returns count of deleted messages."""
+    async def set_conversation_window_reset(
+        self,
+        owner_id: str,
+        node_id: str,
+        *,
+        at: Optional[datetime] = None,
+    ) -> datetime:
+        """Close the node-local prompt window. Does not delete conversation rows."""
+        at = at or datetime.now(timezone.utc)
+        collection = self.get_collection("conversation_windows")
+        await collection.update_one(
+            {"owner_id": owner_id, "node_id": node_id},
+            {"$set": {"reset_at": at}},
+            upsert=True,
+        )
+        return at
+
+    async def get_conversation_window_reset(
+        self,
+        owner_id: str,
+        node_id: Optional[str],
+    ) -> Optional[datetime]:
+        """Return the explicit prompt-window floor for this node, if any."""
+        if not node_id:
+            return None
         try:
-            collection = self.get_collection("conversations")
-            result = await collection.delete_many({"owner_id": owner_id})
-            logger.info(f"Cleared {result.deleted_count} messages for owner {owner_id}")
-            return result.deleted_count
+            doc = await self.get_collection("conversation_windows").find_one(
+                {"owner_id": owner_id, "node_id": node_id},
+                {"reset_at": 1},
+            )
         except Exception as e:
-            logger.error(f"Error clearing conversation history: {e}")
-            raise
+            logger.warning("Error reading conversation window reset: %s", e)
+            return None
+        reset_at = doc.get("reset_at") if doc else None
+        return reset_at if isinstance(reset_at, datetime) else None
 
     async def store_turn_run(self, summary: Dict[str, Any]) -> None:
         """Upsert compact operational telemetry for one turn.

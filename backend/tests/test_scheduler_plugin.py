@@ -277,6 +277,73 @@ async def test_get_alerts_filters_daily_alarms_by_local_time(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_get_alerts_query_matches_clock_time_or_text(monkeypatch) -> None:
+    fixed_now = datetime(2026, 6, 23, 1, 0, 0, tzinfo=timezone.utc)
+    noon = datetime(2026, 6, 23, 2, 0, 0, tzinfo=timezone.utc)
+    morning = datetime(2026, 6, 23, 22, 30, 0, tzinfo=timezone.utc)
+
+    class FrozenDatetime:
+        def __call__(self, *args, **kwargs):
+            return dt_stdlib.datetime(*args, **kwargs)
+
+        def now(self, tz=None):
+            return fixed_now
+
+    noon_alarm = {
+        "id": "trg-noon",
+        "owner_id": "geoff",
+        "status": "pending",
+        "due_at": noon,
+        "action_snapshot": {"message": "Alarm!"},
+        "attention_snapshot": {"sound": "alarm", "requires_ack": True},
+        "origin_snapshot": {"kind": "time", "timezone": "Australia/Sydney"},
+        "delivery_snapshot": {},
+        "management": {"provider": "scheduler", "resource_id": "trg-noon"},
+    }
+    wake_reminder = {
+        "id": "trg-wake",
+        "owner_id": "geoff",
+        "status": "pending",
+        "due_at": morning,
+        "action_snapshot": {"message": "Wake up"},
+        "attention_snapshot": {"sound": "chime", "requires_ack": False},
+        "origin_snapshot": {
+            "kind": "time",
+            "timezone": "Australia/Sydney",
+            "original_local_time": "08:30",
+        },
+        "delivery_snapshot": {},
+        "management": {"provider": "scheduler", "resource_id": "trg-wake"},
+    }
+
+    class Cursor:
+        def __init__(self, items):
+            self._items = items
+
+        async def to_list(self, _):
+            return self._items
+
+    db = SimpleNamespace(
+        trigger_instances=SimpleNamespace(
+            find=MagicMock(return_value=Cursor([noon_alarm, wake_reminder])),
+        ),
+        trigger_rules=SimpleNamespace(find=MagicMock(return_value=Cursor([]))),
+    )
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.scheduler.mongodb", SimpleNamespace(db=db))
+    monkeypatch.setattr("plugins.scheduler.datetime", FrozenDatetime())
+
+    by_clock = await SchedulerPlugin().get_alerts(query="12:00")
+    assert [row.instance_id for row in by_clock.alerts] == ["trg-noon"]
+
+    by_text = await SchedulerPlugin().get_alerts(query="wake")
+    assert [row.instance_id for row in by_text.alerts] == ["trg-wake"]
+
+    by_digit = await SchedulerPlugin().get_alerts(query="1")
+    assert [row.instance_id for row in by_digit.alerts] == []
+
+
+@pytest.mark.asyncio
 async def test_get_alerts_includes_silent_work_and_filters_by_content(monkeypatch) -> None:
     fixed_now = datetime(2026, 6, 23, 15, 30, 0, tzinfo=timezone.utc)
     due = datetime(2026, 6, 23, 22, 30, 0, tzinfo=timezone.utc)
@@ -736,6 +803,7 @@ async def test_recurring_remind_previews_before_persisting(monkeypatch) -> None:
         "plugins.scheduler.trigger_service",
         SimpleNamespace(create_rule=create_rule, create_instance=create_instance),
     )
+    monkeypatch.setattr("plugins.scheduler._existing_named_series", AsyncMock(return_value=None))
 
     result = await SchedulerPlugin().remind(
         when="tomorrow 10:00",
@@ -746,6 +814,37 @@ async def test_recurring_remind_previews_before_persisting(monkeypatch) -> None:
     assert "Preview only" in _text(result)
     assert _ui(result)[0].component == "ContentWidget"
     assert _ui(result)[0].data["title"] == "Recurring Reminder Preview"
+    create_rule.assert_not_awaited()
+    create_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recurring_remind_refuses_existing_named_series(monkeypatch) -> None:
+    trigger_time = datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc)
+    create_rule = AsyncMock()
+    create_instance = AsyncMock()
+
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.scheduler.get_timezone", lambda: "UTC")
+    monkeypatch.setattr("plugins.scheduler.parse_schedule_time", lambda *_, **__: trigger_time)
+    monkeypatch.setattr(
+        "plugins.scheduler.trigger_service",
+        SimpleNamespace(create_rule=create_rule, create_instance=create_instance),
+    )
+    monkeypatch.setattr(
+        "plugins.scheduler._existing_named_series",
+        AsyncMock(return_value={"id": "rule-morning", "name": "Morning Wakeup Lights"}),
+    )
+
+    result = await SchedulerPlugin().remind(
+        when="07:30",
+        message="Morning Wakeup Lights",
+        recurrence="daily",
+    )
+
+    assert result.code == "tool_error"
+    assert "already exists" in result.message
+    assert "scheduler.replace_alert(series_id='rule-morning')" in result.message
     create_rule.assert_not_awaited()
     create_instance.assert_not_awaited()
 
@@ -768,6 +867,7 @@ async def test_recurring_remind_confirmed_persists_rule_and_instance(monkeypatch
         "plugins.scheduler.trigger_service",
         SimpleNamespace(create_rule=create_rule, create_instance=create_instance),
     )
+    monkeypatch.setattr("plugins.scheduler._existing_named_series", AsyncMock(return_value=None))
 
     result = await SchedulerPlugin().remind(
         when="tomorrow 10:00",
@@ -1186,6 +1286,57 @@ async def test_replace_alert_retargets_series_in_place(monkeypatch) -> None:
         "status": "pending",
     }
     assert instance_update["$set"]["delivery_snapshot"]["target"]["location_ref"]["room_name"] == "Bedroom"
+    assert "due_at" not in instance_update["$set"]
+
+
+@pytest.mark.asyncio
+async def test_replace_alert_message_only_preserves_pending_due_at(monkeypatch) -> None:
+    original_due = datetime(2026, 8, 13, 22, 30, 0, tzinfo=timezone.utc)
+    rule = {
+        "id": "rule-wake",
+        "owner_id": "geoff",
+        "origin": {
+            "kind": "time",
+            "fire_at": original_due,
+            "recurrence": "daily",
+            "timezone": "Australia/Sydney",
+            "original_local_time": "08:30",
+        },
+        "action": {"decision": "tell", "message": "Wake up"},
+        "attention": {"level": "critical", "requires_ack": True, "sound": "alarm"},
+        "delivery": {},
+        "surface": True,
+        "management": {"provider": "scheduler", "resource_id": "rule-wake"},
+    }
+    trigger_rules = SimpleNamespace(
+        find_one=AsyncMock(return_value=rule),
+        update_one=AsyncMock(),
+    )
+    trigger_instances = SimpleNamespace(update_many=AsyncMock())
+
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.scheduler.get_timezone", lambda: "Australia/Sydney")
+    monkeypatch.setattr(
+        "plugins.scheduler.mongodb",
+        SimpleNamespace(db=SimpleNamespace(
+            trigger_rules=trigger_rules,
+            trigger_instances=trigger_instances,
+        )),
+    )
+
+    result = await SchedulerPlugin().replace_alert(
+        series_id="rule-wake",
+        message="Time to get up and get after it.",
+    )
+
+    assert _text(result).startswith("Series updated.")
+    assert "its current schedule" in _text(result)
+    rule_update = trigger_rules.update_one.await_args.args[1]["$set"]
+    assert rule_update["action"]["message"] == "Time to get up and get after it."
+    assert rule_update["origin"]["fire_at"] == original_due
+    instance_update = trigger_instances.update_many.await_args.args[1]
+    assert instance_update["$set"]["action_snapshot"]["message"] == "Time to get up and get after it."
+    assert "due_at" not in instance_update["$set"]
 
 
 @pytest.mark.asyncio
@@ -1442,6 +1593,68 @@ async def test_maybe_schedule_next_skips_when_pending_exists(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_rematerialize_missing_recurring_schedules_next(monkeypatch) -> None:
+    now = datetime(2026, 8, 20, 5, 0, tzinfo=timezone.utc)
+    rule_doc = {
+        "id": "rule-wake",
+        "owner_id": "geoff",
+        "enabled": True,
+        "surface": True,
+        "origin": {
+            "kind": "time",
+            "fire_at": datetime(2026, 8, 13, 22, 30, tzinfo=timezone.utc),
+            "recurrence": "daily",
+            "timezone": "Australia/Sydney",
+            "original_local_time": "08:30",
+        },
+        "action": {"decision": "tell", "message": "Wake up"},
+        "attention": {"level": "critical", "sound": "alarm"},
+        "delivery": {},
+        "freshness": {"on_expiry": "expire", "stale_if_source_event_started": False},
+        "management": {"provider": "scheduler", "resource_id": "rule-wake"},
+    }
+    habit_rule = {
+        **rule_doc,
+        "id": "rule-habit",
+        "management": {"provider": "habits", "resource_id": "habit-1"},
+        "surface": False,
+    }
+
+    class Cursor:
+        def __init__(self, items):
+            self._items = items
+
+        async def to_list(self, _):
+            return self._items
+
+    materialize = AsyncMock(return_value=SimpleNamespace(id="trg-next"))
+    db = SimpleNamespace(
+        trigger_rules=SimpleNamespace(
+            find=MagicMock(return_value=Cursor([rule_doc, habit_rule])),
+            find_one=AsyncMock(return_value=rule_doc),
+        ),
+    )
+    monkeypatch.setattr("core.triggers.scheduler.mongodb", SimpleNamespace(db=db))
+    monkeypatch.setattr(
+        "core.triggers.service.trigger_service",
+        SimpleNamespace(materialize_recurring_occurrence=materialize),
+    )
+
+    class FrozenDatetime:
+        def now(self, tz=None):
+            return now
+
+    monkeypatch.setattr("core.triggers.scheduler.datetime", FrozenDatetime())
+
+    await TriggerScheduler()._rematerialize_missing_recurring()
+
+    materialize.assert_awaited_once()
+    due_at = materialize.await_args.kwargs["due_at"]
+    assert due_at > now
+    assert due_at.astimezone(timezone.utc) != rule_doc["origin"]["fire_at"]
+
+
+@pytest.mark.asyncio
 async def test_add_alarm_duration_uses_alarm_preset(monkeypatch) -> None:
     fixed_now = datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc)
     create_instance = AsyncMock(return_value=SimpleNamespace(id="trg-alarm"))
@@ -1506,13 +1719,34 @@ async def test_add_timer_clock_time_counts_down(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_remind_rejects_countdown_duration(monkeypatch) -> None:
+async def test_remind_duration_stays_a_reminder(monkeypatch) -> None:
+    fixed_now = datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc)
+    create_instance = AsyncMock(return_value=SimpleNamespace(id="trg-remind"))
+
+    class FrozenDatetime:
+        def __init__(self, frozen: datetime) -> None:
+            self._frozen = frozen
+
+        def __call__(self, *args, **kwargs):
+            return dt_stdlib.datetime(*args, **kwargs)
+
+        def now(self, tz=None):
+            return self._frozen
+
+    monkeypatch.setattr("plugins.scheduler.datetime", FrozenDatetime(fixed_now))
     monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.scheduler.is_duration_expression", lambda _v: True)
+    monkeypatch.setattr("plugins.scheduler.get_timezone", lambda: "UTC")
+    monkeypatch.setattr(
+        "plugins.scheduler.trigger_service",
+        SimpleNamespace(create_instance=create_instance),
+    )
 
-    result = await SchedulerPlugin().remind("30m", "Check oven")
+    result = await SchedulerPlugin().remind("in 2 minutes", "Get off")
 
-    assert "countdown duration" in _text(result)
-    assert "countdown duration" in _text(result)
-    assert "add_timer" in _text(result)
-    assert "add_alarm" in _text(result)
+    assert "Reminder set" in _text(result)
+    origin = create_instance.await_args.kwargs["origin"]
+    attention = create_instance.await_args.kwargs["attention"]
+    assert origin.kind == "time"
+    assert origin.fire_at == fixed_now + timedelta(minutes=2)
+    assert attention.requires_ack is False
+    assert attention.sound == "chime"

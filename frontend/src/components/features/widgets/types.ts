@@ -3,11 +3,13 @@ import React from 'react';
 export type WidgetMode = 'hero' | 'compressed';
 
 /**
- * Props that every widget in the system MUST handle.
- * These are injected by the WidgetWrapper at runtime.
+ * Injected by WidgetWrapper onto Hero. Keep these keys namespaced —
+ * they overwrite envelope data of the same name.
+ *
+ * Layout mode is not injected: Hero only renders in hero layout;
+ * compressed uses getCompressedConfig instead.
  */
 export interface BaseWidgetProps {
-  mode: WidgetMode;
   widgetId: string;
 }
 
