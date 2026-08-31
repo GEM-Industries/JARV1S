@@ -13,7 +13,11 @@ description: >-
 
 ## Audience
 
-Write for app users and beta testers (alarms, Home, calendar, pairing). Not git logs, graphify, lockfiles, CI pins, or internals.
+Write for someone opening the Mac app or a GitHub Release. Not git logs, graphify, lockfiles, CI, or internals.
+
+## How to phrase
+
+Lead with what they would notice, then why if it is not obvious. “You can change an alarm by name” not `replace_alert`. “Calendar on your Mac” not EventKit. One notable difference per bullet. Skip signing/CI unless the app would not run or update without it.
 
 ## Format
 

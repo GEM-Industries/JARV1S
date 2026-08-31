@@ -9,104 +9,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Replace or cancel an alarm or reminder by name or clock time instead of requiring an internal id.
-- Saying "another" or "as well" still adds a new alarm rather than overwriting one.
+- You can change or cancel an alarm or reminder by saying its name or time (“move my wake-up alarm”, “cancel the bins reminder”) instead of an id.
+- “Set another alarm as well” still adds a new alarm. It does not overwrite the one you already have.
 
 ## [0.6.0] - 2026-08-31
 
 ### Added
 
-- Agent Home: a persistent identity and working style for JARV1S.
-- Native macOS calendar for events and scheduling.
-- Pair speakers to rooms so replies can land in the right place.
-- Named work you can pick back up by title after a long task.
-- Pair a remote satellite speaker from the Host.
+- Agent Home: you can write who JARV1S is and how it should talk, and it keeps that.
+- JARV1S can use the Calendar app on your Mac, not only Google or Outlook.
+- You can put a speaker in a room so JARV1S answers from that room.
+- Background work (for example a coding job) keeps a name, so you can come back to it later (“keep going on the checkout PR”).
+- You can pair a satellite speaker that is not next to the Mac.
 
 ### Changed
 
-- Follow-up questions only when the enrolled owner's voice matches.
-- Unsolicited JARV1S speech is separate from a reply in conversation.
+- After you enroll your voice, a follow-up only counts if it is you. Other voices do not continue the conversation.
+- When JARV1S speaks on its own (a reminder or a notice), that shows separately from a reply to you.
 
 ## [0.5.0] - 2026-08-18
 
 ### Added
 
-- Structured capability calls, so actions JARV1S takes have clearer results.
-- Public AGPL source on GEM-Industries, promoted from a sanitized snapshot.
+- When JARV1S does something for you, the transcript shows a short receipt of what it did.
+- Source is public on GEM-Industries under AGPL.
 
 ## 0.4.0 - 2026-08-09
 
 ### Added
 
-- Home Assistant product setup from the app.
-- Voice admission, so only allowed voices can talk to JARV1S.
+- Connect Home Assistant from the app: find it on the network and sign in.
+- Enroll your voice so JARV1S can tell it is you, and only treat your speech as a turn.
 
 ## 0.3.0 - 2026-08-02
 
 ### Changed
 
-- Shared holographic look across startup, onboarding, and the main stage.
+- Startup and first-run setup use the same look as the main app.
 
 ### Fixed
 
-- Local Ollama models run inside the signed app.
+- A local Ollama model can run inside the signed Mac app (nested binaries now sign correctly).
 
 ## 0.2.4 - 2026-07-24
 
 ### Fixed
 
-- More reliable packaged runtime and conversation turns.
-- Updater metadata so installed apps can find this version.
+- The packaged Mac app starts and holds a conversation more reliably.
+- JARV1S is more careful about files and commands on your Mac.
+- Installed copies can find this version when they check for updates.
 
 ## 0.2.3 - 2026-07-23
 
 ### Fixed
 
-- Cleaner app, tray, and web icons without a baked-in shadow.
+- Dock, menu bar, and website icons are the same JARV1S mark, without a fake Mac shadow.
 
 ## 0.2.2 - 2026-07-23
 
 ### Added
 
-- JARV1S app icon.
+- JARV1S icon in the Dock.
 
 ## 0.2.1 - 2026-07-22
 
 ### Added
 
-- Wake-phrase check.
-- Call-aware audio, so JARV1S does not talk over a phone call.
+- In Settings, you can test whether saying “Jarvis” is heard, without starting a conversation.
+- The mic pauses while you are on a phone or conference call, so JARV1S does not talk over it.
 
 ## 0.2.0 - 2026-07-21
 
 ### Added
 
-- Maps location with GPS context.
+- JARV1S can look up places and use your location.
 
 ### Changed
 
-- Direct conversation turns.
-- Packaged Host no longer needs Redis.
+- Replies go through one model path, so a turn is simpler.
+- The Mac app no longer needs Redis.
 
 ## 0.1.2 - 2026-07-17
 
 ### Fixed
 
-- More reliable first-run onboarding and app startup.
+- First-run setup and Host startup are more reliable (services, credentials, and voice settings).
 
 ## 0.1.1 - 2026-07-17
 
 ### Added
 
-- Phone companion, so you can use JARV1S from your phone.
+- Use JARV1S from your phone, with a layout meant for a phone screen.
 
 ## 0.1.0 - 2026-07-16
 
 ### Added
 
-- First packaged macOS Host for Apple Silicon.
-- Wake-word enrollment.
-- Reach other household devices from the Host.
+- First Mac app you can install (Apple Silicon).
+- Teach JARV1S your wake word.
+- Reach other devices in the house from the Host.
 
 [unreleased]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.0...HEAD
 [0.6.0]: https://github.com/GEM-Industries/JARV1S/compare/v0.5.0...v0.6.0
