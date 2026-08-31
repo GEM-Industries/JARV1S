@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Agent Home: you can write who JARV1S is and how it should talk, and it keeps that.
+- Connect Gmail with Google sign-in in the app. Official Mac builds include the JARV1S Google app, so after you are invited as a tester you tap Connect instead of pasting a client ID.
 - JARV1S can use the Calendar app on your Mac, not only Google or Outlook.
 - You can put a speaker in a room so JARV1S answers from that room.
 - Background work (for example a coding job) keeps a name, so you can come back to it later (“keep going on the checkout PR”).
@@ -43,13 +44,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.3.0 - 2026-08-02
 
+### Added
+
+- JARV1S can listen on this Mac (Apple Speech) and speak with a local voice, without a cloud speech account.
+- A live stage while you talk, with the same look as the rest of the app.
+- The Mac can share its location, so Maps can use where you are.
+- Home: household rooms and devices in one place.
+
 ### Changed
 
-- Startup and first-run setup use the same look as the main app.
+- Startup and first-run setup match that look.
 
 ### Fixed
 
-- A local Ollama model can run inside the signed Mac app (nested binaries now sign correctly).
+- A local Ollama model can run inside the signed Mac app.
 
 ## 0.2.4 - 2026-07-24
 

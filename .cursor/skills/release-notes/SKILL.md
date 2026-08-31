@@ -17,7 +17,7 @@ Write for someone opening the Mac app or a GitHub Release. Not git logs, graphif
 
 ## How to phrase
 
-Lead with what they would notice, then why if it is not obvious. “You can change an alarm by name” not `replace_alert`. “Calendar on your Mac” not EventKit. One notable difference per bullet. Skip signing/CI unless the app would not run or update without it.
+Lead with what they would notice, then why if it is not obvious. “You can change an alarm by name” not `replace_alert`. “Calendar on your Mac” not EventKit. “Connect Gmail with Google sign-in” not `product_oauth.json`. One notable difference per bullet. Scan Connect, Settings, and first-run — not only the release commit subject. Skip signing/CI unless the app would not run or update without it.
 
 ## Format
 
