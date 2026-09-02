@@ -113,7 +113,7 @@ Echo caveat: standard TTS usually fails owner match, which helps self-cutoff. Vo
 ## Follow-Ups
 
 - Acoustic hygiene / AEC validation — resolved for first-room V1 by routing satellite TTS as 2-channel playback so XVF3800 channel 0 carries the AEC reference.
-- Shared turn-admission seam — **shipped**: barge-in is the enforced admission context; `ACTIVE_IDLE` follow-up is owner-gated when a speaker profile exists (fail-open until enrollment, and fail-open when the clip is too short to score). `Directedness` is the plug-in point for DDSD.
+- Shared turn-admission seam — **shipped**: barge-in is the enforced admission context; `ACTIVE_IDLE` follow-up is owner-gated when a speaker profile exists (fail-open until enrollment, and fail-open when the clip is too short to score). Enrolled `ACTIVE_IDLE` VAD is onset-scored (~0.4–0.8s) before a turn starts — mismatch does not reset the 4s activity timer. That timer runs only while `SpeechTurnPhase.IDLE`; capturing speech can finish after the deadline. `Directedness` is the plug-in point for DDSD.
 - DDSD directedness gate — classify whether speech is meant for JARV1S vs side conversation and populate `Directedness` for follow-up (then barge-in when latency allows). Identity ≠ addressivity; multi-user enrollment is separate.
 - Voice/agent eval harness — add repeatable regression coverage for barge-in, wakeword tuning, routing, and provider swaps.
 

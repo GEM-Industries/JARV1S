@@ -168,7 +168,7 @@ scheduled. Keep it tied to the user-facing claim the trigger would make.
 
 - `stale_if_source_event_started` is for calendar rules that are only useful
   before the source event starts, such as "starts in 5 minutes" reminders.
-  `automations.create_rule` and `rules.create` set it only for calendar
+  `automations.create_rule` sets it only for calendar
   `offset < 0`.
 - Do not set source-event staleness for `offset=0` or after-start rules. At-start
   automations are usually event-time actions ("mute during this meeting", "run
@@ -234,7 +234,6 @@ transitions to `delivered`.
 | `scheduler.add_alarm` | Wake alarms. | `tell` + `critical` + `requires_ack` + alarm sound. |
 | `habits.schedule_habit_checkin` | Habit-owned prompts and reviews. | `decision="offer"` + `instructions`. |
 | `automations.create_rule` | External-event rules. Discover with `list_available_triggers`, then persist directly. | Explicit `decision` (`tell`, `offer`, `act`). |
-| `rules.create` | Time/interval escape hatch. External origins redirect to automations. | Direct `TriggerRule` authoring. |
 
 ## Authoring examples
 

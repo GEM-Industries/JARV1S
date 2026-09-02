@@ -35,7 +35,11 @@ from core.voice.turn_admission import (
     decide_barge_in_admission,
     decide_followup_admission,
 )
-from core.voice.speaker_verifier import SpeakerEvidence, SpeakerMatchStatus
+from core.voice.speaker_verifier import (
+    MIN_SCORE_SECONDS,
+    SpeakerEvidence,
+    SpeakerMatchStatus,
+)
 from core.turns.delivery import signal_current_delivery_cancel
 from core.turns.orchestrator import AssistantOrchestrator, SESSION_FRESHNESS_SECONDS
 from core.voice.processor import SpeechEvent, SpeechTurnPhase, VoiceMode
@@ -741,6 +745,7 @@ async def handle_mute(session_id: str, message: WSMessage) -> None:
         return
 
     _clear_barge_in_candidate(session, reason="mute")
+    _cancel_followup_identity_task(session, reason="mute")
     _cancel_endpoint_decision(session, reason="mute")
     await _close_streaming_stt(session, reason="mute")
     _discard_voice_turn_latency(session_id, session, reason="mute")
@@ -769,6 +774,7 @@ async def handle_voice_activate(session_id: str, message: WSMessage) -> None:
         return
 
     _clear_barge_in_candidate(session, reason="voice_activate")
+    _cancel_followup_identity_task(session, reason="voice_activate")
     session.processor.force_active(reason="ws.voice_activate")
     await manager.send_message(
         session_id,
@@ -859,6 +865,7 @@ async def handle_stop_signal(session_id: str, message: WSMessage) -> None:
         return
         
     _clear_barge_in_candidate(session, reason="stop")
+    _cancel_followup_identity_task(session, reason="stop")
     _cancel_endpoint_decision(session, reason="stop")
     await _close_streaming_stt(session, reason="stop")
     _discard_voice_turn_latency(session_id, session, reason="stop")
@@ -1295,6 +1302,33 @@ def _is_fast_recovery_candidate(session, *, elapsed: float, window: float) -> bo
     )
 
 
+def _fast_recovery_miss_reason(session, *, elapsed: float, window: float) -> str | None:
+    """Why speech inside the recovery window did not merge. None = not an in-window miss."""
+    if elapsed >= window:
+        return None
+    if session.voice_turn is None:
+        return "no_voice_turn"
+    if _fast_recovery_target(session) is None:
+        return "no_task"
+    return "window_ok_but_ineligible"
+
+
+def _log_fast_recovery_miss(session_id: str, session) -> None:
+    elapsed = _fast_recovery_elapsed(session)
+    window = settings.VOICE.fast_recovery_window
+    reason = _fast_recovery_miss_reason(session, elapsed=elapsed, window=window)
+    if reason is None:
+        return
+    logger.info(
+        "Fast recovery missed | session=%s reason=%s elapsed=%.2fs window=%.1fs turn=%s",
+        session_id,
+        reason,
+        elapsed,
+        window,
+        getattr(session.voice_turn, "turn_id", None),
+    )
+
+
 def _has_active_input_or_run(session) -> bool:
     return (
         (session.endpoint_decision_task is not None and not session.endpoint_decision_task.done())
@@ -1382,13 +1416,142 @@ def _stamp_owner_speaker(
     voice_turn.speaker_source = source
 
 
-async def _score_followup_speaker(session, pcm: bytes) -> SpeakerEvidence:
-    """One-shot owner score for a finalized follow-up. No barge-in rescore cache."""
+async def _score_followup_speaker(
+    session,
+    pcm: bytes,
+    *,
+    max_seconds: float | None = None,
+) -> SpeakerEvidence:
+    """One-shot owner score for follow-up identity / commit. No barge-in rescore cache."""
     verifier = getattr(session, "speaker_verifier", None)
     if verifier is None or not verifier.enrolled:
         return SpeakerEvidence(status=SpeakerMatchStatus.NOT_ENROLLED)
     threshold = settings.VOICE.barge_in_speaker_threshold
-    return await asyncio.to_thread(verifier.verify_pcm, pcm, threshold=threshold)
+    return await asyncio.to_thread(
+        verifier.verify_pcm,
+        pcm,
+        threshold=threshold,
+        max_seconds=max_seconds,
+    )
+
+
+def _cancel_followup_identity_task(session, *, reason: str) -> None:
+    task = getattr(session, "followup_identity_task", None)
+    current = asyncio.current_task()
+    if task is not None and not task.done() and task is not current:
+        task.cancel(reason)
+    session.followup_identity_task = None
+
+
+async def _drop_followup_identity(
+    session_id: str,
+    session,
+    *,
+    reason: str,
+    evidence: SpeakerEvidence | None,
+) -> None:
+    _cancel_followup_identity_task(session, reason=reason)
+    session.processor.drop_followup_identity_candidate(reason=reason)
+    session.voice_turn = None
+    logger.info(
+        "Follow-up identity suppressed | session=%s reason=%s speaker=%s cosine=%s",
+        session_id,
+        reason,
+        evidence.status if evidence else None,
+        evidence.cosine if evidence else None,
+    )
+    perf.log(
+        "followup_identity_suppressed",
+        session=session_id,
+        source="user",
+        scenario="voice",
+        reason=reason,
+        speaker_status=evidence.status if evidence else None,
+        speaker_cosine=evidence.cosine if evidence else None,
+    )
+
+
+async def _open_admitted_followup(
+    session_id: str,
+    session,
+    *,
+    message_id: str,
+    evidence: SpeakerEvidence,
+) -> VoiceInputTurn:
+    session.processor.admit_followup_identity()
+    _cancel_followup_identity_task(session, reason="admitted")
+    voice_turn = _ensure_voice_turn(session_id, session)
+    _stamp_owner_speaker(voice_turn, evidence, source="followup")
+    perf.log(
+        "speech_started",
+        session=session_id,
+        turn_id=voice_turn.turn_id,
+        source="user",
+        scenario="voice",
+        mode=session.processor.mode.name,
+        required_frames=settings.VOICE.min_speech_frames,
+        buffered_audio_ms=_pcm_duration_ms(session.processor.turn_buffer),
+        speaker_status=evidence.status,
+        speaker_cosine=evidence.cosine,
+    )
+    await manager.send_message(
+        session_id,
+        WSResponse(
+            message_id=message_id,
+            type=WSMessageType.SPEECH_START,
+            data={"is_speech": True},
+        ),
+    )
+    await _publish_voice_user_start(session_id, session)
+    await _start_streaming_stt(session_id, session, bytes(session.processor.turn_buffer))
+    return voice_turn
+
+
+async def _resolve_followup_identity(session_id: str, session, *, message_id: str) -> bool:
+    """Score onset PCM. True when the capture is now an owner turn."""
+    if not session.processor.followup_identity_pending:
+        return session.voice_turn is not None
+    pcm = session.processor.peek_turn_speech_audio()
+    evidence = await _score_followup_speaker(
+        session,
+        pcm,
+        max_seconds=settings.VOICE.barge_in_speaker_onset_seconds,
+    )
+    if evidence.status is SpeakerMatchStatus.MISMATCH:
+        await _drop_followup_identity(
+            session_id, session, reason="speaker_mismatch", evidence=evidence
+        )
+        return False
+    await _open_admitted_followup(
+        session_id, session, message_id=message_id, evidence=evidence
+    )
+    return True
+
+
+async def _wait_followup_identity(session_id: str, session, *, message_id: str) -> None:
+    task = asyncio.current_task()
+    try:
+        deadline = time.monotonic() + settings.VOICE.barge_in_speaker_onset_seconds
+        min_ms = MIN_SCORE_SECONDS * 1000.0
+        while session.processor.followup_identity_pending:
+            pcm_ms = _pcm_duration_ms(session.processor.peek_turn_speech_audio())
+            phase = session.processor.turn_phase
+            if pcm_ms >= min_ms or phase != SpeechTurnPhase.SPEAKING:
+                break
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+        if getattr(session, "followup_identity_task", None) is not task:
+            return
+        if not session.processor.followup_identity_pending:
+            return
+        await _resolve_followup_identity(session_id, session, message_id=message_id)
+    except asyncio.CancelledError:
+        return
+    finally:
+        if getattr(session, "followup_identity_task", None) is task:
+            session.followup_identity_task = None
+
 
 
 def _speaker_perf_fields(session) -> dict:
@@ -2492,6 +2655,8 @@ async def _maybe_start_fast_recovery(
         turn_id=voice_turn.turn_id,
         source="user",
         scenario="voice",
+        owner_id=getattr(session, "owner_id", None),
+        connection_id=getattr(session, "connection_id", session_id),
         elapsed_ms=round(elapsed * 1000, 1),
         continuation_audio_ms=_pcm_duration_ms(session.processor.turn_buffer),
         transcript_chars=len(voice_turn.transcript_text),
@@ -2680,6 +2845,7 @@ async def handle_audio_stream(session_id: str, message: WSMessage) -> None:
             await _start_streaming_stt(session_id, session, bytes(session.processor.turn_buffer))
 
         elif event == SpeechEvent.SESSION_ENDED:
+            _cancel_followup_identity_task(session, reason="session_ended")
             _cancel_endpoint_decision(session, reason="session_ended")
             await _close_streaming_stt(session, reason="session_ended")
             await _close_turn_detector(session)
@@ -2740,20 +2906,26 @@ async def handle_audio_stream(session_id: str, message: WSMessage) -> None:
             )
             _schedule_barge_in_candidate_max_wait(session_id, session, voice_turn)
 
+        elif event == SpeechEvent.FOLLOWUP_CANDIDATE_STARTED:
+            if await _maybe_start_fast_recovery(session_id, session, message_id=message.id):
+                session.processor.admit_followup_identity(source="fast_recovery")
+                await _start_streaming_stt(
+                    session_id,
+                    session,
+                    bytes(session.processor.turn_buffer),
+                    voice_turn=session.voice_turn,
+                )
+                return
+            _log_fast_recovery_miss(session_id, session)
+            _cancel_followup_identity_task(session, reason="candidate_started")
+            session.followup_identity_task = asyncio.create_task(
+                _wait_followup_identity(session_id, session, message_id=message.id)
+            )
+
         elif event == SpeechEvent.USER_TURN_STARTED:
             elapsed = _fast_recovery_elapsed(session)
-            fast_recovery_window = settings.VOICE.fast_recovery_window
             if not await _maybe_start_fast_recovery(session_id, session, message_id=message.id):
-                logger.debug(
-                    "Fast recovery skipped: accepted_input=%s current_run=%s done_ai=%s done_run=%s audio_sent=%s elapsed=%.2fs window=%.1fs",
-                    session.accepted_input_task is not None,
-                    session.current_run_task is not None,
-                    session.accepted_input_task.done() if session.accepted_input_task else "N/A",
-                    session.current_run_task.done() if session.current_run_task else "N/A",
-                    session.first_audio_sent,
-                    elapsed,
-                    fast_recovery_window,
-                )
+                _log_fast_recovery_miss(session_id, session)
                 has_active_endpoint = (
                     session.endpoint_decision_task is not None
                     and not session.endpoint_decision_task.done()
@@ -2793,6 +2965,8 @@ async def handle_audio_stream(session_id: str, message: WSMessage) -> None:
             await _start_streaming_stt(session_id, session, bytes(session.processor.turn_buffer))
 
         elif event == SpeechEvent.TURN_RESUMED:
+            if session.processor.followup_identity_pending and session.voice_turn is None:
+                return
             voice_turn = (
                 getattr(session, "barge_in_candidate_turn", None)
                 if _barge_in_candidate_active(session)
@@ -2816,6 +2990,12 @@ async def handle_audio_stream(session_id: str, message: WSMessage) -> None:
             )
 
         elif event == SpeechEvent.TURN_COMPLETE:
+            if session.processor.followup_identity_pending:
+                _cancel_followup_identity_task(session, reason="endpoint")
+                if not await _resolve_followup_identity(
+                    session_id, session, message_id=message.id
+                ):
+                    return
             voice_turn = (
                 getattr(session, "barge_in_candidate_turn", None)
                 if _barge_in_candidate_active(session)

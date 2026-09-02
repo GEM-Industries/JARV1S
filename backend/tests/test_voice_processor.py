@@ -313,3 +313,114 @@ async def test_peek_turn_speech_audio_keeps_candidate_gaps_after_onset():
 
     assert event == SpeechEvent.BARGE_IN_CANDIDATE_STARTED
     assert processor.peek_turn_speech_audio() == b"sp1gapsp2sp3"
+
+
+@pytest.mark.asyncio
+async def test_followup_identity_candidate_does_not_refresh_activity():
+    processor = SpeechProcessor(vad_service=FakeVAD([True, True]))
+    processor.mode = VoiceMode.ACTIVE_IDLE
+    processor.hold_activity_until_owner = True
+    processor.min_speech_frames = 2
+    started = time.time() - 0.5
+    processor.last_activity_time = started
+
+    assert await processor.add_audio(b"s1") is None
+    assert await processor.add_audio(b"s2") == SpeechEvent.FOLLOWUP_CANDIDATE_STARTED
+    assert processor.followup_identity_pending is True
+    assert processor.last_activity_time == started
+    assert processor.turn_phase == SpeechTurnPhase.SPEAKING
+
+
+@pytest.mark.asyncio
+async def test_followup_identity_drop_preserves_activity_timer():
+    processor = SpeechProcessor(vad_service=FakeVAD([True, True, True]))
+    processor.mode = VoiceMode.ACTIVE_IDLE
+    processor.hold_activity_until_owner = True
+    processor.min_speech_frames = 2
+    started = time.time() - 0.5
+    processor.last_activity_time = started
+
+    await processor.add_audio(b"s1")
+    await processor.add_audio(b"s2")
+    processor.drop_followup_identity_candidate(reason="speaker_mismatch")
+
+    assert processor.last_activity_time == started
+    assert processor.turn_phase == SpeechTurnPhase.IDLE
+    assert processor.followup_identity_pending is False
+    assert processor.turn_buffer == bytearray()
+
+
+@pytest.mark.asyncio
+async def test_followup_capture_does_not_timeout_while_speaking():
+    processor = SpeechProcessor(vad_service=FakeVAD([True, True]))
+    processor.mode = VoiceMode.ACTIVE_IDLE
+    processor.hold_activity_until_owner = True
+    processor.min_speech_frames = 1
+    processor.active_timeout = 0.01
+    processor.last_activity_time = time.time() - 1.0
+
+    assert await processor.add_audio(b"s1") == SpeechEvent.FOLLOWUP_CANDIDATE_STARTED
+    assert await processor.add_audio(b"s2") is None
+    assert processor.mode == VoiceMode.ACTIVE_IDLE
+    assert processor.turn_phase == SpeechTurnPhase.SPEAKING
+    assert processor.followup_identity_pending is True
+
+
+@pytest.mark.asyncio
+async def test_admitted_followup_can_finish_after_activity_deadline():
+    processor = SpeechProcessor(vad_service=FakeVAD([True, True]))
+    processor.mode = VoiceMode.ACTIVE_IDLE
+    processor.hold_activity_until_owner = True
+    processor.min_speech_frames = 1
+    processor.active_timeout = 0.01
+    processor.last_activity_time = time.time() - 1.0
+
+    assert await processor.add_audio(b"s1") == SpeechEvent.FOLLOWUP_CANDIDATE_STARTED
+    processor.admit_followup_identity()
+    assert await processor.add_audio(b"s2") is None
+    assert processor.mode == VoiceMode.ACTIVE_IDLE
+    assert processor.turn_phase == SpeechTurnPhase.SPEAKING
+    assert processor.followup_identity_pending is False
+
+
+@pytest.mark.asyncio
+async def test_followup_drop_then_idle_can_timeout():
+    processor = SpeechProcessor(vad_service=FakeVAD([True, False]))
+    processor.mode = VoiceMode.ACTIVE_IDLE
+    processor.hold_activity_until_owner = True
+    processor.min_speech_frames = 1
+    processor.active_timeout = 0.01
+    processor.last_activity_time = time.time() - 1.0
+
+    assert await processor.add_audio(b"s1") == SpeechEvent.FOLLOWUP_CANDIDATE_STARTED
+    processor.drop_followup_identity_candidate(reason="speaker_mismatch")
+    assert await processor.add_audio(b"silence") == SpeechEvent.SESSION_ENDED
+    assert processor.mode == VoiceMode.PASSIVE
+
+
+@pytest.mark.asyncio
+async def test_endpoint_candidate_does_not_activity_timeout():
+    processor = SpeechProcessor(vad_service=FakeVAD([False]))
+    processor.mode = VoiceMode.ACTIVE_IDLE
+    processor.turn_phase = SpeechTurnPhase.ENDPOINT_CANDIDATE
+    processor.active_timeout = 0.01
+    processor.last_activity_time = time.time() - 1.0
+
+    assert await processor.add_audio(b"silence") is None
+    assert processor.mode == VoiceMode.ACTIVE_IDLE
+    assert processor.turn_phase == SpeechTurnPhase.ENDPOINT_CANDIDATE
+
+
+@pytest.mark.asyncio
+async def test_unenrolled_followup_still_starts_user_turn():
+    processor = SpeechProcessor(vad_service=FakeVAD([True, True]))
+    processor.mode = VoiceMode.ACTIVE_IDLE
+    processor.hold_activity_until_owner = False
+    processor.min_speech_frames = 2
+    started = time.time() - 0.5
+    processor.last_activity_time = started
+
+    assert await processor.add_audio(b"s1") is None
+    assert await processor.add_audio(b"s2") == SpeechEvent.USER_TURN_STARTED
+    assert processor.last_activity_time != started
+    assert processor.followup_identity_pending is False

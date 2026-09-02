@@ -141,7 +141,8 @@ class Session:
     barge_in_speaker_task: Optional[asyncio.Task] = None   # at-most-one speaker verify for the active candidate
     barge_in_speaker_evidence: Optional[SpeakerEvidence] = None
     barge_in_speaker_attempts: int = 0                     # at most two inferences per candidate
-    # Shared enrolled-speaker verifier for wake Stage 2b and barge-in.
+    followup_identity_task: Optional[asyncio.Task] = None  # onset score before ACTIVE_IDLE follow-up
+    # Shared enrolled-speaker verifier for wake Stage 2b, barge-in, and follow-up identity.
     speaker_verifier: Optional[EnrolledSpeakerVerifier] = None
     # Bounded PCM capture for room-speaker voice samples (Say Jarvis).
     voice_sample_buffer: Optional[bytearray] = None
@@ -170,6 +171,11 @@ class Session:
         self.voice_sample_buffer = None
         self.voice_sample_needed = 0
         self.voice_sample_done = None
+
+    def sync_followup_identity_gate(self) -> None:
+        """Enrolled ACTIVE_IDLE VAD must score as owner before it counts as activity."""
+        enrolled = bool(self.speaker_verifier is not None and self.speaker_verifier.enrolled)
+        self.processor.hold_activity_until_owner = enrolled
 
     def touch(self) -> None:
         """Record that the client is actively talking to the backend."""
@@ -541,6 +547,7 @@ class ConnectionManager:
             preferences=preferences,
             speaker_verifier=speaker_verifier,
         )
+        self.sessions[presence.connection_id].sync_followup_identity_gate()
         self.default_connection_by_owner_id[presence.owner_id] = presence.connection_id
         self.active_connection_by_node_key[presence.node_key] = presence.connection_id
         attention_state = await attention_service.get_state(presence.owner_id)
@@ -676,6 +683,8 @@ class ConnectionManager:
                     session.current_run_task.cancel("disconnect")
                 if session.endpoint_decision_task is not None:
                     session.endpoint_decision_task.cancel("disconnect")
+                if session.followup_identity_task is not None and not session.followup_identity_task.done():
+                    session.followup_identity_task.cancel("disconnect")
                 if session.soft_mute_resume_task is not None and not session.soft_mute_resume_task.done():
                     session.soft_mute_resume_task.cancel("disconnect")
                 if session.stt_stream is not None:

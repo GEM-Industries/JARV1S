@@ -655,6 +655,52 @@ def test_fast_recovery_waits_for_inflight_input_commit_with_existing_transcript(
     asyncio.run(run())
 
 
+def test_fast_recovery_miss_reason_only_for_in_window_speech():
+    window = 2.0
+    running = SimpleNamespace(done=lambda: False)
+
+    assert (
+        handlers._fast_recovery_miss_reason(
+            SimpleNamespace(voice_turn=None, accepted_input_task=None, current_run_task=None),
+            elapsed=float("inf"),
+            window=window,
+        )
+        is None
+    )
+    assert (
+        handlers._fast_recovery_miss_reason(
+            SimpleNamespace(voice_turn=None, accepted_input_task=None, current_run_task=None),
+            elapsed=0.4,
+            window=window,
+        )
+        == "no_voice_turn"
+    )
+    assert (
+        handlers._fast_recovery_miss_reason(
+            SimpleNamespace(
+                voice_turn=VoiceInputTurn(turn_id="turn-1"),
+                accepted_input_task=None,
+                current_run_task=None,
+            ),
+            elapsed=0.4,
+            window=window,
+        )
+        == "no_task"
+    )
+    assert (
+        handlers._fast_recovery_miss_reason(
+            SimpleNamespace(
+                voice_turn=VoiceInputTurn(turn_id="turn-1"),
+                accepted_input_task=running,
+                current_run_task=None,
+            ),
+            elapsed=0.4,
+            window=window,
+        )
+        == "window_ok_but_ineligible"
+    )
+
+
 def test_non_recovery_speech_starts_fresh_voice_turn(monkeypatch):
     async def run() -> None:
         class FakeProcessor:

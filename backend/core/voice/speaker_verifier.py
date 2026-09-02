@@ -1,7 +1,8 @@
 """Session-scoped enrolled-speaker verification.
 
-Shared by wake Stage 2b and barge-in. Owns one Sherpa extractor and one
-atomically replaceable owner embedding gallery. Raw PCM is never persisted.
+Shared by wake Stage 2b, barge-in, and ACTIVE_IDLE follow-up identity.
+Owns one Sherpa extractor and one atomically replaceable owner embedding
+gallery. Raw PCM is never persisted.
 """
 
 from __future__ import annotations

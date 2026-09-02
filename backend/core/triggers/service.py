@@ -152,7 +152,7 @@ class TriggerService:
                 "system": "system",
                 "time": "scheduler",
                 "interval": "scheduler",
-            }.get(origin.kind, "rules")
+            }.get(origin.kind, "scheduler")
             management = ManagementOwnership(
                 provider=provider,
                 resource_id=instance_id,

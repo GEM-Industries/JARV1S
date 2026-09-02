@@ -201,11 +201,15 @@ def _alert_matches_filters(
     if recurrence and str(entry.get("recurrence", "")).casefold() != recurrence.casefold():
         return False
     if message:
-        haystack = " ".join(
+        parts = [
             str(entry.get(field, ""))
-            for field in ("name", "message", "instructions")
+            for field in ("name", "message", "instructions", "kind")
             if entry.get(field)
-        ).casefold()
+        ]
+        kind_label = entry.get("kind")
+        if kind_label:
+            parts.append(f"{kind_label}s")
+        haystack = " ".join(parts).casefold()
         if message.casefold() not in haystack:
             return False
     if local_time:
@@ -636,6 +640,7 @@ class SchedulerPlugin(JarvisPlugin):
         Duration and wall-clock times both set a due time; they do not change this into a timer.
         Use add_timer only when the user asks for a countdown timer, and add_alarm for new wake alarms.
         Use defer for silent "do this later" side effects; reminders tell the user.
+        For "wake me unless I have a meeting" use decision="offer" with instructions; do not use add_alarm.
         Do NOT use automations.create_rule for time-based requests.
         To change an existing reminder, use replace_alert; do not create a second one and cancel.
         message is static text to repeat at fire time. For live future work, set a short message plus instructions with what to do at fire time.
@@ -1071,15 +1076,17 @@ class SchedulerPlugin(JarvisPlugin):
         the effective occurrence time and scheduled_local_time is the durable series time.
         If the user calls a timed action an "automation",
         "schedule", or "rule", still search here with query=/message= — not setups.find.
-        Filter named reminders/timers/alarms with kind; search other scheduled work by query or message
-        (both match message+instructions, or a clock time such as 12:00 / 12pm). For durable
+        query= matches name, message, kind, or a clock such as 12:00 / 12pm. For durable
         external-event rules and protocol definitions, use setups.find.
         """
         owner_id = get_owner_id()
         now_utc = datetime.now(timezone.utc)
         text_filter = (query or message or "").strip() or None
         if local_time and normalize_clock_time(local_time) is None:
-            return _fail("local_time is a clock such as 8:30 or 9:30 AM, not a date. For a named item use query=.")
+            return _fail(
+                "local_time is a clock such as 8:30 or 9:30 AM, not a date. "
+                "Omit local_time to list upcoming items."
+            )
         normalized_local_time = normalize_clock_time(local_time)
         if normalized_local_time is None:
             clock_from_query = normalize_clock_time(text_filter)

@@ -78,8 +78,6 @@ Canonical entry points reduce overlapping tool choice:
   `(source, event)` pairs with `list_available_triggers`, then persist with
   `create_rule`. Named delete stays on `delete_rule`. Pause and resume stay on
   `setups`.
-- `rules.create` is the time/interval escape hatch. External origins are
-  rejected and redirected to automations.
 - `setups` inventories and delegates lifecycle for managed definitions; it does
   not replace domain creation or editing tools.
 
@@ -123,6 +121,11 @@ absence needs no coverage evidence.
 
 Lookup tools should accept targeted user-shaped filters rather than requiring
 the model to fetch a mixed inventory and invent domain classification. When a
+lookup exposes both a freeform `query` and a closed typed filter (`kind`,
+`setup_type`, domain), `query` must be able to express that filter: lift closed
+product nouns onto the typed parameter, or search that label in the query
+haystack. `query="alarm"` and `kind="alarm"` must not mean different things;
+otherwise a complete empty from the query path is a false absence. When a
 negative answer matters, the return must distinguish:
 
 - no matching object in a complete search;

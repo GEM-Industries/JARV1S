@@ -399,6 +399,10 @@ class PerfLogger:
         elif message == "process_turn_cancelled":
             summary["status"] = "handoff" if payload.get("fast_recovery") else "cancelled"
             summary["active_stage"] = None
+            if payload.get("fast_recovery"):
+                voice = dict(summary.get("voice") or {})
+                voice["recovered"] = True
+                summary["voice"] = voice
         elif message == "endpoint_candidate_cancelled":
             summary["status"] = "handoff"
             summary["active_stage"] = None
@@ -484,6 +488,8 @@ class PerfLogger:
                 "confidence",
                 "stt_coverage_pct",
                 "stt_audio_gap_ms",
+                "admission_source",
+                "admission_reason",
             ):
                 if payload.get(key) is not None:
                     voice[key] = payload[key]
@@ -519,6 +525,7 @@ class PerfLogger:
                 if payload.get(key) is not None:
                     voice[f"recovery_{key}"] = payload[key]
             summary["voice"] = voice
+            self._publish_if_visible(summary)
 
 
 # Singleton instance

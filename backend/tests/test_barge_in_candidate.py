@@ -1055,3 +1055,101 @@ async def test_suppress_finalized_followup_retracts_and_skips_process_turn(monke
     assert send_message.await_args.args[1].type is WSMessageType.RETRACT
     send_voice_response.assert_awaited()
     session.processor.force_active.assert_called_once()
+
+
+def _followup_identity_session(*, evidence: SpeakerEvidence, pending: bool = True):
+    drop = MagicMock()
+    admit = MagicMock()
+    return SimpleNamespace(
+        voice_turn=None,
+        followup_identity_task=None,
+        speaker_verifier=SimpleNamespace(
+            enrolled=True,
+            verify_pcm=MagicMock(return_value=evidence),
+        ),
+        processor=SimpleNamespace(
+            mode=handlers.VoiceMode.ACTIVE_IDLE,
+            turn_phase=SpeechTurnPhase.SPEAKING,
+            turn_buffer=bytearray(b"\x00\x00" * 3200),
+            followup_identity_pending=pending,
+            peek_turn_speech_audio=MagicMock(return_value=b"\x00\x00" * 3200),
+            drop_followup_identity_candidate=drop,
+            admit_followup_identity=admit,
+        ),
+        soft_muted=False,
+        stt_stream=None,
+    ), drop, admit
+
+
+@pytest.mark.asyncio
+async def test_resolve_followup_identity_mismatch_drops_without_opening_turn(
+    monkeypatch,
+) -> None:
+    evidence = SpeakerEvidence(
+        status=SpeakerMatchStatus.MISMATCH,
+        speaker_id="owner-1",
+        cosine=0.05,
+        threshold=0.21,
+    )
+    session, drop, admit = _followup_identity_session(evidence=evidence)
+    monkeypatch.setattr(handlers, "manager", SimpleNamespace(send_message=AsyncMock()))
+    monkeypatch.setattr(handlers, "_publish_voice_user_start", AsyncMock())
+    monkeypatch.setattr(handlers, "_start_streaming_stt", AsyncMock())
+
+    opened = await handlers._resolve_followup_identity("test", session, message_id="msg-1")
+
+    assert opened is False
+    drop.assert_called_once_with(reason="speaker_mismatch")
+    admit.assert_not_called()
+    assert session.voice_turn is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_followup_identity_match_opens_owner_turn(monkeypatch) -> None:
+    evidence = SpeakerEvidence(
+        status=SpeakerMatchStatus.MATCHED,
+        speaker_id="owner-1",
+        cosine=0.4,
+        threshold=0.21,
+    )
+    session, drop, admit = _followup_identity_session(evidence=evidence)
+    start_stt = AsyncMock()
+    send_message = AsyncMock()
+    monkeypatch.setattr(
+        handlers, "manager", SimpleNamespace(send_message=send_message)
+    )
+    monkeypatch.setattr(handlers, "_publish_voice_user_start", AsyncMock())
+    monkeypatch.setattr(handlers, "_start_streaming_stt", start_stt)
+    monkeypatch.setattr(
+        handlers,
+        "_ensure_voice_turn",
+        MagicMock(return_value=VoiceInputTurn(turn_id="turn-owner")),
+    )
+
+    opened = await handlers._resolve_followup_identity("test", session, message_id="msg-1")
+
+    assert opened is True
+    admit.assert_called_once()
+    drop.assert_not_called()
+    start_stt.assert_awaited_once()
+    send_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resolve_followup_identity_unscorable_fail_opens(monkeypatch) -> None:
+    evidence = SpeakerEvidence(status=SpeakerMatchStatus.UNAVAILABLE)
+    session, drop, admit = _followup_identity_session(evidence=evidence)
+    monkeypatch.setattr(handlers, "manager", SimpleNamespace(send_message=AsyncMock()))
+    monkeypatch.setattr(handlers, "_publish_voice_user_start", AsyncMock())
+    monkeypatch.setattr(handlers, "_start_streaming_stt", AsyncMock())
+    monkeypatch.setattr(
+        handlers,
+        "_ensure_voice_turn",
+        MagicMock(return_value=VoiceInputTurn(turn_id="turn-short")),
+    )
+
+    opened = await handlers._resolve_followup_identity("test", session, message_id="msg-1")
+
+    assert opened is True
+    admit.assert_called_once()
+    drop.assert_not_called()

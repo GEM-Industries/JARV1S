@@ -25,12 +25,15 @@ SpeechProcessor.add_audio() (processor.py)   ← stateful hot path
        ├─ SpeechTurnPhase.IDLE (waiting for speech to start)
        │    • Speech frames go into vad_buffer
        │    • Requires min_speech_frames (2) or barge_in_min_frames (4) consecutive hits
-       │    • On confirmed: pre-roll + vad_buffer → turn_buffer, phase → SPEAKING, fires USER_TURN_STARTED
+       │    • On confirmed: pre-roll + vad_buffer → turn_buffer, phase → SPEAKING
+       │         – Unenrolled / barge-in: USER_TURN_STARTED or BARGE_IN_CANDIDATE_STARTED (refreshes activity)
+       │         – Enrolled ACTIVE_IDLE: FOLLOWUP_CANDIDATE_STARTED (does **not** refresh the 4s clock)
        │
        ├─ SpeechTurnPhase.SPEAKING (recording)
             • Every chunk appended to turn_buffer
-            • Flat VAD silence threshold proposes an endpoint
+            • Flat VAD silence threshold proposes an endpoint (uses last speech, not the listen-window clock)
             • On silence exceeded: phase → ENDPOINT_CANDIDATE, fires one TURN_COMPLETE edge
+            • Listen-window timeout is suspended — an utterance that started in the 4s window can finish
        │
        └─ SpeechTurnPhase.ENDPOINT_CANDIDATE
             • Processor suppresses duplicate TURN_COMPLETE events while async STT/model work runs
@@ -38,13 +41,20 @@ SpeechProcessor.add_audio() (processor.py)   ← stateful hot path
             • If VAD sees speech resume: phase → SPEAKING, fires TURN_RESUMED
             • If the model says "not done": continue_turn() moves back to SPEAKING
             • If committed: consume_turn_audio() moves back to IDLE
+            • Listen-window timeout stays suspended until phase returns to IDLE
 
        (between turns, phase = IDLE, mode = ACTIVE_IDLE)
-            • On 4s idle with no speech: fires SESSION_ENDED
+            • On 4s idle with no **owner** activity: fires SESSION_ENDED
+            • A mismatch drop returns here without moving last_activity_time; if 4s already elapsed, the next chunk times out
 
 handler receives SpeechEvent
   │
   ├─ WAKE_WORD_DETECTED  → send speech.start (wake_word=True) to frontend; stamp admission_source=wake
+  │
+  ├─ FOLLOWUP_CANDIDATE_STARTED
+  │    → enrolled ACTIVE_IDLE onset: score 0.4–0.8s with EnrolledSpeakerVerifier
+  │         MATCHED / UNAVAILABLE → admit (refresh activity) + speech.start + STT (same as USER_TURN_STARTED)
+  │         MISMATCH → drop capture, no STT, last_activity_time unchanged
   │
   ├─ USER_TURN_STARTED
   │    ├─ Late-continuation check (see below)
@@ -208,7 +218,7 @@ Trigger: sustained VAD emits `BARGE_IN_CANDIDATE_STARTED`. The backend starts ST
 | Suppress | Candidate STT is closed, candidate audio is discarded, provisional candidate transcript is retracted via `conversation.retract {message_id}`, mode remains `ACTIVE_AI_TURN`, and the active delivery continues. Enrolled sessions suppress speaker mismatch / verifier failure only after max-wait (optionally after one rescore). Without enrollment, proactive alerts suppress arbitrary endpointed side speech unless it is wake-prefixed or an exact local control. |
 | Commit | `VOICE_USER_START` is published and `_handle_interruption` runs. Wake-prefix and exact local controls always commit. Enrolled owner match commits only with meaningful text on endpoint or max wait (including proactive). Matched-but-tiny transcripts wait for STT until max-wait, then suppress as `empty_or_tiny` (including soft-wait resolves with `endpointed=False`). Without enrollment, normal answers still commit on endpointed text / max wait. Matched owner identity is stamped on `VoiceInputTurn` (`speaker_id`, `speaker_confidence`, `speaker_source="barge_in"`) along with `admission_source="barge_in"` and the policy reason. When commit lands while already `ENDPOINT_CANDIDATE` (direct VAD, soft-wait, or endpointed max-wait), the same path publishes `VOICE_USER_END` and schedules exactly one normal endpoint decision so STT finalizes; mid-speech commits (`SPEAKING`) keep listening until a silence edge; push-to-talk bypasses the scheduler and finalizes directly. |
 
-Admission after final STT: wake / barge-in / push-to-talk stamps are reused and not re-evaluated. Ordinary `ACTIVE_IDLE` follow-ups call `decide_followup_admission`: enrolled owner match commits (including short `yes`/`no`); mismatch suppresses and retracts; too-short/unscorable clips fail-open (`followup_unscorable`); no owner profile stays fail-open. Wake-prefix is not an identity bypass on follow-up. Future DDSD populates `Directedness` for owner side-speech; it must not replace the owner allow-list.
+Admission after final STT: wake / barge-in / push-to-talk stamps are reused and not re-evaluated. Ordinary `ACTIVE_IDLE` follow-ups are onset-scored with `EnrolledSpeakerVerifier` before `USER_TURN_STARTED` — mismatch never starts a turn or resets the 4s owner activity clock. Capturing (`SPEAKING` / `ENDPOINT_CANDIDATE`) suspends that clock so an owner utterance that began in the window can finish and commit after 4s. After finalize, `decide_followup_admission` still owner-gates: enrolled match commits (including short `yes`/`no`); mismatch suppresses and retracts; too-short/unscorable clips fail-open (`followup_unscorable`); no owner profile stays fail-open. Wake-prefix is not an identity bypass on follow-up. Future DDSD populates `Directedness` for owner side-speech; it must not replace the owner allow-list.
 
 #### Committed barge-in
 
@@ -337,7 +347,7 @@ Every successful reconnect receives a fresh `system.connect` payload (`attention
 | :--- | :--- | :--- | :--- |
 | **`idle`** | Ready / Voice active / Mic stalled | Steady dim green (warning when stalled) | **Wake Word Only.** (Processor: `PASSIVE`). Trust pill shows `Ready` until the mic pipeline is live, then `Voice active`. If the mic is claimed but PCM is not flowing, trust shows `Mic stalled` instead of lying with `Voice active` / `Listening`. Privacy/attention can replace this with `Mic muted`, `Voice muted`, `Quiet mode`, or `Paused`. |
 | **`waking`** | Detected | Rapid pulse blue | Wake word detected. Transitioning to `ACTIVE_IDLE`. |
-| **`listening`** | Listening | Steady blue glow | **VAD Active.** Times out after 8s of silence. |
+| **`listening`** | Listening | Steady blue glow | **VAD Active.** Times out after 4s of owner idle (`SpeechTurnPhase.IDLE`). |
 | **`transcribing`** | Transcribing | Pulsing blue | STT processing voice to text. |
 | **`thinking`** | Thinking | Pulsing blue | Delivery progress while the LLM is working (not provider reasoning content). Summarized reasoning streams on `conversation.reasoning` for text clients only. |
 | **`composing_tool`** | Thinking | Pulsing blue | Tool-call composition subphase of thinking. Frontend live-stage and trust pill collapse this into `Thinking`. |
@@ -419,7 +429,7 @@ class SpeechTurnPhase(Enum):
 | Mode | Wake Word | VAD Threshold | Activity Timeout | Echo Cooldown |
 | :--- | :--- | :--- | :--- | :--- |
 | **`PASSIVE`** | Active | — | — | Applied (post-speech) |
-| **`ACTIVE_IDLE`** | Off | `min_speech_frames` (2) | Active (8s) | — |
+| **`ACTIVE_IDLE`** | Off | `min_speech_frames` (2) | Active (4s, owner speech only) while `IDLE`; suspended while capturing | — |
 | **`ACTIVE_AI_TURN`** | Off | `barge_in_min_frames` (4) starts a barge-in candidate | Suspended | Armed on exit |
 
 ### Mode Transitions
@@ -430,7 +440,7 @@ class SpeechTurnPhase(Enum):
 | Turn begins (audio/system) | `ACTIVE_IDLE` | `ACTIVE_AI_TURN` |
 | Turn ends (playback_end, no audio sent) | `ACTIVE_AI_TURN` | `ACTIVE_IDLE` (or `PASSIVE` if `soft_muted`) |
 | User turn `NO_REPLY` (no audio sent) | `ACTIVE_AI_TURN` | `PASSIVE` (skip listening window; wake word required) |
-| Activity timeout (8s silence) | `ACTIVE_IDLE` | `PASSIVE` |
+| Activity timeout (4s owner silence) | `ACTIVE_IDLE` | `PASSIVE` |
 | Mute / power down / stop / session end | any | `PASSIVE` |
 | Committed interruption (barge-in / cancel) | `ACTIVE_AI_TURN` | `ACTIVE_IDLE` |
 | Local soft mute | any | `PASSIVE` |
@@ -443,7 +453,7 @@ class SpeechTurnPhase(Enum):
 ### Key Flows
 
 **Normal voice turn:**
-`PASSIVE` → wake word → `ACTIVE_IDLE` + `SPEAKING` → VAD endpoint candidate + async endpoint decision window → TurnDetector commit → STT final → `ACTIVE_AI_TURN` → LLM → TTS → playback_end → `ACTIVE_IDLE` + `IDLE` → (8s) → `PASSIVE`
+`PASSIVE` → wake word → `ACTIVE_IDLE` + `SPEAKING` → VAD endpoint candidate + async endpoint decision window → TurnDetector commit → STT final → `ACTIVE_AI_TURN` → LLM → TTS → playback_end → `ACTIVE_IDLE` + `IDLE` → (4s owner silence) → `PASSIVE`
 
 **Wake then pause before command:**
 `PASSIVE` → wake → `from_wake` turn with vocative-only / empty request text → endpoint → `wake_followon_pending` (same turn/buffer/STT) → user resumes → `TURN_RESUMED` → commit when non-wake content exists. If no follow-on before max delay → idle-settle (`wake_followon_timeout`), stay `ACTIVE_IDLE` + `IDLE`.

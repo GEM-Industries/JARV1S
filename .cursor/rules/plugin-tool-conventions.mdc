@@ -143,6 +143,7 @@ When the model repeatedly chooses valid-looking but wrong calls, treat it as an 
   unless the user explicitly asks for the series, permanence, or all future
   occurrences. State that default in the model-facing summary.
 - Prefer focused query parameters over broad list-and-filter outputs. A list tool that returns mixed records should accept ordinary user filters such as `kind`, `status`, `local_time`, `message`, or `recurrence` when those are common decision boundaries.
+- If `query` and a closed typed filter (`kind`, `setup_type`, domain) can express the same noun, normalize that noun onto the typed filter or search the label in the query haystack. `query="alarm"` and `kind="alarm"` must not mean different things; a complete empty from the query path is a false absence.
 - Do not require users to know internal storage taxonomy. If colloquial terms like "automation" can mean a durable rule or one-off deferred action, provide an umbrella lookup or make the tool error point to the exact alternate lookup.
 - If users can inspect disabled durable definitions, keep them discoverable through the agent's definitions inventory. Soft-off (`enabled=false`) is not delete, and pending-only inventories should not be stretched to represent disabled definitions.
 - Avoid nullable-parameter puzzles where two optional identifiers encode different scopes. If the model must choose between occurrence vs series, file vs folder, or user vs channel, make that scope explicit in parameter names, enums, separate tools, or fail-closed validation.
@@ -241,6 +242,9 @@ blocked `CapabilityErrorDetail` values (`approval_needed`, `reauth_needed`,
 - Expected failures → `return CapabilityErrorDetail(code="...", message="...")`.
   Actionable and self-contained (`Use one of: turn_on, turn_off, toggle`).
   Never bare `"not found"` or stack-trace-style strings.
+  Point recovery at a call that preserves the original intent. Do not steer a
+  class or time-window filter into a narrower name search; that trains a
+  complete-empty lookup for a noun that was never in the name field.
 - Unexpected failures (provider down, network, bugs) → `raise`. Do not catch
   just to return a vague string.
 - Validate cheap bad input before side effects and before `require_consent()`.
@@ -361,7 +365,7 @@ If a tool parameter represents a common user concept, accept the ordinary spoken
 - Shared, domain-neutral normalization belongs in shared helpers once more than one boundary can plausibly need it; keep domain-specific normalization near the plugin.
 - Relative time phrases should accept ordinary suffixes such as `"from now"` at the parser boundary (`"30 minutes from now"` → duration). The model should not have to strip conversational filler before calling a scheduler tool.
 - Percentages and units: strip simple unit suffixes such as `"50%"` at the plugin boundary before provider payload construction.
-- Aliases: normalize obvious closed-set synonyms such as `"every day"` → `"daily"` or `"Mon-Fri"` → weekday lists.
+- Aliases: normalize obvious closed-set synonyms such as `"every day"` → `"daily"` or `"Mon-Fri"` → weekday lists. Product nouns that already exist as typed filters belong on that filter even when the model put them in `query` (`"alarms"` → `kind="alarm"`).
 - Preserve the internal contract immediately after normalization: providers and services should still receive stable IDs, aware UTC datetimes, integer minutes, or provider-native payloads.
 - Do not add fuzzy natural-language parsers for open-ended phrases unless the domain has a clear, tested mapping. Prefer a dedicated helper tool for relative intent.
 

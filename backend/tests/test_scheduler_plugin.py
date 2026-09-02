@@ -359,6 +359,62 @@ async def test_get_alerts_query_matches_clock_time_or_text(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_alerts_query_kind_noun_filters_by_kind(monkeypatch) -> None:
+    fixed_now = datetime(2026, 6, 23, 15, 30, 0, tzinfo=timezone.utc)
+    due = datetime(2026, 6, 23, 22, 30, 0, tzinfo=timezone.utc)
+
+    class FrozenDatetime:
+        def now(self, tz=None):
+            return fixed_now
+
+    wake_alarm = {
+        "id": "trg-wake",
+        "owner_id": "geoff",
+        "status": "pending",
+        "due_at": due,
+        "action_snapshot": {"decision": "tell", "message": "Time to get up"},
+        "attention_snapshot": {"sound": "alarm", "requires_ack": True},
+        "origin_snapshot": {"kind": "time", "timezone": "Australia/Sydney"},
+        "delivery_snapshot": {},
+        "management": {"provider": "scheduler", "resource_id": "trg-wake"},
+    }
+    chime_reminder = {
+        **wake_alarm,
+        "id": "trg-chime",
+        "action_snapshot": {"decision": "tell", "message": "Take out the bins"},
+        "attention_snapshot": {"sound": "chime", "requires_ack": False},
+        "management": {"provider": "scheduler", "resource_id": "trg-chime"},
+    }
+
+    class Cursor:
+        def __init__(self, items):
+            self._items = items
+
+        async def to_list(self, _):
+            return self._items
+
+    db = SimpleNamespace(
+        trigger_instances=SimpleNamespace(
+            find=MagicMock(return_value=Cursor([wake_alarm, chime_reminder])),
+        ),
+        trigger_rules=SimpleNamespace(find=MagicMock(return_value=Cursor([]))),
+    )
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.scheduler.mongodb", SimpleNamespace(db=db))
+    monkeypatch.setattr("plugins.scheduler.datetime", FrozenDatetime())
+
+    by_noun = await SchedulerPlugin().get_alerts(query="alarms")
+    assert [row.instance_id for row in by_noun.alerts] == ["trg-wake"]
+    assert by_noun.alerts[0].kind == "alarm"
+    assert by_noun.match_status == "single"
+
+    by_kind = await SchedulerPlugin().get_alerts(kind="alarm")
+    assert [row.instance_id for row in by_kind.alerts] == ["trg-wake"]
+
+    assert [row.instance_id for row in (await SchedulerPlugin().get_alerts(query="timer")).alerts] == []
+
+
+@pytest.mark.asyncio
 async def test_get_alerts_includes_silent_work_and_filters_by_content(monkeypatch) -> None:
     fixed_now = datetime(2026, 6, 23, 15, 30, 0, tzinfo=timezone.utc)
     due = datetime(2026, 6, 23, 22, 30, 0, tzinfo=timezone.utc)

@@ -88,11 +88,13 @@ async def _reload_owner_verifiers(owner_id: str) -> int:
             wakeword = getattr(session.processor, "wakeword_service", None)
             if wakeword is not None:
                 await asyncio.to_thread(wakeword.reload_verifiers)
+                session.sync_followup_identity_gate()
                 return True
             shared = getattr(session, "speaker_verifier", None)
             if shared is None:
                 return False
             await asyncio.to_thread(shared.reload_profile)
+            session.sync_followup_identity_gate()
         except Exception:
             logger.exception(
                 "Failed to reload speaker verifiers | owner=%s connection=%s",

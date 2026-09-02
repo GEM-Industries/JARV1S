@@ -17,6 +17,7 @@ WakeSuppressionReason = Literal["refractory", "post_tts"]
 class SpeechEvent(Enum):
     USER_TURN_STARTED = auto()
     BARGE_IN_CANDIDATE_STARTED = auto()
+    FOLLOWUP_CANDIDATE_STARTED = auto()
     TURN_RESUMED = auto()
     TURN_COMPLETE = auto()
     WAKE_WORD_DETECTED = auto()
@@ -72,7 +73,7 @@ class SpeechProcessor:
         self._wake_suppression_reason: WakeSuppressionReason | None = None
         self._wake_suppression_logged = False
         self.last_activity_time = time.time()
-        # True speech-end anchor; activity bookkeeping must not move it.
+        # VAD silence anchor. Distinct from last_activity_time (listen-window clock).
         self.last_speech_monotonic = 0.0
         self.max_negative_frames = 2
         self._turn_start_time: float = 0.0
@@ -80,10 +81,31 @@ class SpeechProcessor:
         # Pre-roll before this may contain TTS playback and must not enter speaker scoring.
         self._speech_onset_offset = 0
         self._candidate_span_bytes = 0
+        # When enrolled, ACTIVE_IDLE VAD captures must score as the owner before they
+        # count as activity or become a user turn.
+        self.hold_activity_until_owner = False
+        self.followup_identity_pending = False
 
     def refresh_activity(self, *, source: str = "unspecified"):
-        """Reset the activity timer."""
+        """Reset the listen-window clock. Not used for VAD silence."""
         self.last_activity_time = time.time()
+
+    def _speech_silence_age_s(self, current_time: float) -> float:
+        """Endpointing uses last speech, never the 4s listen-window clock."""
+        if self.last_speech_monotonic > 0:
+            return time.monotonic() - self.last_speech_monotonic
+        return current_time - self.last_activity_time
+
+    def admit_followup_identity(self, *, source: str = "followup_identity") -> None:
+        """Owner (or fail-open) onset: this capture may reset the listening window."""
+        self.followup_identity_pending = False
+        self.refresh_activity(source=source)
+
+    def drop_followup_identity_candidate(self, *, reason: str = "unspecified") -> None:
+        """Discard an una-admitted follow-up capture without resetting the activity timer."""
+        logger.debug("Dropping follow-up identity candidate | reason=%s", reason)
+        self.reset_state(refresh_activity=False)
+        self.clear_preroll()
 
     def _suppress_wake_for(self, seconds: float, reason: WakeSuppressionReason) -> None:
         if seconds <= 0:
@@ -219,6 +241,8 @@ class SpeechProcessor:
                 self.turn_phase = SpeechTurnPhase.SPEAKING
                 self._turn_start_time = current_time
                 self.last_speech_monotonic = time.monotonic()
+                self.followup_identity_pending = False
+                self.refresh_activity(source="wake_word_detected")
 
                 return SpeechEvent.WAKE_WORD_DETECTED
 
@@ -230,9 +254,10 @@ class SpeechProcessor:
         if self.turn_phase == SpeechTurnPhase.SPEAKING:
             self.turn_buffer.extend(audio_bytes)
             if is_speech:
-                self.last_activity_time = current_time
+                if not self.followup_identity_pending:
+                    self.last_activity_time = current_time
                 self.last_speech_monotonic = time.monotonic()
-            elif current_time - self.last_activity_time > self.silence_threshold:
+            elif self._speech_silence_age_s(current_time) > self.silence_threshold:
                 self.turn_phase = SpeechTurnPhase.ENDPOINT_CANDIDATE
                 return SpeechEvent.TURN_COMPLETE
         elif self.turn_phase == SpeechTurnPhase.ENDPOINT_CANDIDATE:
@@ -240,7 +265,8 @@ class SpeechProcessor:
             if is_speech:
                 self.turn_phase = SpeechTurnPhase.SPEAKING
                 self.last_speech_monotonic = time.monotonic()
-                self.refresh_activity(source="endpoint_candidate_resumed")
+                if not self.followup_identity_pending:
+                    self.refresh_activity(source="endpoint_candidate_resumed")
                 return SpeechEvent.TURN_RESUMED
             return None
         else:
@@ -254,6 +280,10 @@ class SpeechProcessor:
                 is_barge_in = self.mode == VoiceMode.ACTIVE_AI_TURN
                 required = self.barge_in_min_frames if is_barge_in else self.min_speech_frames
                 if self.vad_positive_count >= required:
+                    gate_followup = (
+                        self.hold_activity_until_owner
+                        and self.mode == VoiceMode.ACTIVE_IDLE
+                    )
                     label = "BARGE-IN" if is_barge_in else "VAD"
                     logger.info("%s: Sustained speech detected (%d frames). Starting turn.", label, self.vad_positive_count)
                     self.turn_phase = SpeechTurnPhase.SPEAKING
@@ -266,6 +296,10 @@ class SpeechProcessor:
                     self._speech_onset_offset = max(0, len(preroll) - self._candidate_span_bytes)
                     self._candidate_span_bytes = 0
                     self.clear_preroll()
+                    if gate_followup:
+                        self.followup_identity_pending = True
+                        return SpeechEvent.FOLLOWUP_CANDIDATE_STARTED
+                    self.followup_identity_pending = False
                     self.refresh_activity(source=f"{label.lower()}_speech_start")
                     if is_barge_in:
                         return SpeechEvent.BARGE_IN_CANDIDATE_STARTED
@@ -278,8 +312,14 @@ class SpeechProcessor:
                     self.vad_negative_count = 0
                     self._candidate_span_bytes = 0
 
-        # Activity timeout: only fires when idle (not during AI turn or user turn)
-        if self.turn_phase == SpeechTurnPhase.IDLE and self.mode == VoiceMode.ACTIVE_IDLE and (current_time - self.last_activity_time) > self.active_timeout:
+        # Listen-window timeout only while expecting speech. SPEAKING and
+        # ENDPOINT_CANDIDATE are recognizing — an utterance that started in the
+        # window must be allowed to finish and commit.
+        if (
+            self.mode == VoiceMode.ACTIVE_IDLE
+            and self.turn_phase == SpeechTurnPhase.IDLE
+            and (current_time - self.last_activity_time) > self.active_timeout
+        ):
             logger.info(
                 "Activity timeout -> SESSION_ENDED | silence_age_s=%.3f threshold_s=%.3f",
                 current_time - self.last_activity_time,
@@ -295,7 +335,8 @@ class SpeechProcessor:
         if self.turn_phase == SpeechTurnPhase.ENDPOINT_CANDIDATE:
             logger.debug("Continuing user turn | reason=%s", reason)
             self.turn_phase = SpeechTurnPhase.SPEAKING
-        self.refresh_activity(source=f"continue_turn:{reason}")
+        if not self.followup_identity_pending:
+            self.refresh_activity(source=f"continue_turn:{reason}")
 
     def request_turn_commit(self) -> bool:
         """Mark an explicitly-ended push-to-talk turn ready for commitment."""
@@ -323,6 +364,7 @@ class SpeechProcessor:
         self.last_speech_monotonic = 0.0
         self._speech_onset_offset = 0
         self._candidate_span_bytes = 0
+        self.followup_identity_pending = False
         self.refresh_activity(source=f"suppress_barge_in_candidate:{reason}")
 
     def consume_turn_audio(self) -> bytes:
@@ -337,10 +379,11 @@ class SpeechProcessor:
         self.last_speech_monotonic = 0.0
         self._speech_onset_offset = 0
         self._candidate_span_bytes = 0
+        self.followup_identity_pending = False
         self.refresh_activity(source="consume_turn_audio")
         return audio
 
-    def reset_state(self):
+    def reset_state(self, *, refresh_activity: bool = True):
         """Reset turn-specific state without changing mode."""
         self.turn_buffer.clear()
         self.turn_phase = SpeechTurnPhase.IDLE
@@ -350,7 +393,9 @@ class SpeechProcessor:
         self.last_speech_monotonic = 0.0
         self._speech_onset_offset = 0
         self._candidate_span_bytes = 0
-        self.refresh_activity(source="reset_state")
+        self.followup_identity_pending = False
+        if refresh_activity:
+            self.refresh_activity(source="reset_state")
 
     def force_passive(
         self,

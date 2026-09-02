@@ -518,7 +518,7 @@ cases:
     tools_forbidden:
     - automations.create_rule
     max_tool_calls: 4
-- id: probe_conditional_monday_wake_rule_prefers_rules_create
+- id: probe_conditional_monday_wake_uses_remind_offer
   priority: P1
   category: tool_selection
   tier: probe
@@ -527,32 +527,26 @@ cases:
   input: Every Monday at 8am wake me up unless I have a meeting before 11.
   script:
   - type: tool_call
-    capability: rules.create
+    capability: scheduler.remind
     arguments:
-      name: Monday conditional wake up
-      origin:
-        kind: time
-        when: Monday 8am
-        recurrence: weekly
-      action:
-        decision: offer
-        message: Conditional Monday wake up
-        instructions: Check my calendar before 11am. If I do not have a meeting before 11, wake me up; otherwise do not wake
-          me.
-      delivery: announce
-      attention: critical
-      sound: alarm
+      when: Monday 8am
+      recurrence: weekly
+      decision: offer
+      message: Monday wake up
+      instructions: Check my calendar before 11am. If I do not have a meeting before 11, wake me; otherwise do not wake me.
       confirmed: true
   - type: tool_output
-    content: 'Rule ''Monday conditional wake up'' created.'
+    content: Recurring reminder (weekly) set.
   - type: text
     content: Done. I'll check your calendar each Monday before waking you.
   assert:
     tools_called:
-    - rules.create
+    - scheduler.remind
     tools_forbidden:
     - automations.create_rule
     - scheduler.add_alarm
+    expected_arguments:
+      decision: offer
     max_tool_calls: 2
 - id: probe_calendar_relative_reminder_uses_automation_contract
   priority: P1
@@ -565,7 +559,6 @@ cases:
   - automations.list_available_triggers
   - automations.create_rule
   - scheduler.remind
-  - rules.create
   input: Give me a heads-up ten minutes before each appointment.
   live_tool_outputs:
   - '[{"source":"calendar","event":"starting","description":"Triggers relative to a calendar event start time. Use trigger.offset (negative = before).","provider":"built-in","condition_fields":[{"field":"title","type":"string","operators":["contains","equals"]}],"supported":true,"offset_supported":true}]'
@@ -578,7 +571,6 @@ cases:
       event: '"event": "starting"'
     tools_forbidden:
     - scheduler.remind
-    - rules.create
     response_must_not_contain:
     - Preview only
     - approval
@@ -594,7 +586,6 @@ cases:
   - scheduler.remind
   - automations.create_rule
   - automations.list_available_triggers
-  - rules.create
   input: Remind me in ten minutes to stand up.
   live_tool_output: Reminder set for 10 minutes from now.
   assert:
@@ -603,7 +594,6 @@ cases:
     tools_forbidden:
     - automations.create_rule
     - automations.list_available_triggers
-    - rules.create
     max_tool_calls: 2
 - id: probe_delete_named_automation_uses_delete_rule
   priority: P1
@@ -1914,7 +1904,6 @@ cases:
     tools_forbidden:
     - setups.find
     - automations.update_rule
-    - rules.create
     expected_arguments:
       scope: series
       instructions: warm

@@ -436,6 +436,8 @@ def test_turn_summary_captures_compact_voice_and_stt_metadata():
             audio_ms=1536.0,
             transcript_chars=42,
             reason="audio_eou",
+            admission_source="followup",
+            admission_reason="owner_followup",
         )
         perf.log(
             "fast_recovery_triggered",
@@ -468,6 +470,8 @@ def test_turn_summary_captures_compact_voice_and_stt_metadata():
     assert summary["turn_detection"]["reason"] == "audio_eou"
     assert summary["turn_detection"]["confidence"] == 0.92
     assert summary["voice"]["audio_ms"] == 1536.0
+    assert summary["voice"]["admission_source"] == "followup"
+    assert summary["voice"]["admission_reason"] == "owner_followup"
     assert summary["voice"]["recovered"] is True
     assert summary["voice"]["recovery_count"] == 1
 
@@ -557,3 +561,52 @@ def test_playback_end_received_annotates_existing_voice_summary_only():
     assert summary["voice"]["playback_end_stale"] is False
     assert summary["voice"]["playback_end_turn_active"] is False
     assert len(perf.completed_turn_summaries()) == 1
+
+
+def test_fast_recovery_after_first_audio_keeps_recovered_on_completed_summary():
+    perf = PerfLogger()
+    _enable(perf)
+
+    with _turn(perf, turn_id="turn-late-recovery", source="user", scenario="voice"):
+        perf.log(
+            "voice_turn_committed",
+            session="u1",
+            audio_ms=800.0,
+            transcript_chars=20,
+            reason="audio_eou",
+        )
+        perf.start("response_latency", "u1")
+        perf.end("response_latency", "u1")
+        perf.log(
+            "fast_recovery_triggered",
+            session="u1",
+            elapsed_ms=400.0,
+            continuation_audio_ms=200.0,
+        )
+
+    summary = perf.latest_turn_summary()
+    assert summary is not None
+    assert summary["status"] == "completed"
+    assert summary["voice"]["recovered"] is True
+    assert summary["voice"]["recovery_count"] == 1
+
+
+def test_process_turn_cancelled_fast_recovery_stamps_recovered():
+    perf = PerfLogger()
+    _enable(perf)
+
+    with _turn(perf, turn_id="turn-handoff-recovery", source="user", scenario="voice"):
+        perf.log(
+            "voice_turn_committed",
+            session="u1",
+            audio_ms=800.0,
+            transcript_chars=20,
+            reason="audio_eou",
+        )
+        perf.log("process_turn_cancelled", session="u1", fast_recovery=True)
+
+    summary = perf._turn_summaries["u1:turn-handoff-recovery"]
+    assert summary["status"] == "handoff"
+    assert summary["voice"]["recovered"] is True
+    assert perf.latest_turn_summary() is None
+

@@ -231,10 +231,12 @@ async def test_reload_owner_verifiers_is_best_effort() -> None:
         SimpleNamespace(
             connection_id="browser-1",
             processor=SimpleNamespace(wakeword_service=SimpleNamespace(reload_verifiers=healthy)),
+            sync_followup_identity_gate=MagicMock(),
         ),
         SimpleNamespace(
             connection_id="satellite-1",
             processor=SimpleNamespace(wakeword_service=SimpleNamespace(reload_verifiers=broken)),
+            sync_followup_identity_gate=MagicMock(),
         ),
     ]
 

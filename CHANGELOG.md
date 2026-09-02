@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-03
+
+### Fixed
+
+- After you enroll your voice, other people talking nearby no longer keep JARV1S listening. The 4-second wait is for your voice only. If you start talking in that window, JARV1S keeps listening until you finish.
+
+### Removed
+
+- Timed jobs go through reminders, alarms, and deferred instructions. The extra Rules hatch is gone.
+
 ## [0.6.1] - 2026-09-02
 
 ### Changed
@@ -128,7 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Teach JARV1S your wake word.
 - Reach other devices in the house from the Host.
 
-[unreleased]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.1...HEAD
+[unreleased]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/GEM-Industries/JARV1S/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GEM-Industries/JARV1S/releases/tag/v0.5.0
