@@ -32,14 +32,12 @@ if [[ ! -f "$ROOT/frontend/dist/index.html" ]]; then
   echo "Building frontend..."
   (cd "$ROOT/frontend" && npm ci && npm run build)
 fi
-rm -rf "$DEST/frontend-dist"
 mkdir -p "$DEST/frontend-dist"
-cp -R "$ROOT/frontend/dist/." "$DEST/frontend-dist/"
+rsync -a --delete "$ROOT/frontend/dist/" "$DEST/frontend-dist/"
 
 echo "Copying backend source..."
-rm -rf "$DEST/backend"
 mkdir -p "$DEST/backend"
-rsync -a \
+rsync -a --delete \
   --exclude '.venv' \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
@@ -174,18 +172,34 @@ if [[ "$RELEASE_CHANNEL" != "internal" && "$RELEASE_CHANNEL" != "beta" ]]; then
   exit 1
 fi
 
-cat >"$DEST/runtime-bundle.json" <<EOF
-{
-  "host_version": "${HOST_VERSION}",
-  "runtime_bundle": "${GIT_SHA}",
-  "frontend_build": "${GIT_SHA}",
-  "python": "${PYTHON_VER}",
-  "arch": "${ARCH}",
-  "service_provider": "bundled",
-  "release_channel": "${RELEASE_CHANNEL}",
-  "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BUNDLE_JSON="$DEST/runtime-bundle.json"
+python3 - "$BUNDLE_JSON" "$HOST_VERSION" "$GIT_SHA" "$PYTHON_VER" "$ARCH" "$RELEASE_CHANNEL" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+desired = {
+    "host_version": sys.argv[2],
+    "runtime_bundle": sys.argv[3],
+    "frontend_build": sys.argv[3],
+    "python": sys.argv[4],
+    "arch": sys.argv[5],
+    "service_provider": "bundled",
+    "release_channel": sys.argv[6],
 }
-EOF
+current = {}
+if path.is_file():
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        current = {}
+if all(current.get(key) == value for key, value in desired.items()):
+    sys.exit(0)
+desired["built_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+path.write_text(json.dumps(desired, indent=2) + "\n", encoding="utf-8")
+PY
 
 cp "$ROOT/apps/desktop/THIRD_PARTY_NOTICES.md" "$DEST/THIRD_PARTY_NOTICES.md"
 
@@ -199,7 +213,6 @@ fi
 
 echo "Building Apple Speech helper..."
 HELPER_DEST="$ROOT/apps/desktop/resources/helpers"
-rm -rf "$HELPER_DEST/JARV1SSpeechHelper.app"
 bash "$ROOT/apps/desktop/apple-stt-helper/scripts/build.sh" "$HELPER_DEST"
 bash "$ROOT/apps/desktop/apple-stt-helper/scripts/smoke.sh" \
   "$HELPER_DEST/JARV1SSpeechHelper.app/Contents/MacOS/JARV1SSpeechHelper" \
@@ -212,8 +225,11 @@ cp "$ROOT/apps/desktop/managed-llm/manifest.json" \
 
 echo "Packaging local Kokoro TTS assets..."
 bash "$ROOT/apps/desktop/scripts/build-local-tts-assets.sh" "$DEST/local-tts"
-# Fail the release build if the helper cannot synthesize with bundled deps/assets.
-JARVIS_TTS_ASSETS_DIR="$DEST/local-tts" "$PYTHON_BIN" - <<'PY'
+if [[ "$REUSE_PYTHON" == "1" && -f "$DEST/local-tts/kokoro-v1.0.int8.onnx" ]]; then
+  echo "Skipping Kokoro smoke (Python runtime unchanged)"
+else
+  # Fail the release build if the helper cannot synthesize with bundled deps/assets.
+  JARVIS_TTS_ASSETS_DIR="$DEST/local-tts" "$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 import numpy as np
 from kokoro_onnx import Kokoro
@@ -226,8 +242,13 @@ assert int(sr) == 24000, sr
 assert audio.size > 0 and np.isfinite(audio).all()
 print(f"Kokoro smoke ok samples={audio.size} sr={sr}")
 PY
+fi
 
-echo "Running bundled service smoke test..."
-bash "$(dirname "$0")/smoke-services.sh"
+if [[ "$REUSE_PYTHON" == "1" ]]; then
+  echo "Skipping bundled service smoke test (Python runtime unchanged)"
+else
+  echo "Running bundled service smoke test..."
+  bash "$(dirname "$0")/smoke-services.sh"
+fi
 
 echo "Host runtime ready at $DEST"

@@ -7,10 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-02
+
 ### Changed
 
 - You can change or cancel an alarm or reminder by saying its name or time (“move my wake-up alarm”, “cancel the bins reminder”) instead of an id.
 - “Set another alarm as well” still adds a new alarm. It does not overwrite the one you already have.
+- Changing a repeating alarm or reminder without saying “from now on” or “all of them” only changes the next one.
+- When JARV1S asks to confirm something, saying yes or no does it (or cancels it) right away.
+- You can change or delete an event automation (new email, calendar heads-up) by name.
+- Spoken replies use a slightly more distant tone.
+
+### Fixed
+
+- Remote access through Funnel keeps webhook paths, so Gmail and phone events still reach JARV1S.
+- A Gmail automation only fires for mail that arrives while JARV1S is watching. If it was off, it does not replay the inbox.
 
 ## [0.6.0] - 2026-08-31
 
@@ -117,6 +128,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Teach JARV1S your wake word.
 - Reach other devices in the house from the Host.
 
-[unreleased]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.0...HEAD
+[unreleased]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/GEM-Industries/JARV1S/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/GEM-Industries/JARV1S/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/GEM-Industries/JARV1S/releases/tag/v0.5.0

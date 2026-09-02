@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from core.agent.agent import AgentEventType, JarvisAgent
 from core.plugins.capabilities import (
+    InvocationStatus,
     capability_fqns,
     invocation_trace_payload,
     reset_capability_turn_id,
@@ -253,6 +254,8 @@ async def execute_turn(
     full_response = ""  # raw model text for the current segment (resets on tool_call)
     reasoning_buffer = ""
     current_response_id: Optional[str] = getattr(delivery, "response_id", None)
+    had_model_text = False
+    blocked_for_approval = False
 
     def _flush_reasoning_trace() -> None:
         nonlocal reasoning_buffer
@@ -290,6 +293,7 @@ async def execute_turn(
                 sanitized_content = sanitize_assistant_output(event.content)
                 if not sanitized_content:
                     continue
+                had_model_text = True
                 full_response += sanitized_content
                 result.full_response = full_response
                 await delivery.on_stream(StreamEvent(tag="text", content=sanitized_content))
@@ -371,6 +375,13 @@ async def execute_turn(
                     "focus_tools": list(current_tool_fqns),
                     "invocations": invocation_trace_payload(invocations),
                 }))
+                if (
+                    event.outcome is not None
+                    and event.outcome.status == InvocationStatus.BLOCKED
+                    and event.outcome.error is not None
+                    and event.outcome.error.code == "approval_needed"
+                ):
+                    blocked_for_approval = True
                 current_tool_call_id = None
                 current_tool_fqns = []
 
@@ -385,6 +396,15 @@ async def execute_turn(
 
         # End-of-stream: let delivery flush buffered text and emit the final RESPONSE.
         _flush_reasoning_trace()
+        if blocked_for_approval and not had_model_text:
+            from core.pending_inputs import get_latest_pending_input
+
+            pending = await get_latest_pending_input(owner_id)
+            prompt = str((pending or {}).get("prompt") or "").strip()
+            if prompt:
+                await delivery.on_stream(StreamEvent(tag="text", content=prompt))
+                full_response = prompt
+                result.full_response = prompt
         await delivery.on_stream(StreamEvent(tag="final_text"))
         perf.log(
             "agent_stream_complete",

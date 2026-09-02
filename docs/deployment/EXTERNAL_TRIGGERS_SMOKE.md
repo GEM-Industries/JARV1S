@@ -15,10 +15,10 @@ cd apps/desktop/src-tauri && cargo test reachability -- --nocapture
 2. Connect Tailscale. **Settings → Availability → Enable external triggers**.
 3. Confirm:
    - Status becomes **Configured — waiting for first event** (not Verified).
-   - `tailscale funnel status` shows `/api/v1/webhooks` and `/api/v1/push` on `:443` → current backend port.
+   - `tailscale funnel status` shows `/api/v1/webhooks` → `http://127.0.0.1:{port}/api/v1/webhooks` and `/api/v1/push` → `…/api/v1/push`.
    - Private Serve remains on `:8443` for devices.
 4. Public probe (from outside the machine if possible):
-   - `curl -i https://<host>.ts.net/api/v1/webhooks/composio` → 401/405/400 (route exists), not connection failure.
+   - `curl -i -X POST https://<host>.ts.net/api/v1/webhooks/composio` → 401/400/503, not 404/405.
    - `curl -i https://<host>.ts.net/api/v1/health` → not publicly exposed (404 / connection depending on Funnel path mount).
 5. Fire a Composio trigger and a Google Calendar change:
    - Availability → **Verified — event received**.

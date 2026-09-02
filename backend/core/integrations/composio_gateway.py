@@ -61,6 +61,10 @@ _BROKEN_TRIGGER_SLUGS: frozenset[str] = frozenset(
 )
 
 
+class ComposioCatalogError(RuntimeError):
+    """Raised when Composio trigger-type discovery fails."""
+
+
 class ComposioGateway:
     """
     Manages the Composio integration lifecycle for JARV1S.
@@ -786,13 +790,10 @@ class ComposioGateway:
             params={"toolkit_slugs": app_name},
         )
         if response.status_code != 200:
-            logger.warning(
-                "Failed to list trigger types for toolkit '%s': %d %s",
-                app_name,
-                response.status_code,
-                response.text,
+            raise ComposioCatalogError(
+                f"Failed to list trigger types for toolkit '{app_name}': "
+                f"{response.status_code} {response.text}"
             )
-            return []
         items: list[dict] = [
             it
             for it in response.json().get("items", [])

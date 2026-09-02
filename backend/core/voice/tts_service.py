@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 MODEL_ID = "sonic-3.6"
 LANGUAGE = "en"
 SAMPLE_RATE = 24000
-EMOTION = "calm"
+EMOTION = "distant"
 WEBSOCKET_MAX_IDLE_S = 270.0
 TRANSPORT_FRAME_MS = 80
 

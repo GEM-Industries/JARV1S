@@ -15,6 +15,22 @@ BIN_NAME="JARV1SSpeechHelper"
 BUILD_DIR="$ROOT/.build"
 LOG="$BUILD_DIR/swiftc.log"
 mkdir -p "$OUT_DIR" "$BUILD_DIR"
+
+HELPER_FRESH=1
+if [[ -x "$APP_PATH/Contents/MacOS/$BIN_NAME" ]]; then
+  HELPER_FRESH=0
+  for src in "$ROOT"/Sources/*.swift "$ROOT/Info.plist"; do
+    if [[ "$src" -nt "$APP_PATH/Contents/MacOS/$BIN_NAME" ]]; then
+      HELPER_FRESH=1
+      break
+    fi
+  done
+fi
+if [[ "$HELPER_FRESH" == "0" ]]; then
+  echo "Reusing $APP_PATH"
+  exit 0
+fi
+
 rm -rf "$APP_PATH"
 
 SDK_PATH="$(xcrun --show-sdk-path 2>/dev/null || true)"

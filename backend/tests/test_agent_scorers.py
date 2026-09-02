@@ -87,3 +87,24 @@ def test_score_pre_tool_speech_none_passes_when_silent_before_tool() -> None:
 
     assert score.passed
     assert any(item.name == "pre_tool_speech" and item.passed for item in score.results)
+
+
+def test_score_forbidden_arguments_rejects_destructive_scope() -> None:
+    snapshot = TurnTraceSnapshot(
+        tools_called=["scheduler.replace_alert"],
+        tool_calls=[
+            ExtractedToolCall(
+                fqns=("scheduler.replace_alert",),
+                capability="scheduler.replace_alert",
+                arguments={"instance_id": "trg-wake", "scope": "series"},
+            )
+        ],
+    )
+
+    score = score_case(snapshot, {"forbidden_arguments": {"scope": "series"}})
+
+    assert not score.passed
+    assert any(
+        item.name == "arguments_forbidden" and not item.passed
+        for item in score.results
+    )

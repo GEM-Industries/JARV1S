@@ -184,6 +184,83 @@ async def test_waiter_resolution_does_not_require_callback(fake_pending):
 
 
 @pytest.mark.asyncio
+async def test_resolve_pending_from_utterance_approves_yes_please(fake_pending):
+    from core.plugins.consent import resolve_pending_from_utterance
+
+    pending_inputs, _, _ = fake_pending
+    ran: list[str] = []
+
+    async def action():
+        ran.append("deleted")
+        return "Deleted automation Slack mentions."
+
+    await pending_inputs.create_pending_input(
+        owner_id="geoff",
+        prompt="Permanently delete automation 'Slack mentions'?",
+        source={"type": "foreground_turn"},
+        callback=action,
+        publish="none",
+    )
+
+    result = await resolve_pending_from_utterance("geoff", "Yes, please.")
+
+    assert result == "Deleted automation Slack mentions."
+    assert ran == ["deleted"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_from_utterance_ignores_yes_without_pending(fake_pending):
+    from core.plugins.consent import resolve_pending_from_utterance
+
+    assert await resolve_pending_from_utterance("geoff", "yes") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_from_utterance_ignores_non_exact_yes(fake_pending):
+    from core.plugins.consent import resolve_pending_from_utterance
+
+    pending_inputs, _, _ = fake_pending
+
+    async def action():
+        return "should not run"
+
+    await pending_inputs.create_pending_input(
+        owner_id="geoff",
+        prompt="Permanently delete automation 'Slack mentions'?",
+        source={"type": "foreground_turn"},
+        callback=action,
+        publish="none",
+    )
+
+    assert await resolve_pending_from_utterance("geoff", "yes delete it") is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_pending_from_utterance_denies_nope(fake_pending):
+    from core.plugins.consent import resolve_pending_from_utterance
+
+    pending_inputs, _, _ = fake_pending
+    ran: list[str] = []
+
+    async def action():
+        ran.append("deleted")
+        return "Deleted."
+
+    await pending_inputs.create_pending_input(
+        owner_id="geoff",
+        prompt="Permanently delete automation 'Slack mentions'?",
+        source={"type": "foreground_turn"},
+        callback=action,
+        publish="none",
+    )
+
+    result = await resolve_pending_from_utterance("geoff", "nope")
+
+    assert result == "Cancelled."
+    assert ran == []
+
+
+@pytest.mark.asyncio
 async def test_duplicate_pending_input_reuses_existing_row_and_latest_callback(
     fake_pending,
 ):

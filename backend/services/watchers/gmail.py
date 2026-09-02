@@ -1,34 +1,32 @@
 """GmailWatcher — incremental Gmail inbox sync via historyId cursor.
 
-Uses Gmail's history.list API (the same mechanism as the push adapter) so
-only messages that arrive AFTER the cursor was established ever trigger
-automations — no backfill floods on first connection or re-auth.
+Gmail automations observe mail that arrives while JARV1S is watching
+("when X emails me"). They are not an inbox replay. historyId is a mailbox
+watermark, not a per-message offset, so a window is either consumed whole
+or skipped — never sliced.
 
 Lifecycle
 ---------
 First poll (no cursor)
-    Calls users.getProfile to get the current historyId, persists it as the
-    baseline cursor, and returns []. Nothing fires on first connect.
+    Persist users.getProfile historyId and return []. No backfill.
 
 Subsequent polls
-    Calls history.list since the cursor. Returns only INBOX messagesAdded
-    records, updates the cursor, and returns summaries (capped at
-    MAX_NEW_PER_POLL as a safety guard against bursts).
+    history.list since the cursor. A complete INBOX messagesAdded page is
+    returned as summaries and the cursor advances to that page's historyId.
 
-historyId expired (API returns 404)
-    Baseline is re-established (same as first poll) and [] is returned.
-    Mirrors the push adapter's expiry-recovery behaviour.
+Unconsumable window (historyId 404, or nextPageToken)
+    Same as first poll: rebase to now and return []. The gap is dropped
+    rather than drained. A page token means we were behind by more than
+    one history page (app off, expired cursor, or a stall) — not a burst
+    to rate-limit.
 
-Cursor is persisted to the watcher_cursors MongoDB collection so it
-survives process restarts.
+Cursor is persisted on watcher_cursors so restarts stay incremental.
 """
 
 import logging
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
-
-MAX_NEW_PER_POLL = 5  # Safety cap: never dispatch more than this per tick
 
 
 class GmailWatcher:
@@ -76,67 +74,55 @@ class GmailWatcher:
             return []
 
         new_ids, latest_history_id = await self._fetch_new_message_ids(gmail, cursor)
-
         if not new_ids:
             if latest_history_id:
                 await self._save_cursor(latest_history_id)
             return []
 
-        capped = len(new_ids) > MAX_NEW_PER_POLL
-        if capped:
-            logger.warning(
-                "Gmail watcher: capping %d new messages to %d per poll",
-                len(new_ids), MAX_NEW_PER_POLL,
-            )
-            new_ids = new_ids[:MAX_NEW_PER_POLL]
-
         from plugins.gmail import _fetch_message_summaries
-        summaries = await _fetch_message_summaries(gmail, new_ids)
-
-        # Only advance cursor when all messages were dispatched. When capped,
-        # leave cursor unchanged so the next poll re-fetches from the same point.
-        # AutomationService._fired dedup skips already-dispatched messages.
-        if not capped and latest_history_id:
+        summaries, failed = await _fetch_message_summaries(gmail, new_ids)
+        if failed:
+            logger.warning(
+                "Gmail watcher: advancing cursor past %d message(s) that failed to fetch",
+                failed,
+            )
+        if latest_history_id:
             await self._save_cursor(latest_history_id)
-
-        return [s.model_dump() for s in summaries]
-
-    # -------------------------------------------------------------------------
-    # Internal helpers
-    # -------------------------------------------------------------------------
+        return [summary.model_dump() for summary in summaries]
 
     async def _fetch_new_message_ids(
         self, gmail, start_history_id: str
     ) -> tuple[list[str], str | None]:
-        """Fetch INBOX messagesAdded since start_history_id.
+        """Return (new_message_ids, latest_historyId).
 
-        Returns (new_message_ids, latest_historyId).
-        Returns ([], None) on transient error.
-        On 404 (cursor expired), re-establishes baseline and returns ([], None).
+        404 or a truncated page re-establishes the baseline and returns ([], None).
+        Other HTTP/network errors propagate to AutomationService.
         """
-        try:
-            resp = await gmail.get(
-                "/users/me/history",
-                params={
-                    "startHistoryId": start_history_id,
-                    "historyTypes": "messageAdded",
-                    "labelId": "INBOX",
-                },
+        resp = await gmail.get(
+            "/users/me/history",
+            params={
+                "startHistoryId": start_history_id,
+                "historyTypes": "messageAdded",
+                "labelId": "INBOX",
+            },
+        )
+        if resp.status_code == 404:
+            logger.warning(
+                "Gmail historyId expired (cursor=%s) — re-establishing baseline",
+                start_history_id,
             )
-            if resp.status_code == 404:
-                logger.warning(
-                    "Gmail historyId expired (cursor=%s) — re-establishing baseline",
-                    start_history_id,
-                )
-                await self._reset_cursor(gmail)
-                return [], None
-            resp.raise_for_status()
-        except Exception as e:
-            logger.warning("Gmail history.list failed: %s", e)
+            await self._reset_cursor(gmail)
             return [], None
+        resp.raise_for_status()
 
         data = resp.json()
-        latest: str | None = data.get("historyId")
+        if data.get("nextPageToken"):
+            logger.warning(
+                "Gmail watcher: history window truncated (cursor=%s) — re-establishing baseline",
+                start_history_id,
+            )
+            await self._reset_cursor(gmail)
+            return [], None
 
         seen: set[str] = set()
         ids: list[str] = []
@@ -146,23 +132,14 @@ class GmailWatcher:
                 if msg_id and msg_id not in seen:
                     seen.add(msg_id)
                     ids.append(msg_id)
-
-        return ids, latest
+        return ids, data.get("historyId")
 
     async def _reset_cursor(self, gmail) -> None:
-        """Get the current historyId from users.getProfile and save it.
-
-        Establishes the baseline for future incremental syncs.
-        Does not return or fire any messages.
-        """
-        try:
-            resp = await gmail.get("/users/me/profile")
-            resp.raise_for_status()
-            history_id = str(resp.json()["historyId"])
-            await self._save_cursor(history_id)
-            logger.info("Gmail watcher: baseline cursor established (historyId=%s)", history_id)
-        except Exception as e:
-            logger.warning("Gmail watcher: failed to establish baseline cursor: %s", e)
+        resp = await gmail.get("/users/me/profile")
+        resp.raise_for_status()
+        history_id = str(resp.json()["historyId"])
+        await self._save_cursor(history_id)
+        logger.info("Gmail watcher: baseline cursor established (historyId=%s)", history_id)
 
     async def _load_cursor(self) -> str | None:
         from services.database.mongodb import mongodb

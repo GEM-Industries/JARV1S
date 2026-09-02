@@ -15,7 +15,7 @@ Routing mechanics: [DYNAMIC_TOOL_ROUTING.md](./proposals/built/DYNAMIC_TOOL_ROUT
 | **agents** | `dispatch`, `resume`, `inspect`, `get_status`, `get_result`, `list_tasks`, `cancel_task`, `close` | Delegated work. `mode="code"` is Cursor or Claude Code with named work (`work_id` + title). `mode="jarvis"` is in-process. See [BACKGROUND_AGENTS.md](./BACKGROUND_AGENTS.md). |
 | **rules** | `create` | Thin When/Do facade over `TriggerRule` when scheduler/automations sugar does not fit. |
 | **scheduler** | `remind`, `defer`, `add_timer`, `add_alarm`, `get_alerts`, `get_next_alert`, `replace_alert`, `cancel_alert`, `snooze_alert`, `skip_next`, `add_exception`, `remove_exception`, `pause_series`, `resume_series` | Time-based authoring. Discover configured definitions through `setups.find`. |
-| **automations** | `create_rule`, `update_rule`, `delete_rule`, `suppress_event`, `test_rule`, `unpause_rule`, `pause_all`, `resume_all`, `list_available_triggers` | External-event rules. Inventory via `setups.find(setup_type="automation")`. |
+| **automations** | `create_rule`, `update_rule`, `delete_rule`, `suppress_event`, `test_rule`, `pause_all`, `resume_all`, `list_available_triggers` | External-event rules. Inventory via `setups.find(setup_type="automation")`. Named delete via `delete_rule`; pause/resume via `setups`. |
 | **protocol** | `create_protocol`, `get_protocol`, `update_protocol`, `delete_protocol`, `run_protocol`, `add_protocol_step`, `remove_protocol_step` | Saved routines. Discover via `setups.find(setup_type="protocol")`. |
 | **todo** | `get_tasks`, `add_task`, `complete_task`, `toggle_task`, `update_task`, `delete_task`, `clear_tasks` | `get_tasks` attaches the todo widget. |
 | **habits** | `create_habit`, `log_habit`, `log_habit_by_name`, `log_measured_habit_by_name`, `get_habit_status`, `get_habit_setup`, `list_habit_checkins`, `schedule_habit_checkin`, `replace_habit_checkin`, `delete_habit_checkin`, `pause_habit_checkin`, `resume_habit_checkin` | Cue-based habits and trigger-backed check-ins. |
@@ -55,7 +55,7 @@ Connect a new Composio app with “Connect my [service]”. Composio mounts only
 
 Offered capabilities are sent once as provider `tools=` JSON schemas. The system prompt does not repeat signatures or return schemas.
 
-**Always-on** (`tool_router.ALWAYS_ON_FQNS`): `system.search_tools`, all `files.*`, `display.push_content`, `system.exec`, `search.web`, `profile.add_memory` / `remember` / `update_memory`, and `agents.dispatch` / `resume` / `get_status` / `cancel_task` / `close`. `display.delete_widget`, `agents.inspect`, `agents.list_tasks`, and `agents.get_result` are not always-on. Disabled plugins are omitted. Routable domain create/edit tools are not always-on.
+**Always-on** (`tool_router.ALWAYS_ON_FQNS`): `system.search_tools`, all `files.*`, `display.push_content`, `system.exec`, `system.approve_pending` / `deny_pending`, `search.web`, `profile.add_memory` / `remember` / `update_memory`, and `agents.dispatch` / `resume` / `get_status` / `cancel_task` / `close`. `display.delete_widget`, `agents.inspect`, `agents.list_tasks`, and `agents.get_result` are not always-on. Disabled plugins are omitted. Routable domain create/edit tools are not always-on.
 
 **Per-turn routed set:** all tools from plugins matched by the active policy (`voice_default` / `text_default` / `system_hint`). Voice typically matches 0–3 plugins. `system.search_tools` is the escape hatch; named `edit_tool` / `fqn` values from a successful result are offered on the next iteration.
 
@@ -63,7 +63,7 @@ Offered capabilities are sent once as provider `tools=` JSON schemas. The system
 
 ## Consent
 
-`core/plugins/consent.py` `require_consent(description, action, detail="")` gates destructive work behind `pending_inputs`. Confirm via `system.approve_pending` / `deny_pending` or `PendingInputWidget`. In `mode="jarvis"` background work, a deferred resolver marks the task `attention="approval"` and waits. `mode="code"` does not use this in-process path.
+`core/plugins/consent.py` `require_consent(description, action, detail="")` gates destructive work behind `pending_inputs`. Voice/text yes/no against a live pending is resolved by the harness; confirm also via `system.approve_pending` / `deny_pending` or `PendingInputWidget`. In `mode="jarvis"` background work, a deferred resolver marks the task `attention="approval"` and waits. `mode="code"` does not use this in-process path.
 
 ## Triggers
 

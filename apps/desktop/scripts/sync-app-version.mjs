@@ -35,12 +35,29 @@ if (!/^https:\/\//.test(updateBaseUrl)) {
   process.exit(1)
 }
 
+function writeIfChanged(path, next) {
+  let prev = ''
+  try {
+    prev = readFileSync(path, 'utf8')
+  } catch {
+    prev = ''
+  }
+  if (prev === next) {
+    return false
+  }
+  writeFileSync(path, next)
+  return true
+}
+
 for (const rel of ['apps/desktop/package.json']) {
   const path = join(root, rel)
   const json = JSON.parse(readFileSync(path, 'utf8'))
   json.version = version
-  writeFileSync(path, `${JSON.stringify(json, null, 2)}\n`)
-  console.log(`Synced ${rel} -> ${version}`)
+  if (writeIfChanged(path, `${JSON.stringify(json, null, 2)}\n`)) {
+    console.log(`Synced ${rel} -> ${version}`)
+  } else {
+    console.log(`Unchanged ${rel} -> ${version}`)
+  }
 }
 
 const tauriPath = join(root, 'apps/desktop/src-tauri/tauri.conf.json')
@@ -48,8 +65,11 @@ const tauri = JSON.parse(readFileSync(tauriPath, 'utf8'))
 tauri.version = version
 tauri.bundle.macOS.minimumSystemVersion = minimumMacos
 tauri.plugins.updater.endpoints = [`${updateBaseUrl}/${manifestName}`]
-writeFileSync(tauriPath, `${JSON.stringify(tauri, null, 2)}\n`)
-console.log(`Synced apps/desktop/src-tauri/tauri.conf.json -> ${version}`)
+if (writeIfChanged(tauriPath, `${JSON.stringify(tauri, null, 2)}\n`)) {
+  console.log(`Synced apps/desktop/src-tauri/tauri.conf.json -> ${version}`)
+} else {
+  console.log(`Unchanged apps/desktop/src-tauri/tauri.conf.json -> ${version}`)
+}
 
 const cargoPath = join(root, 'apps/desktop/src-tauri/Cargo.toml')
 const cargo = readFileSync(cargoPath, 'utf8')
@@ -58,8 +78,11 @@ if (nextCargo === cargo && !cargo.includes(`version = "${version}"`)) {
   console.error('Could not update Cargo.toml package version')
   process.exit(1)
 }
-writeFileSync(cargoPath, nextCargo)
-console.log(`Synced apps/desktop/src-tauri/Cargo.toml -> ${version}`)
+if (writeIfChanged(cargoPath, nextCargo)) {
+  console.log(`Synced apps/desktop/src-tauri/Cargo.toml -> ${version}`)
+} else {
+  console.log(`Unchanged apps/desktop/src-tauri/Cargo.toml -> ${version}`)
+}
 
 console.log(`minimumSystemVersion -> ${minimumMacos}`)
 console.log(`updater endpoint -> ${updateBaseUrl}/${manifestName}`)

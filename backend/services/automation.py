@@ -270,12 +270,17 @@ class AutomationService:
 
     # --- Public methods (used by the automations plugin) ---
 
+    def _ensure_watchers(self) -> None:
+        if not self._watchers:
+            self._discover_watchers()
+
     def watcher_trigger_info(self, source: str) -> list[dict]:
         """Return trigger_events declared by the watcher for source, or [].
 
         Used by list_available_triggers to surface built-in watcher capabilities
         alongside (or instead of) Composio triggers.
         """
+        self._ensure_watchers()
         watcher = self._watchers.get(source)
         if watcher is None:
             return []
@@ -283,13 +288,23 @@ class AutomationService:
 
     def watcher_condition_fields(self, source: str) -> list[dict]:
         """Return condition_fields declared by the watcher for source, or []."""
+        self._ensure_watchers()
         watcher = self._watchers.get(source)
         if watcher is None:
             return []
         return list(getattr(watcher, "condition_fields", []))
 
+    def watcher_is_reactive(self, source: str) -> bool:
+        """True when the built-in watcher fires on events that already happened."""
+        self._ensure_watchers()
+        watcher = self._watchers.get(source)
+        if watcher is None:
+            return False
+        return getattr(watcher, "trigger_mode", "anticipated") == "reactive"
+
     def watcher_sources(self) -> set[str]:
         """Return registered external watcher source names."""
+        self._ensure_watchers()
         return set(self._watchers)
 
     async def pause(self, until: Optional[datetime] = None) -> None:
@@ -350,16 +365,19 @@ class AutomationService:
             })
         return candidates
 
-    async def test_rule(self, rule_id: str) -> list[dict] | None:
+    async def test_rule(self, rule_id: str, owner_id: str | None = None) -> list[dict] | None:
         """
         Dry-run a rule against current watcher state.
         Returns None if the source has no watcher (push-backed — cannot dry-run via polling).
         Returns [] if polled but no items matched.
         """
-        rule_doc = await mongodb.db.trigger_rules.find_one({
+        query = {
             "id": rule_id,
             "origin.kind": "external",
-        })
+        }
+        if owner_id:
+            query["owner_id"] = owner_id
+        rule_doc = await mongodb.db.trigger_rules.find_one(query)
         if not rule_doc:
             return []
         rule = TriggerRule.model_validate(rule_doc)

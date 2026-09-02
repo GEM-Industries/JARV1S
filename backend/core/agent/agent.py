@@ -390,4 +390,12 @@ class JarvisAgent:
                 if outcome.status == InvocationStatus.SUCCEEDED:
                     active_fqns |= discovered_fqns(outcome.data)
 
+            if any(
+                outcome.status == InvocationStatus.BLOCKED
+                and outcome.error is not None
+                and outcome.error.code == "approval_needed"
+                for outcome in outcomes
+            ):
+                return
+
         yield AgentEvent(type=AgentEventType.ERROR, content=_LLM_LOOP_TEXT)

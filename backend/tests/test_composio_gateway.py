@@ -1,6 +1,6 @@
 import pytest
 
-from core.integrations.composio_gateway import ComposioGateway
+from core.integrations.composio_gateway import ComposioCatalogError, ComposioGateway
 
 
 @pytest.mark.asyncio
@@ -66,4 +66,26 @@ async def test_on_app_connected_mounts_nothing_without_allowlist(monkeypatch):
 
     assert await gateway.on_app_connected("github", tools_allowlist=None) is False
     assert await gateway.on_app_connected("github", tools_allowlist=[]) is False
+
+
+@pytest.mark.asyncio
+async def test_list_trigger_types_raises_on_http_failure(monkeypatch):
+    gateway = ComposioGateway(
+        api_key="test-composio-key",
+        user_id="user-1",
+        callback_host="http://localhost:8000",
+        frontend_origin="http://localhost:5173",
+    )
+
+    class Response:
+        status_code = 500
+        text = "upstream unavailable"
+
+    async def fail(*_args, **_kwargs):
+        return Response()
+
+    monkeypatch.setattr(gateway, "_request", fail)
+
+    with pytest.raises(ComposioCatalogError, match="Failed to list trigger types"):
+        await gateway.list_trigger_types("slack")
 

@@ -65,6 +65,14 @@ MONGO_URL="$(read_json mongodb.download_url)"
 MONGO_SHA="$(read_json mongodb.sha256)"
 MIN_MACOS="$(read_json minimum_macos)"
 
+if [[ -x "$DEST/mongodb/bin/mongod" && -f "$DEST/services-bundle.json" ]]; then
+  EXISTING_VERSION="$(python3 -c "import json; print(json.load(open('$DEST/services-bundle.json')).get('mongodb_version',''))")"
+  if [[ "$EXISTING_VERSION" == "$MONGO_VERSION" ]]; then
+    echo "Reusing bundled MongoDB $MONGO_VERSION"
+    exit 0
+  fi
+fi
+
 rm -rf "$DEST"
 mkdir -p "$CACHE" "$DEST/mongodb/bin"
 

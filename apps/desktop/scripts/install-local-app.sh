@@ -56,7 +56,9 @@ echo "Installing $BUILT_APP -> $INSTALL_APP"
 mkdir -p "$(dirname "$INSTALL_APP")"
 TMP_APP="${INSTALL_APP}.installing"
 rm -rf "$TMP_APP"
-ditto "$BUILT_APP" "$TMP_APP"
+if ! cp -cR "$BUILT_APP" "$TMP_APP" 2>/dev/null; then
+  ditto "$BUILT_APP" "$TMP_APP"
+fi
 rm -rf "$INSTALL_APP"
 mv "$TMP_APP" "$INSTALL_APP"
 

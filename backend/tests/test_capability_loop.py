@@ -372,3 +372,45 @@ def test_first_turn_llm_error_text_by_failure_class():
     assert "too long" in first_turn_llm_error_text(LLMFirstTokenTimeoutError(), cloud)
     assert "setup is incomplete" in first_turn_llm_error_text(ConnectionError("offline"), unset)
     assert "reaching my language model" in first_turn_llm_error_text(ConnectionError("offline"), cloud)
+
+
+@pytest.mark.asyncio
+async def test_approval_needed_does_not_start_another_iteration():
+    llm = ScriptedLLM([
+        [ToolCallEvent(call_id="d", name="files__delete", arguments={"path": "/tmp/x"})],
+        [TextEvent(text="Deleted.")],
+    ])
+
+    async def fake_dispatch(call: CapabilityCall) -> CapabilityOutcome:
+        return _outcome(
+            call,
+            "Approval needed: Move x to Trash The action has not executed yet.",
+            status=InvocationStatus.BLOCKED,
+            error=CapabilityErrorDetail(
+                code="approval_needed",
+                message="Approval needed: Move x to Trash The action has not executed yet.",
+            ),
+        )
+
+    def resolve(name: str):
+        return SimpleNamespace(fqn=name.replace("__", "."))
+
+    agent = JarvisAgent(llm)
+    agent.prompt_builder.build = MagicMock(return_value="")
+
+    with (
+        patch("core.agent.agent.dispatcher.dispatch", side_effect=fake_dispatch),
+        patch("core.agent.agent.registry.resolve_provider_name", side_effect=resolve),
+    ):
+        events = await _run(agent)
+
+    assert llm.iterations
+    assert not any(
+        event.type == AgentEventType.TEXT and event.content == "Deleted."
+        for event in events
+    )
+    outputs = [event for event in events if event.type == AgentEventType.TOOL_OUTPUT]
+    assert len(outputs) == 1
+    assert outputs[0].outcome is not None
+    assert outputs[0].outcome.error is not None
+    assert outputs[0].outcome.error.code == "approval_needed"

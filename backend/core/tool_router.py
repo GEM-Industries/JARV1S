@@ -71,7 +71,8 @@ def _is_routable(plugin) -> bool:
 # 1. the discovery escape hatch
 # 2. an unroutable computer/presentation primitive
 # 3. a model-initiated action the user often does not name (memory writes,
-#    web search, shell, named-work verbs whose roster is already in the prompt)
+#    web search, shell, named-work verbs whose roster is already in the prompt,
+#    yes/no for a pending approval)
 # Routable domain create/edit tools stay off this list. Routing, search_tools,
 # and edit_tool promotion cover those.
 ALWAYS_ON_FQNS: frozenset[str] = frozenset({
@@ -85,6 +86,8 @@ ALWAYS_ON_FQNS: frozenset[str] = frozenset({
     "files.read",
     "files.write",
     "system.exec",
+    "system.approve_pending",
+    "system.deny_pending",
     "search.web",
     "profile.add_memory",
     "profile.remember",

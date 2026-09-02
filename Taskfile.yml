@@ -396,6 +396,9 @@ tasks:
     cmd: npm run build
     env:
       JARVIS_RUNTIME_MODE: packaged_runtime
+      # Local dogfood: skip LTO. Release keeps Cargo.toml [profile.release] as-is.
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
   desktop:push:
     desc: Build, replace /Applications/JARV1S.app, and open it for local dogfood

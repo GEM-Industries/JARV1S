@@ -223,8 +223,9 @@ def _one_scope_required_error(tool_name: str) -> CapabilityErrorDetail:
     return _fail(
         f"Name the target with query= (a name or clock time), or provide exactly one of "
         f"series_id or instance_id from get_alerts(). "
-        f"For {tool_name}, query= or instance_id changes one pending occurrence; "
-        "series_id is only for permanent/all-future recurring series changes."
+        f"For {tool_name}, query=, instance_id, or series_id without scope='series' "
+        "changes one pending occurrence; use series_id with scope='series' only "
+        "for an explicit all-future change."
     )
 
 
@@ -250,7 +251,29 @@ def _ids_from_resolved(
         return resolved.series_id, None
     if resolved.instance_id:
         return None, resolved.instance_id
-    return resolved.series_id, None
+    return None, None
+
+
+async def _pending_instance_id_for_series(
+    owner_id: str, series_id: str
+) -> str | CapabilityErrorDetail:
+    """Map a series identifier onto its next pending occurrence."""
+    doc = await mongodb.db.trigger_instances.find_one(
+        {
+            "owner_id": owner_id,
+            "rule_id": series_id,
+            "status": {"$in": list(PENDING_EDIT_STATUSES)},
+        },
+        {"id": 1},
+        sort=[("due_at", 1)],
+    )
+    instance_id = str((doc or {}).get("id") or "")
+    if not instance_id:
+        return _fail(
+            "No pending occurrence for that series. "
+            "Use query= for the current item, or scope='series' only for an explicit all-future change."
+        )
+    return instance_id
 
 
 def _scheduler_manage_error(resource: str) -> CapabilityErrorDetail:
@@ -276,7 +299,7 @@ def _replace_existing_series_error(rule_doc: dict) -> CapabilityErrorDetail:
     name = str(rule_doc.get("name") or "that series")
     return _fail(
         f"{name} already exists (series_id={series_id}). "
-        f"Use scheduler.replace_alert(series_id={series_id!r}) to change it. "
+        f"Use scheduler.replace_alert(series_id={series_id!r}, scope='series') to change it. "
         "Do not delete and recreate."
     )
 
@@ -1038,12 +1061,15 @@ class SchedulerPlugin(JarvisPlugin):
         local_time: str | None = None,
         message: str | None = None,
         query: str | None = None,
-    ) -> AlertQueryResult:
+    ) -> AlertQueryResult | CapabilityErrorDetail:
         """
-        Find pending time-based work: reminders, timers, alarms, and silent defer() instructions.
-        Omit status to list upcoming pending occurrences; status="active" is a recurring series with no pending occurrence.
-        Use this for upcoming one-offs and recurring schedules before cancel/snooze/skip/replace;
-        returns instance_id and series_id. If the user calls a timed action an "automation",
+        Find upcoming alarms, reminders, and timers by name, kind, or clock time.
+        Omit status to list upcoming pending occurrences; status="active" lists recurring series definitions.
+        Use this to inspect schedules or resolve an ambiguous mutation, not as a required step before replace_alert or cancel_alert.
+        Returns instance_id for pending occurrences; status="active" returns recurring series_id values.
+        For an overridden recurring occurrence, local_time is
+        the effective occurrence time and scheduled_local_time is the durable series time.
+        If the user calls a timed action an "automation",
         "schedule", or "rule", still search here with query=/message= — not setups.find.
         Filter named reminders/timers/alarms with kind; search other scheduled work by query or message
         (both match message+instructions, or a clock time such as 12:00 / 12pm). For durable
@@ -1052,6 +1078,8 @@ class SchedulerPlugin(JarvisPlugin):
         owner_id = get_owner_id()
         now_utc = datetime.now(timezone.utc)
         text_filter = (query or message or "").strip() or None
+        if local_time and normalize_clock_time(local_time) is None:
+            return _fail("local_time is a clock such as 8:30 or 9:30 AM, not a date. For a named item use query=.")
         normalized_local_time = normalize_clock_time(local_time)
         if normalized_local_time is None:
             clock_from_query = normalize_clock_time(text_filter)
@@ -1071,14 +1099,14 @@ class SchedulerPlugin(JarvisPlugin):
 
         linked_rule_ids = {doc.get("rule_id") for doc in docs if doc.get("rule_id")}
         managed_rule_ids = await _scheduler_rule_ids(owner_id, {str(rid) for rid in linked_rule_ids if rid})
-        rule_names: dict[str, str] = {}
+        linked_rules: dict[str, dict[str, Any]] = {}
         if managed_rule_ids:
             cursor = mongodb.db.trigger_rules.find(
                 {"owner_id": owner_id, "id": {"$in": list(managed_rule_ids)}},
-                {"_id": 0, "id": 1, "name": 1},
+                {"_id": 0, "id": 1, "name": 1, "origin.original_local_time": 1},
             )
-            rule_names = {
-                str(rule["id"]): str(rule.get("name") or "")
+            linked_rules = {
+                str(rule["id"]): rule
                 for rule in await cursor.to_list(None)
                 if rule.get("id")
             }
@@ -1091,23 +1119,28 @@ class SchedulerPlugin(JarvisPlugin):
             if not rule_id and not is_scheduler_managed_instance(doc):
                 continue
             due_at = coerce_datetime(doc.get("due_at"), default=now_utc)
-            results.append(
-                _alert_list_entry(
-                    instance_id=doc["id"],
-                    series_id=doc.get("rule_id"),
-                    scope="instance",
-                    name=rule_names.get(str(doc.get("rule_id") or ""), ""),
-                    due_at=due_at,
-                    action=doc.get("action_snapshot", {}),
-                    attention=doc.get("attention_snapshot", {}),
-                    trigger=doc.get("origin_snapshot", {}),
-                    status=doc["status"],
-                    delivery_snapshot=doc.get("delivery_snapshot", {}),
-                    now_utc=now_utc,
-                )
+            linked_rule = linked_rules.get(str(rule_id or ""), {})
+            entry = _alert_list_entry(
+                instance_id=doc["id"],
+                series_id=None,
+                scope="instance",
+                name=str(linked_rule.get("name") or ""),
+                due_at=due_at,
+                action=doc.get("action_snapshot", {}),
+                attention=doc.get("attention_snapshot", {}),
+                trigger=doc.get("origin_snapshot", {}),
+                status=doc["status"],
+                delivery_snapshot=doc.get("delivery_snapshot", {}),
+                now_utc=now_utc,
             )
+            series_local_time = (linked_rule.get("origin") or {}).get("original_local_time")
+            if series_local_time:
+                entry["scheduled_local_time"] = series_local_time
+            results.append(entry)
 
-        results.extend(await self._recurring_series_without_upcoming(owner_id, results))
+        results.extend(
+            await self._recurring_series_without_upcoming(owner_id, managed_rule_ids)
+        )
         if kind or status or recurrence or normalized_local_time or text_filter:
             results = [
                 row for row in results
@@ -1154,6 +1187,8 @@ class SchedulerPlugin(JarvisPlugin):
             message=message,
             query=query,
         )
+        if isinstance(result, CapabilityErrorDetail):
+            return result
         for row in result.alerts:
             if row.kind is None:
                 continue
@@ -1164,10 +1199,9 @@ class SchedulerPlugin(JarvisPlugin):
 
     @staticmethod
     async def _recurring_series_without_upcoming(
-        owner_id: str, instance_entries: List[Dict]
+        owner_id: str, seen_series_ids: set[str]
     ) -> List[Dict]:
         """Recurring rules that have no pending instance — otherwise invisible to listing."""
-        seen_series_ids = {entry["series_id"] for entry in instance_entries if entry.get("series_id")}
         cursor = mongodb.db.trigger_rules.find(
             {
                 "owner_id": owner_id,
@@ -1221,15 +1255,15 @@ class SchedulerPlugin(JarvisPlugin):
         deliver_to: str | None = None,
     ) -> str | CapabilityErrorDetail:
         """
-        Change an existing alarm, reminder, or timer. query= names it; scope=series means all future occurrences.
-        Use series_id for permanent series changes ("from now on"). Use instance_id for one pending occurrence ("today", "tomorrow", "just this once").
+        Change an alert directly by query without a prior lookup; the default changes its next occurrence, while scope=series changes all future occurrences.
+        Use query= for the normal path. Use series_id or instance_id only when selecting an exact result from get_alerts().
         Do not pass recurrence when only changing the time. Do not cancel and recreate. To clear/stop, use cancel_alert.
         deliver_to: "anywhere", "here", or a bound room name.
 
         Args:
             query: Current name or clock time of the existing item, such as "wake" or "8:30". Not the new time.
             scope: "occurrence" (default) changes one pending item; "series" changes all future occurrences.
-            series_id: series_id from get_alerts(). Changes the durable recurring schedule.
+            series_id: series_id from get_alerts(). With scope='series' this changes the durable schedule; otherwise it changes the next pending occurrence.
             instance_id: instance_id from get_alerts(). Changes only that pending occurrence.
         """
         owner_id = get_owner_id()
@@ -1237,11 +1271,25 @@ class SchedulerPlugin(JarvisPlugin):
             return _one_scope_required_error("replace_alert")
         if (series_id or instance_id) and query:
             return _fail("Pass query= or an id, not both.")
+        if instance_id and scope == "series":
+            return _fail(
+                "instance_id identifies one pending occurrence. "
+                "Use scope='occurrence', or pass query= with scope='series'."
+            )
+        if series_id and scope != "series":
+            resolved = await _pending_instance_id_for_series(owner_id, series_id)
+            if isinstance(resolved, CapabilityErrorDetail):
+                return resolved
+            series_id, instance_id = None, resolved
 
         if not series_id and not instance_id:
             if not query and not kind and when is None and message is None and deliver_to is None:
                 return _one_scope_required_error("replace_alert")
-            resolved = await self._resolve_alert_target(query=query, kind=kind)
+            resolved = await self._resolve_alert_target(
+                query=query,
+                kind=kind,
+                scope=scope,
+            )
             if isinstance(resolved, CapabilityErrorDetail):
                 return resolved
             series_id, instance_id = _ids_from_resolved(resolved, scope=scope)
@@ -1286,9 +1334,18 @@ class SchedulerPlugin(JarvisPlugin):
         *,
         query: str | None,
         kind: Literal["timer", "alarm", "reminder"] | None = None,
+        scope: Literal["occurrence", "series"] = "occurrence",
     ) -> AlertSummary | CapabilityErrorDetail:
-        result = await self.get_alerts(kind=kind, query=query)
+        result = await self.get_alerts(
+            kind=kind,
+            status="active" if scope == "series" else None,
+            query=query,
+        )
+        if isinstance(result, CapabilityErrorDetail):
+            return result
         if result.match_status == MatchStatus.NONE:
+            if scope == "series":
+                return _fail("No matching recurring alarm, reminder, or timer series.")
             return _fail(
                 "No matching pending alarm, reminder, or timer. "
                 "Use add_alarm, remind, or add_timer to create one."
@@ -1480,8 +1537,8 @@ class SchedulerPlugin(JarvisPlugin):
         scope: Literal["occurrence", "series"] = "occurrence",
     ) -> str | CapabilityErrorDetail:
         """
-        Cancel an existing alarm, reminder, or timer. query= names it; scope=series cancels all future occurrences.
-        Use instance_id for one pending occurrence; series_id for all-future recurring cancel.
+        Cancel an alert directly by query without a prior lookup; the default cancels its next occurrence, while scope=series cancels all future occurrences.
+        Use query= for the normal path. Use series_id or instance_id only when selecting an exact result from get_alerts().
         """
         owner_id = get_owner_id()
         now = datetime.now(timezone.utc)
@@ -1489,10 +1546,24 @@ class SchedulerPlugin(JarvisPlugin):
             return _one_scope_required_error("cancel_alert")
         if (series_id or instance_id) and query:
             return _fail("Pass query= or an id, not both.")
+        if instance_id and scope == "series":
+            return _fail(
+                "instance_id identifies one pending occurrence. "
+                "Use scope='occurrence', or pass query= with scope='series'."
+            )
+        if series_id and scope != "series":
+            resolved = await _pending_instance_id_for_series(owner_id, series_id)
+            if isinstance(resolved, CapabilityErrorDetail):
+                return resolved
+            series_id, instance_id = None, resolved
         if not series_id and not instance_id:
             if not query and not kind:
                 return _one_scope_required_error("cancel_alert")
-            resolved = await self._resolve_alert_target(query=query, kind=kind)
+            resolved = await self._resolve_alert_target(
+                query=query,
+                kind=kind,
+                scope=scope,
+            )
             if isinstance(resolved, CapabilityErrorDetail):
                 return resolved
             series_id, instance_id = _ids_from_resolved(resolved, scope=scope)

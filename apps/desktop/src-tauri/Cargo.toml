@@ -1,6 +1,6 @@
 [package]
 name = "jarvis-desktop"
-version = "0.6.0"
+version = "0.6.1"
 description = "JARV1S Host desktop shell"
 authors = ["JARV1S"]
 edition = "2021"

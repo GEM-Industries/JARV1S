@@ -7,10 +7,10 @@ single entry-point, delegating here.
 
 Flow:
   1. Plugin calls require_consent(description, detail, action)
-  2. PendingInputWidget is pushed to the frontend, pending_inputs stores visible state
-  3. Tool returns a blocked CapabilityErrorDetail → LLM asks the user
-  4. User says yes → LLM calls jarvis.system.approve_pending() → execute_pending() runs callback
-  5. User says no  → LLM calls jarvis.system.deny_pending() → cancel_pending() resolves the input
+  2. PendingInputWidget is pushed; pending_inputs stores visible state
+  3. Tool returns a blocked CapabilityErrorDetail; the agent loop stops
+  4. Voice/text yes/no against a live pending is resolved by the harness
+  5. Widget clicks call resolve_pending_input(input_id); approve_pending/deny_pending remain a fallback
 
 Headless/background contexts:
   Set _consent_resolver to a callable before running a headless agent. The resolver receives
@@ -28,7 +28,11 @@ import inspect
 from typing import Awaitable, Callable, TypeVar
 
 from core.context import get_owner_id
-from core.pending_inputs import create_pending_input, resolve_pending_input
+from core.pending_inputs import (
+    create_pending_input,
+    get_latest_pending_input,
+    resolve_pending_input,
+)
 from core.plugins.capabilities import (
     CapabilityErrorDetail,
     get_active_invocation_id,
@@ -47,6 +51,9 @@ _consent_resolver: contextvars.ContextVar[ConsentResolver | None] = contextvars.
 )
 
 T = TypeVar("T")
+
+_AFFIRM_PHRASES = frozenset({"yes", "yeah", "yep", "yup", "go ahead", "do it"})
+_DENY_PHRASES = frozenset({"no", "nope"})
 
 
 def _approval_needed(description: str) -> CapabilityErrorDetail:
@@ -70,7 +77,7 @@ async def require_consent(
     Gate a destructive action behind user approval.
 
     Pushes a PendingInputWidget, stores the async callback, and returns a
-    blocked outcome so the model can ask the user for confirmation.
+    blocked outcome. The harness stops the agent loop and collects yes/no.
 
     When a consent resolver is set (via _consent_resolver contextvar), the resolver
     is called instead of the widget flow. Returning True executes the action immediately;
@@ -115,6 +122,48 @@ async def require_consent(
         )
 
     return _approval_needed(description)
+
+
+def _confirmation_phrase(text: str) -> str:
+    from core.voice.local_commands import normalize_local_command
+
+    normalized = normalize_local_command(text)
+    if normalized.endswith(" please"):
+        return normalized[: -len(" please")].strip()
+    return normalized
+
+
+def _spoken_result(result: object) -> str:
+    if isinstance(result, str):
+        return result
+    content = getattr(result, "content", None)
+    if isinstance(content, str) and content:
+        return content
+    message = getattr(result, "message", None)
+    if isinstance(message, str) and message:
+        return message
+    return str(result)
+
+
+async def resolve_pending_from_utterance(owner_id: str, text: str) -> str | None:
+    """Resolve a live pending approval from an exact yes/no utterance.
+
+    Returns None when there is no pending input or the transcript is not a
+    confirmation, so the caller can fall through to the normal turn.
+    """
+    pending = await get_latest_pending_input(owner_id)
+    if not pending:
+        return None
+    phrase = _confirmation_phrase(text)
+    if phrase in _AFFIRM_PHRASES:
+        return _spoken_result(
+            await resolve_pending_input(owner_id=owner_id, decision="approve")
+        )
+    if phrase in _DENY_PHRASES:
+        return _spoken_result(
+            await resolve_pending_input(owner_id=owner_id, decision="deny")
+        )
+    return None
 
 
 async def execute_pending(owner_id: str) -> str:

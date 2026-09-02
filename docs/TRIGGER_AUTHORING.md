@@ -130,10 +130,10 @@ edits stay in the owning tool
 (`scheduler.replace_alert`, `automations.update_rule`, `habits.*`,
 `attention.*`, `protocol.*`). `activity.why_last_fire` remains the history path
 for "why did that fire?". Permanent removal of time-based duplicates →
-`setups.delete`; external event rules remain owned by `automations.delete_rule`.
-Domain tools that own a verb (`automations.delete_rule`) resolve unique names,
-`resource_ref`, or ids via `resolve_managed_setup`; `edit_tool` promotion stays
-lookup-then-edit only.
+`setups.delete`. A named external automation can also be removed with
+`automations.delete_rule`. Domain tools that own a verb resolve
+unique names, `resource_ref`, or ids via `resolve_managed_setup`; `edit_tool`
+promotion stays lookup-then-edit only.
 Pending one-shot work can appear in broad `setups.find` results, but explicit
 upcoming, cancel, snooze, and reschedule requests should use `get_alerts`.
 
@@ -146,8 +146,14 @@ forever.
 ## External / push origins
 
 `TriggerOrigin.kind="external"` matches realtime provider events (Composio,
-Calendar push, trusted agent systems). Authoring via `automations.create_rule`
-is unchanged. Delivery requires **External triggers** (Host Availability /
+Calendar push, trusted agent systems). Authoring is `automations.create_rule`
+after `list_available_triggers(source)`: copy the exact `(source, event)` pair
+and advertised `condition_fields` into `field`/`op`/`value`.
+Unknown events, fields, operators, or
+provider-configured Composio triggers fail closed before persistence. Identity
+filters belong in those catalog fields, not `instructions`. Semantic
+policy that cannot be expressed as a field filter belongs in
+`action.instructions`. Additional AND filters use `update_rule`. Delivery requires **External triggers** (Host Availability /
 Funnel) or contributor `EXTERNAL_INGRESS_BASE_URL`. Without public ingress,
 polling watchers remain the backstop where available.
 
@@ -227,8 +233,8 @@ transitions to `delivered`.
 | `scheduler.add_timer` | Countdown timers. | `tell` + `urgent` + timer sound. |
 | `scheduler.add_alarm` | Wake alarms. | `tell` + `critical` + `requires_ack` + alarm sound. |
 | `habits.schedule_habit_checkin` | Habit-owned prompts and reviews. | `decision="offer"` + `instructions`. |
-| `automations.create_rule` | External-event rules. | Explicit `decision` (`tell`, `offer`, `act`). |
-| `rules.create` | Low-level escape hatch. | Direct `TriggerRule` authoring. |
+| `automations.create_rule` | External-event rules. Discover with `list_available_triggers`, then persist directly. | Explicit `decision` (`tell`, `offer`, `act`). |
+| `rules.create` | Time/interval escape hatch. External origins redirect to automations. | Direct `TriggerRule` authoring. |
 
 ## Authoring examples
 

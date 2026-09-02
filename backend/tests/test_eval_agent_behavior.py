@@ -19,6 +19,7 @@ from tools.evaluate_agent_behavior import (
     _execute_eval_turn,
     _live_temperature_patch,
     _live_tool_output_sequence,
+    _load_cases,
     _manifest_mode,
     _pass_threshold_for_case,
     _resolve_live_temperature,
@@ -172,3 +173,46 @@ def test_summarize_case_requires_all_runs_for_p0_live() -> None:
     assert isinstance(summary, CaseSummary)
     assert summary.pass_rate == 0.6667
     assert not summary.passed
+
+
+def test_summarize_case_includes_failed_tool_calls() -> None:
+    case = {"id": "probe_case", "priority": "P1", "category": "tool_selection", "tier": "probe"}
+    rows = [
+        RunRow(
+            "probe_case",
+            2,
+            "live",
+            False,
+            1.0,
+            {
+                "tool_calls": [
+                    {
+                        "capability": "scheduler.replace_alert",
+                        "arguments": {"scope": "series", "when": "9:30"},
+                        "code": "scheduler.replace_alert(scope='series', when='9:30')",
+                    }
+                ]
+            },
+            [{"name": "arguments_forbidden", "passed": False, "detail": "scope=series"}],
+            manifest_mode="production",
+            model="m1",
+        ),
+    ]
+
+    summary = _summarize_case(case, rows, threshold=0.67)
+
+    assert not summary.passed
+    assert any("scheduler.replace_alert(scope='series', when='9:30')" in item for item in summary.failures)
+
+
+def test_load_cases_rejects_duplicate_keys(tmp_path: Path) -> None:
+    path = tmp_path / "dup.yaml"
+    path.write_text(
+        "cases:\n"
+        "- id: one\n"
+        "  input: first\n"
+        "  input: second\n"
+    )
+
+    with pytest.raises(ValueError, match="Duplicate YAML key 'input'"):
+        _load_cases(path)

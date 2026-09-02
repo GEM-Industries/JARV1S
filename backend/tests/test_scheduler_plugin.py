@@ -174,6 +174,12 @@ async def test_get_alerts_returns_local_time_for_scheduled_reminder(monkeypatch)
             "original_local_time": "23:00",
         },
     }
+    rule = {
+        "id": "rule-sleep",
+        "name": "Wind down",
+        "origin": {"original_local_time": "22:00"},
+        "management": {"provider": "scheduler", "resource_id": "rule-sleep"},
+    }
 
     class Cursor:
         def __init__(self, items):
@@ -184,7 +190,7 @@ async def test_get_alerts_returns_local_time_for_scheduled_reminder(monkeypatch)
 
     db = SimpleNamespace(
         trigger_instances=SimpleNamespace(find=MagicMock(return_value=Cursor([doc]))),
-        trigger_rules=SimpleNamespace(find=MagicMock(return_value=Cursor([]))),
+        trigger_rules=SimpleNamespace(find=MagicMock(return_value=Cursor([rule]))),
     )
 
     monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
@@ -195,7 +201,8 @@ async def test_get_alerts_returns_local_time_for_scheduled_reminder(monkeypatch)
 
     assert rows[0].time == "2026-05-26T23:00:00+10:00"
     assert rows[0].local_time == "11:00 PM"
-    assert rows[0].scheduled_local_time == "23:00"
+    assert rows[0].scheduled_local_time == "22:00"
+    assert rows[0].name == "Wind down"
     assert rows[0].local_date == "2026-05-26"
     dumped = rows[0].model_dump(exclude_none=True)
     assert "utc_time" not in dumped
@@ -275,6 +282,13 @@ async def test_get_alerts_filters_daily_alarms_by_local_time(monkeypatch) -> Non
     assert rows[0].instance_id == "trg-alarm"
     assert rows[0].kind == "alarm"
     assert rows[0].recurrence == "daily"
+
+
+@pytest.mark.asyncio
+async def test_get_alerts_rejects_date_as_local_time(monkeypatch) -> None:
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+    result = await SchedulerPlugin().get_alerts(local_time="2026-09-03")
+    assert "clock" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -689,21 +703,25 @@ async def test_get_alerts_surfaces_recurring_series_without_pending_instance(mon
 
     rows = (await SchedulerPlugin().get_alerts()).alerts
 
-    by_rule = {row.series_id: row for row in rows}
-    assert set(by_rule) == {"rule-live", "rule-orphan"}
-    # The live series is represented by its pending instance (has a time).
-    assert by_rule["rule-live"].instance_id == "trg-live"
-    assert by_rule["rule-live"].name == "Morning Wakeup Lights"
-    assert by_rule["rule-live"].time is not None
+    by_instance = {row.instance_id: row for row in rows if row.instance_id}
+    by_series = {row.series_id: row for row in rows if row.series_id}
+    # Pending rows expose only their occurrence identifier.
+    assert by_instance["trg-live"].series_id is None
+    assert by_instance["trg-live"].name == "Morning Wakeup Lights"
+    assert by_instance["trg-live"].time is not None
     # The orphaned series surfaces from the rule with no upcoming time.
-    assert by_rule["rule-orphan"].status == "active"
-    assert by_rule["rule-orphan"].time is None
-    assert by_rule["rule-orphan"].message == "Time for pushups"
-    assert by_rule["rule-orphan"].delivery_target == "Bedroom"
-    assert by_rule["rule-orphan"].delivery_target_kind == "room"
+    assert by_series["rule-orphan"].status == "active"
+    assert by_series["rule-orphan"].time is None
+    assert by_series["rule-orphan"].message == "Time for pushups"
+    assert by_series["rule-orphan"].delivery_target == "Bedroom"
+    assert by_series["rule-orphan"].delivery_target_kind == "room"
 
     matching = (await SchedulerPlugin().get_alerts(query="morning")).alerts
-    assert [row.series_id for row in matching] == ["rule-live"]
+    assert [row.instance_id for row in matching if row.instance_id] == ["trg-live"]
+
+    active = (await SchedulerPlugin().get_alerts(status="active")).alerts
+    assert {row.series_id for row in active} == {"rule-live", "rule-orphan"}
+    assert all(row.instance_id is None for row in active)
 
 
 @pytest.mark.asyncio
@@ -845,7 +863,7 @@ async def test_recurring_remind_refuses_existing_named_series(monkeypatch) -> No
 
     assert result.code == "tool_error"
     assert "already exists" in result.message
-    assert "scheduler.replace_alert(series_id='rule-morning')" in result.message
+    assert "scheduler.replace_alert(series_id='rule-morning', scope='series')" in result.message
     create_rule.assert_not_awaited()
     create_instance.assert_not_awaited()
 
@@ -907,7 +925,7 @@ async def test_remind_rejects_missing_protocol_before_persisting(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-async def test_cancel_alert_deletes_recurring_rule_definition(monkeypatch) -> None:
+async def test_cancel_alert_query_resolves_and_deletes_recurring_series(monkeypatch) -> None:
     trigger_rules = SimpleNamespace(
         find_one=AsyncMock(return_value={
             "id": "rule-1",
@@ -928,9 +946,31 @@ async def test_cancel_alert_deletes_recurring_rule_definition(monkeypatch) -> No
         )),
     )
 
-    result = await SchedulerPlugin().cancel_alert(series_id="rule-1")
+    plugin = SchedulerPlugin()
+    plugin.get_alerts = AsyncMock(
+        return_value=AlertQueryResult(
+            alerts=[
+                AlertSummary(
+                    series_id="rule-1",
+                    scope="series",
+                    name="Wake up",
+                    kind="alarm",
+                    status="active",
+                )
+            ],
+            match_status=MatchStatus.SINGLE,
+            coverage=ReadCoverage.COMPLETE,
+        )
+    )
+
+    result = await plugin.cancel_alert(query="wake", scope="series")
 
     assert _text(result) == "Recurring series cancelled."
+    plugin.get_alerts.assert_awaited_once_with(
+        kind=None,
+        status="active",
+        query="wake",
+    )
     trigger_rules.delete_one.assert_awaited_once_with({"id": "rule-1", "owner_id": "geoff"})
     trigger_instances.update_many.assert_awaited_once()
     query, update = trigger_instances.update_many.await_args.args
@@ -1077,7 +1117,15 @@ async def test_replace_alert_both_ids_guides_to_date_specific_instance(monkeypat
 
     assert "exactly one of series_id or instance_id" in _text(result)
     assert "query=" in _text(result)
-    assert "permanent/all-future recurring series changes" in _text(result)
+    assert "scope='series'" in _text(result)
+
+    result = await SchedulerPlugin().replace_alert(
+        instance_id="trg-wake",
+        scope="series",
+        when="10am",
+    )
+    assert "instance_id identifies one pending occurrence" in _text(result)
+
     trigger_instances.update_one.assert_not_awaited()
     trigger_rules.update_one.assert_not_awaited()
 
@@ -1090,7 +1138,6 @@ async def test_replace_alert_query_resolves_unique_instance(monkeypatch) -> None
             alerts=[
                 AlertSummary(
                     instance_id="trg-wake",
-                    series_id="rule-wake",
                     scope="instance",
                     name="Wake up",
                     kind="alarm",
@@ -1107,8 +1154,73 @@ async def test_replace_alert_query_resolves_unique_instance(monkeypatch) -> None
     result = await plugin.replace_alert(query="wake", when="9:30")
 
     assert _text(result).startswith("Occurrence updated.")
-    plugin.get_alerts.assert_awaited_once()
+    plugin.get_alerts.assert_awaited_once_with(
+        kind=None,
+        status=None,
+        query="wake",
+    )
     assert plugin._replace_instance.await_args.kwargs["instance_id"] == "trg-wake"
+
+
+@pytest.mark.asyncio
+async def test_replace_alert_series_id_occurrence_uses_pending_instance(monkeypatch) -> None:
+    plugin = SchedulerPlugin()
+    plugin._replace_instance = AsyncMock(return_value="Occurrence updated.")
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr(
+        "plugins.scheduler.mongodb",
+        SimpleNamespace(db=SimpleNamespace(
+            trigger_instances=SimpleNamespace(
+                find_one=AsyncMock(return_value={"id": "trg-wake"}),
+            ),
+        )),
+    )
+
+    result = await plugin.replace_alert(series_id="rule-wake", when="9:30")
+
+    assert _text(result).startswith("Occurrence updated.")
+    plugin._replace_instance.assert_awaited_once()
+    assert plugin._replace_instance.await_args.kwargs["instance_id"] == "trg-wake"
+
+    plugin._replace_instance.reset_mock()
+    monkeypatch.setattr(
+        "plugins.scheduler.mongodb",
+        SimpleNamespace(db=SimpleNamespace(
+            trigger_instances=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+        )),
+    )
+    result = await plugin.replace_alert(series_id="rule-wake", when="9:30")
+    assert "No pending occurrence for that series" in _text(result)
+    plugin._replace_instance.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replace_alert_query_does_not_broaden_occurrence_to_series(monkeypatch) -> None:
+    plugin = SchedulerPlugin()
+    plugin.get_alerts = AsyncMock(
+        return_value=AlertQueryResult(
+            alerts=[
+                AlertSummary(
+                    series_id="rule-wake",
+                    scope="series",
+                    name="Wake up",
+                    kind="alarm",
+                    status="active",
+                )
+            ],
+            match_status=MatchStatus.SINGLE,
+            coverage=ReadCoverage.COMPLETE,
+        )
+    )
+    plugin._replace_series = AsyncMock(return_value="Series updated.")
+    plugin._replace_instance = AsyncMock(return_value="Occurrence updated.")
+    monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
+
+    result = await plugin.replace_alert(query="wake", when="9:30")
+
+    assert _text(result) == "Matched item has no occurrence identifier."
+    plugin._replace_series.assert_not_awaited()
+    plugin._replace_instance.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1119,7 +1231,6 @@ async def test_replace_alert_query_ambiguous_does_not_write(monkeypatch) -> None
             alerts=[
                 AlertSummary(
                     instance_id="trg-wake",
-                    series_id="rule-wake",
                     scope="instance",
                     name="Wake up",
                     kind="alarm",
@@ -1145,20 +1256,6 @@ async def test_replace_alert_query_ambiguous_does_not_write(monkeypatch) -> None
     result = await plugin.replace_alert(when="9:30")
 
     assert "Multiple matches" in _text(result)
-    plugin.get_alerts.return_value = AlertQueryResult(
-        alerts=[
-            AlertSummary(
-                instance_id="trg-bins",
-                scope="instance",
-                kind="reminder",
-                status="pending",
-            )
-        ],
-        match_status=MatchStatus.SINGLE,
-        coverage=ReadCoverage.COMPLETE,
-    )
-    result = await plugin.replace_alert(query="bins", scope="series", when="9:30")
-    assert "no series identifier" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -1166,6 +1263,21 @@ async def test_cancel_alert_empty_requires_target(monkeypatch) -> None:
     monkeypatch.setattr("plugins.scheduler.get_owner_id", lambda: "geoff")
     result = await SchedulerPlugin().cancel_alert()
     assert "query=" in _text(result)
+
+    result = await SchedulerPlugin().cancel_alert(
+        instance_id="trg-wake",
+        scope="series",
+    )
+    assert "instance_id identifies one pending occurrence" in _text(result)
+
+    monkeypatch.setattr(
+        "plugins.scheduler.mongodb",
+        SimpleNamespace(db=SimpleNamespace(
+            trigger_instances=SimpleNamespace(find_one=AsyncMock(return_value=None)),
+        )),
+    )
+    result = await SchedulerPlugin().cancel_alert(series_id="rule-wake")
+    assert "No pending occurrence for that series" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -1358,12 +1470,11 @@ async def test_replace_alert_retargets_series_in_place(monkeypatch) -> None:
         return_value=AlertQueryResult(
             alerts=[
                 AlertSummary(
-                    instance_id="trg-wake",
                     series_id="rule-wake",
-                    scope="instance",
+                    scope="series",
                     name="Wake up",
                     kind="alarm",
-                    status="pending",
+                    status="active",
                 )
             ],
             match_status=MatchStatus.SINGLE,
@@ -1378,6 +1489,11 @@ async def test_replace_alert_retargets_series_in_place(monkeypatch) -> None:
     )
 
     assert _text(result).startswith("Series updated.")
+    plugin.get_alerts.assert_awaited_once_with(
+        kind=None,
+        status="active",
+        query="wake",
+    )
     trigger_rules.update_one.assert_awaited_once()
     rule_update = trigger_rules.update_one.await_args.args[1]["$set"]
     assert rule_update["attention"]["sound"] == "alarm"
@@ -1431,6 +1547,7 @@ async def test_replace_alert_message_only_preserves_pending_due_at(monkeypatch) 
 
     result = await SchedulerPlugin().replace_alert(
         series_id="rule-wake",
+        scope="series",
         message="Time to get up and get after it.",
     )
 
@@ -1483,6 +1600,7 @@ async def test_replace_alert_invalid_delivery_target_returns_actionable_error(mo
 
     result = await SchedulerPlugin().replace_alert(
         series_id="rule-wake",
+        scope="series",
         deliver_to="greenhouse",
     )
 

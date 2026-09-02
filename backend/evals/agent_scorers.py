@@ -62,6 +62,7 @@ def score_case(snapshot: TurnTraceSnapshot, asserts: dict[str, Any]) -> CaseScor
     _score_tools_required(case_score, snapshot, asserts.get("tools_called") or [])
     _score_tools_forbidden(case_score, snapshot, asserts.get("tools_forbidden") or [])
     _score_literal_arguments(case_score, snapshot, asserts.get("expected_arguments") or {})
+    _score_forbidden_arguments(case_score, snapshot, asserts.get("forbidden_arguments") or {})
     _score_no_reply(case_score, snapshot, asserts)
     _score_false_completion(case_score, snapshot, asserts)
     _score_final_facts(case_score, snapshot, asserts)
@@ -132,6 +133,26 @@ def _score_literal_arguments(
         "argument_match",
         not failures,
         ", ".join(failures),
+    )
+
+
+def _score_forbidden_arguments(
+    case_score: CaseScore,
+    snapshot: TurnTraceSnapshot,
+    forbidden_arguments: dict[str, Any],
+) -> None:
+    if not forbidden_arguments:
+        return
+    hits = [
+        f"{call.capability}.{key}={value}"
+        for call in snapshot.tool_calls
+        for key, value in forbidden_arguments.items()
+        if call.arguments.get(key) == value
+    ]
+    case_score.add(
+        "arguments_forbidden",
+        not hits,
+        f"forbidden_arguments={hits}" if hits else "",
     )
 
 

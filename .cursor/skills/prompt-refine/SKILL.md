@@ -52,6 +52,9 @@ Before proposing or making changes:
 - If available, inspect the failure transcript, assembled prompt, tool results, and expected behavior.
 - If the only evidence is "the model once did X", treat nondeterminism as a live possibility. Prefer a small eval or multiple trial checks before a broad prompt change.
 - For subjective prompt tuning, use `tier: probe` cases as measurement, not regression gates. Run a baseline first, then compare after edits.
+- If classification is `wrong_surface` into plugin code, write the plugin unit
+  test before probe-tuning. Iterate probes in `backend/evals/exp_<topic>.yaml`,
+  not `agent_behavior.yaml`.
 
 ### 2. Classify The Failure
 
@@ -126,6 +129,8 @@ After editing:
 - Re-read the assembled prompt order for the affected mode.
 - Run the smallest relevant tests or evals when they exist.
 - For nondeterministic failures, prefer multiple trials or an eval over claiming the prompt is fixed from one manual run.
+- If the change was plugin-contract, a plugin test is the verification; do not
+  treat a probe pass rate as proof the tool fail-closes.
 - Report verification honestly. If no test/eval was run, say so.
 
 ## Output Expectations

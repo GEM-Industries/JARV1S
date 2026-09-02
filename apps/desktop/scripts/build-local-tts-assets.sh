@@ -48,6 +48,15 @@ for asset in raw["assets"]:
     cached = cache_dir / name
     dest = out_dir / name
 
+    if (
+        dest.is_file()
+        and cached.is_file()
+        and dest.stat().st_size == cached.stat().st_size
+        and dest.stat().st_mtime >= cached.stat().st_mtime
+    ):
+        print(f"ok {name}")
+        continue
+
     if cached.is_file() and sha256_file(cached) == expected:
         print(f"cache hit {name}")
     else:

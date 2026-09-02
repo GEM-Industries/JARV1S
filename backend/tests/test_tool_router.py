@@ -825,14 +825,25 @@ def test_always_on_fqns_uses_explicit_allowlist(monkeypatch):
         "system": SimpleNamespace(
             name="system",
             description="system",
-            get_tools=lambda: {"search_tools": _tiny_tool, "set_volume": _tiny_tool},
+            get_tools=lambda: {
+                "search_tools": _tiny_tool,
+                "set_volume": _tiny_tool,
+                "approve_pending": _tiny_tool,
+                "deny_pending": _tiny_tool,
+            },
         ),
     })
     monkeypatch.setattr(tool_router, "registry", fake)
 
-    assert tool_router.always_on_fqns() == {"files.read", "system.search_tools"}
+    assert tool_router.always_on_fqns() == {
+        "files.read",
+        "system.search_tools",
+        "system.approve_pending",
+        "system.deny_pending",
+    }
     assert "files.open_file" not in tool_router.always_on_fqns()
     assert "weather.get_weather" not in tool_router.always_on_fqns()
+    assert "system.set_volume" not in tool_router.always_on_fqns()
 
 
 def test_always_on_excludes_routable_domain_creates():
@@ -852,6 +863,8 @@ def test_always_on_excludes_routable_domain_creates():
         "agents.dispatch",
         "agents.get_status",
         "system.exec",
+        "system.approve_pending",
+        "system.deny_pending",
     } <= tool_router.ALWAYS_ON_FQNS
 
 

@@ -81,8 +81,9 @@ def test_list_model_return_type_produces_schema():
     meta = get_tool_meta(AutomationsPlugin.list_available_triggers)
     assert meta is not None
     schema = meta["return_schema"]
-    assert schema.get("type") == "array"
-    assert schema["items"]["$ref"] == "#/defs/TriggerInfo"
+    variants = schema.get("anyOf") or [schema]
+    array_schema = next(item for item in variants if item.get("type") == "array")
+    assert array_schema["items"]["$ref"] == "#/defs/TriggerInfo"
     assert "TriggerInfo" in schema["$defs"]
 
 

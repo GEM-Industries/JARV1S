@@ -25,17 +25,27 @@ LOG_DIR="$WORKDIR/logs"
 RELOCATED_RUNTIME="$WORKDIR/relocated runtime"
 mkdir -p "$DATA_DIR" "$RUN_DIR" "$LOG_DIR"
 
+clone_or_copy() {
+  local src="$1"
+  local dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  if cp -cR "$src" "$dest" 2>/dev/null; then
+    return
+  fi
+  cp -R "$src" "$dest"
+}
+
 # Copy the runtime away from the build tree so absolute pyvenv/home paths cannot
 # silently keep working. Prefer a full runtime tree copy; fall back to copying
 # just the python distribution when PYTHON points at a signed app binary.
 if [[ -d "$RUNTIME_SRC/python" ]]; then
   mkdir -p "$RELOCATED_RUNTIME"
-  cp -R "$RUNTIME_SRC/python" "$RELOCATED_RUNTIME/python"
+  clone_or_copy "$RUNTIME_SRC/python" "$RELOCATED_RUNTIME/python"
   PYTHON="$RELOCATED_RUNTIME/python/bin/python3"
 else
   PYTHON_DIST="$(cd "$(dirname "$PYTHON_SRC")/.." && pwd)"
   mkdir -p "$RELOCATED_RUNTIME"
-  cp -R "$PYTHON_DIST" "$RELOCATED_RUNTIME/python"
+  clone_or_copy "$PYTHON_DIST" "$RELOCATED_RUNTIME/python"
   PYTHON="$RELOCATED_RUNTIME/python/bin/python3"
 fi
 if [[ ! -x "$PYTHON" ]]; then

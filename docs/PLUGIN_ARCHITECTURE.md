@@ -74,8 +74,12 @@ Canonical entry points reduce overlapping tool choice:
 
 - `scheduler` owns concrete reminders, timers, alarms, and timed deferred work,
   including instance-versus-series edits.
-- `automations` owns rules triggered by external domain events; `rules.create`
-  is the user-shaped facade for conditional trigger/action plans.
+- `automations` owns rules triggered by external domain events. Discover exact
+  `(source, event)` pairs with `list_available_triggers`, then persist with
+  `create_rule`. Named delete stays on `delete_rule`. Pause and resume stay on
+  `setups`.
+- `rules.create` is the time/interval escape hatch. External origins are
+  rejected and redirected to automations.
 - `setups` inventories and delegates lifecycle for managed definitions; it does
   not replace domain creation or editing tools.
 
@@ -166,9 +170,31 @@ Mutations treat model-generated arguments as untrusted input:
 
 The model only knows mutable domain state that the current prompt, history, or a
 tool result exposed. Design for all three cases instead of assuming it remembers
-the store. A unique user-shaped edit/cancel target may be resolved inside the
-mutation, with an explicit safe scope when occurrence and series are both
-possible. A create path that would produce a consequential duplicate should
+the store.
+
+The model interprets user intent; the plugin owns identity, current state, and
+side effects. The normal mutation surface is a user-shaped target, the desired
+change, and an explicit extent. Storage identifiers are optional precision
+handles after an ambiguous lookup, not a required list-copy-mutate workflow.
+
+When occurrence and series are both possible, pair the target with an explicit
+safe scope. Scope is mutation extent; the identifier names the target. A broader
+identifier with the least-destructive scope resolves down to the pending
+instance; it does not widen the write. Recurrence identifies target structure;
+it does not imply permission to change the series. Default to the
+least-destructive scope unless the user explicitly asks for a permanent or
+all-future change.
+
+Each lookup row should carry the mutation identifier for its declared scope.
+Do not place occurrence and series identifiers on one occurrence row and leave
+the destructive boundary to the model.
+
+When an occurrence can override a durable parent, return both the effective
+occurrence value and the current parent baseline. Read the baseline from the
+parent source of truth rather than a materialized occurrence snapshot, so
+follow-up requests about the "normal" value remain answerable.
+
+A create path that would produce a consequential duplicate should
 return the existing target and separate edit versus explicit-add recovery
 paths; it must not silently replace a non-singleton resource. Coexistence alone
 does not establish a duplicate when the domain legitimately supports many

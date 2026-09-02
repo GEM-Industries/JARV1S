@@ -28,21 +28,16 @@ def _fail(message: str, code: str = "tool_error") -> CapabilityErrorDetail:
 
 def _parse_origin(origin: dict[str, Any]) -> tuple[TriggerOrigin | None, datetime | None, CapabilityErrorDetail | None]:
     kind = origin.get("kind")
-    if kind not in {"time", "interval", "external"}:
-        return None, None, _fail("origin.kind must be one of: time, interval, external.")
-
     if kind == "external":
-        if not origin.get("source"):
-            return None, None, _fail("external rules require origin.source.")
-        return (
-            TriggerOrigin(
-                kind="external",
-                source=origin.get("source"),
-                event=origin.get("event") or "",
-                offset_minutes=int(origin.get("offset_minutes", origin.get("offset", 0)) or 0),
-            ),
-            None,
-            None,
+        return None, None, _fail(
+            "External-event rules belong on automations.create_rule. "
+            "Call automations.list_available_triggers(source) then "
+            "automations.create_rule; do not author them through rules.create."
+        )
+    if kind not in {"time", "interval"}:
+        return None, None, _fail(
+            "origin.kind must be one of: time, interval. "
+            "External app events use automations.create_rule."
         )
 
     tz_name = origin.get("timezone") or get_timezone()
@@ -120,7 +115,7 @@ class RulesPlugin(JarvisPlugin):
     metadata = PluginMetadata(
         name="rules",
         version="1.0.0",
-        description="Create durable When/Do rules for time, interval, or external-event triggers.",
+        description="Create durable When/Do rules for time or interval triggers. External app events use automations.",
         utterances=[
             "create a routine",
             "set up a daily routine",
@@ -146,10 +141,10 @@ class RulesPlugin(JarvisPlugin):
         """
         Create one durable rule: When origin fires, optionally gate with conditions, then run action.
         Use directly for clear persistent routines. Time side-effects should use decision="act" with instructions; user-facing reminders use tell; conditional prompts use offer. For offer actions, instructions should state the real decision boundary: what means speak now, defer, or suppress as already handled/no longer useful. For broad setup, agents.dispatch(mode="jarvis") may call this tool and must persist the rule before reporting success.
-        origin: {"kind": "time|interval|external", "when": "7:30am", "recurrence": "daily"} or {"kind": "external", "source": "gmail", "event": "new_message"}.
+        origin: {"kind": "time|interval", "when": "7:30am", "recurrence": "daily"}. External app events use automations.create_rule.
         action: {"decision": "tell|offer|act", "message": "...", "instructions": "...", "protocol_name": "..."}.
         confirmed: false previews; call again with confirmed=true to persist.
-        Edit recurring time rules in place with scheduler.get_alerts then scheduler.replace_alert(series_id=...); do not create a duplicate replacement.
+        Edit recurring time rules in place with scheduler.replace_alert(query=..., scope="series"); do not create a duplicate replacement.
         """
         owner_id = get_owner_id()
         if confirmed:
@@ -172,7 +167,9 @@ class RulesPlugin(JarvisPlugin):
                 return _fail(
                     f"Scheduled rule {existing.get('name')!r} already exists "
                     f"(series_id={existing['id']!r}). Update it with "
-                    "scheduler.replace_alert(series_id=..., ...); do not create a duplicate."
+                    f"scheduler.replace_alert(query={existing.get('name')!r}, "
+                    "scope='series', ...); "
+                    "do not create a duplicate."
                 )
 
         parsed_origin, first_due, origin_error = _parse_origin(origin)

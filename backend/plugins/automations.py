@@ -8,31 +8,60 @@ when rule conditions are met.
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.context import get_owner_id, get_tz
 from core.decorators import tool
 from core.operations.events import publish_operations_changed
 from core.operations.projection import resolve_managed_setup
-from core.operations.setups import SetupPatch, patch_rule_lifecycle
 from core.plugins.mutations import merge_model_patch, validation_error_message
 from core.plugins.result import ToolResult
-from core.plugins.ui import content_envelope, receipt_envelope
+from core.plugins.ui import receipt_envelope
 from core.plugins.types import JarvisPlugin, PluginMetadata
-from core.time import coerce_datetime, parse_duration
+from core.time import parse_duration
 from core.triggers.conditions import (
     field_condition_dicts,
     field_conditions_from_dicts,
 )
-from core.triggers.models import AttentionPolicy, DeliveryPlan, FreshnessPolicy, ManagementOwnership, TriggerAction, TriggerOrigin, TriggerRule
+from core.triggers.models import (
+    AttentionPolicy,
+    DeliveryPlan,
+    FreshnessPolicy,
+    ManagementOwnership,
+    TriggerAction,
+    TriggerOrigin,
+    TriggerRule,
+    validate_trigger_action_fields,
+)
 from core.triggers.lifecycle import cancel_open_instances_for_rule
 from core.triggers.priority import AttentionLevel, attention_policy_fields
 from core.triggers.service import trigger_service
 from core.triggers.vocabulary import DECISION_TELL, TriggerDecision
 from core.plugins.capabilities import CapabilityErrorDetail
 from services.database.mongodb import mongodb
+
+
+_INTERNAL_SOURCES = {"scheduler", "time", "interval", "cron", "system", "manual"}
+_IDENTITY_FIELDS = frozenset({"user", "sender", "from", "author", "user_id", "sender_id"})
+_SCHEMA_META = {
+    "type",
+    "title",
+    "description",
+    "$schema",
+    "additionalProperties",
+    "required",
+    "items",
+}
+_OPS_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "string": ("contains", "not_contains", "equals", "not_equals"),
+    "number": ("equals", "not_equals", "greater_than", "less_than"),
+    "boolean": ("equals", "not_equals"),
+}
 
 
 def _fail(message: str, code: str = "tool_error") -> CapabilityErrorDetail:
@@ -65,10 +94,9 @@ def _delivery_plan() -> DeliveryPlan:
     return DeliveryPlan()
 
 
-def _freshness_policy(trigger: dict[str, Any], action: dict[str, Any]) -> FreshnessPolicy:
+def _freshness_policy(trigger: dict[str, Any]) -> FreshnessPolicy:
     if trigger.get("source") != "calendar":
         return FreshnessPolicy()
-
     offset = int(trigger.get("offset", 0) or 0)
     return FreshnessPolicy(stale_if_source_event_started=offset < 0)
 
@@ -106,18 +134,10 @@ def _automation_rule_model(rule_doc: dict[str, Any] | TriggerRule) -> Automation
     )
 
 
-# ---------------------------------------------------------------------------
-# Module-level helpers (not LLM-facing)
-# ---------------------------------------------------------------------------
-
 async def _resolve_slug(source: str, event: str) -> tuple[str | None, list[str]]:
-    """Resolve a derived (source, event) pair back to the Composio trigger slug.
-
-    Returns (slug, valid_events) where:
-      slug        — matched Composio slug, or None if no match
-      valid_events — list of valid derived event names for this source (empty if source has no Composio triggers)
-    """
+    """Resolve a derived (source, event) pair back to the Composio trigger slug."""
     from core.integrations.composio_gateway import get_composio_gateway
+
     gateway = get_composio_gateway()
     if not gateway:
         return None, []
@@ -125,27 +145,63 @@ async def _resolve_slug(source: str, event: str) -> tuple[str | None, list[str]]
     if not triggers:
         return None, []
     from core.integrations.composio_webhooks import derive_source_event
+
     valid_events = []
-    for t in triggers:
-        slug = t.get("slug") or t.get("name", "")
+    matched = None
+    for item in triggers:
+        slug = item.get("slug") or item.get("name", "")
         if not slug:
             continue
-        s, e = derive_source_event(slug)
-        valid_events.append(e)
-        if (s, e) == (source, event):
-            return slug, valid_events
-    return None, valid_events
+        derived_source, derived_event = derive_source_event(slug)
+        valid_events.append(derived_event)
+        if (derived_source, derived_event) == (source, event):
+            matched = slug
+    return matched, valid_events
 
 
 async def _deregister_push_trigger(source: str, event: str) -> None:
-    """Deregister a Composio push trigger for (source, event) if one exists and is registered."""
     slug, _ = await _resolve_slug(source, event)
     if not slug:
         return
     from core.integrations.composio_gateway import get_composio_gateway
+
     gateway = get_composio_gateway()
     if gateway:
         await gateway.deregister_trigger(source, slug)
+
+
+async def _source_event_in_use(
+    owner_id: str,
+    source: str,
+    event: str,
+    *,
+    exclude_rule_id: str | None = None,
+) -> bool:
+    query: dict[str, Any] = {
+        "owner_id": owner_id,
+        "origin.kind": "external",
+        "origin.source": source,
+        "origin.event": event,
+    }
+    if exclude_rule_id:
+        query["id"] = {"$ne": exclude_rule_id}
+    return await mongodb.db.trigger_rules.find_one(query, {"_id": 1}) is not None
+
+
+async def _deregister_if_unused(
+    owner_id: str,
+    source: str,
+    event: str,
+    *,
+    exclude_rule_id: str | None = None,
+) -> None:
+    if not source or not event:
+        return
+    if await _source_event_in_use(
+        owner_id, source, event, exclude_rule_id=exclude_rule_id
+    ):
+        return
+    await _deregister_push_trigger(source, event)
 
 
 async def delete_automation_rule(owner_id: str, rule_id: str) -> TriggerRule | None:
@@ -168,8 +224,7 @@ async def delete_automation_rule(owner_id: str, rule_id: str) -> TriggerRule | N
         return None
     source = rule.origin.source or ""
     event = rule.origin.event or ""
-    if source and event:
-        await _deregister_push_trigger(source, event)
+    await _deregister_if_unused(owner_id, source, event)
     await mongodb.db.automation_fired.delete_many({"rule_id": rule_id})
     await publish_operations_changed(owner_id, "automations")
     return rule
@@ -182,7 +237,6 @@ async def _resolve_automation_rule_id(
     needle = token.strip()
     if not needle:
         return _fail(f"No automation matching {needle!r}.")
-    # Exact ids are already on trigger_rules; skip the catalog scan.
     existing = await mongodb.db.trigger_rules.find_one(
         {"id": needle, "owner_id": owner_id, "origin.kind": "external"},
     )
@@ -199,20 +253,18 @@ async def _resolve_automation_rule_id(
     return _fail(f"No automation matching {needle!r}.")
 
 
-def _interval_trigger_error(trigger: dict[str, Any]) -> CapabilityErrorDetail | None:
-    if (
-        trigger.get("source") == "time"
-        or trigger.get("source") == "scheduler"
-        or trigger.get("event") == "interval"
-        or "interval" in trigger
-        or "interval_minutes" in trigger
-    ):
+def _interval_trigger_error(source: str, event: str) -> CapabilityErrorDetail | None:
+    if source in _INTERNAL_SOURCES or event == "interval":
         return _fail(
             "create_rule is for external event sources, not time intervals. "
             "Use scheduler.remind(when='45m', message='...', recurrence='every 45m', "
             "instructions='only if ...') for recurring reminders."
         )
     return None
+
+
+def _provided(**fields: Any) -> dict[str, Any]:
+    return {key: value for key, value in fields.items() if value is not None}
 
 
 def _condition_key(condition: dict[str, Any]) -> tuple[str, str, str]:
@@ -224,36 +276,6 @@ def _validate_condition_list(raw: list[dict[str, Any]]) -> list[dict[str, Any]] 
         return [ConditionConfig.model_validate(c).model_dump() for c in raw]
     except ValidationError as error:
         return validation_error_message("condition", ConditionConfig, error)
-
-
-def _condition_field_error(source: str, conditions: list[dict[str, Any]]) -> CapabilityErrorDetail | None:
-    """Reject invented fields for built-in watchers that publish a closed field list."""
-    if not source or not conditions:
-        return None
-    from services.automation import automation_service
-
-    condition_fields = automation_service.watcher_condition_fields(source)
-    if not condition_fields:
-        return None
-
-    valid_fields = sorted(
-        str(field.get("field"))
-        for field in condition_fields
-        if field.get("field")
-    )
-    invalid_fields = sorted(
-        {str(condition.get("field")) for condition in conditions}
-        - set(valid_fields)
-    )
-    if not invalid_fields:
-        return None
-
-    return _fail(
-        f"Invalid condition field(s) for source='{source}': {invalid_fields}. "
-        f"Use one of: {valid_fields}. Call list_available_triggers('{source}') "
-        "to inspect condition_fields. If the policy cannot be expressed with those "
-        "fields, use decision='offer' or decision='act' with instructions instead."
-    )
 
 
 def _apply_condition_patches(
@@ -282,104 +304,378 @@ def _apply_condition_patches(
     return current
 
 
-def _event_hint(event: str, valid_events: list[str]) -> str:
+def _event_hint(event: str, catalog: list[_CatalogTrigger]) -> str:
+    valid_events = [row.info.event for row in catalog]
     if event.startswith("event_"):
         stripped = event.removeprefix("event_")
         if stripped in valid_events:
             return f" Use event='{stripped}'."
-    return ""
+    tokens = {part for part in event.lower().replace("-", "_").split("_") if part}
+    related = [
+        row for row in catalog
+        if tokens & set(row.info.event.lower().split("_"))
+    ][:2]
+    if not related:
+        return ""
+    parts: list[str] = []
+    for row in related:
+        fields = [item.field for item in row.info.condition_fields]
+        extra = f" fields={fields}" if fields else ""
+        parts.append(f"{row.info.event}{extra}")
+    return f" Related: {', '.join(parts)}."
 
 
-def _builtin_trigger_error(source: str, event: str) -> str | None:
-    if not source or not event:
+def _rewrite_identity_fields(
+    catalog: _CatalogTrigger,
+    conditions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    advertised = {item.field for item in catalog.info.condition_fields}
+    identity = advertised & _IDENTITY_FIELDS
+    rewritten: list[dict[str, Any]] = []
+    for condition in conditions:
+        field = str(condition["field"])
+        if field in advertised:
+            rewritten.append(condition)
+            continue
+        if field in _IDENTITY_FIELDS and len(identity) == 1:
+            rewritten.append({**condition, "field": next(iter(identity))})
+            continue
+        rewritten.append(condition)
+    return rewritten
+
+
+def _schema_properties(schema: Any) -> dict[str, Any]:
+    if not isinstance(schema, dict) or not schema:
+        return {}
+    nested = schema.get("properties")
+    if isinstance(nested, dict):
+        return nested
+    if all(isinstance(item, dict) for item in schema.values()) and not set(schema) <= _SCHEMA_META:
+        return {key: item for key, item in schema.items() if key not in _SCHEMA_META}
+    return {}
+
+
+def _requires_provider_config(config: Any) -> bool:
+    if not isinstance(config, dict) or not config:
+        return False
+    required = config.get("required")
+    if isinstance(required, list) and any(str(item).strip() for item in required):
+        return True
+    return bool(_schema_properties(config))
+
+
+def _json_field_type(spec: Any) -> str | None:
+    if not isinstance(spec, dict):
+        return "string"
+    declared = spec.get("type")
+    if declared == "object" or (isinstance(spec.get("properties"), dict) and declared is None):
         return None
-    from services.automation import automation_service
+    if declared in {"integer", "number"}:
+        return "number"
+    if declared == "boolean":
+        return "boolean"
+    return "string"
 
-    valid_events = [
-        item.get("event", "")
-        for item in automation_service.watcher_trigger_info(source)
-        if item.get("event")
-    ]
-    if not valid_events or event in valid_events:
-        return None
-    return _fail(
-        f"event='{event}' is not valid for source='{source}'. "
-        f"Valid built-in events are: {valid_events}."
-        f"{_event_hint(event, valid_events)} "
-        f"Call list_available_triggers('{source}') and recreate the rule with an exact event value."
+
+def _condition_field(field: str, field_type: str, hint: str | None = None) -> ConditionFieldInfo:
+    return ConditionFieldInfo(
+        field=field,
+        type=field_type,
+        hint=hint,
+        operators=list(_OPS_BY_TYPE.get(field_type, _OPS_BY_TYPE["string"])),
     )
 
 
-def _unknown_source_error(source: str) -> str | None:
-    if not source:
-        return _fail("trigger.source is required. Call list_available_triggers(source) first.")
+def _condition_fields_from_watcher(raw: list[dict[str, Any]]) -> list[ConditionFieldInfo]:
+    fields: list[ConditionFieldInfo] = []
+    for item in raw:
+        name = item.get("field")
+        if not name:
+            continue
+        declared = str(item.get("type") or "string")
+        field_type = declared if declared in _OPS_BY_TYPE else "string"
+        hint = item.get("hint")
+        fields.append(_condition_field(str(name), field_type, str(hint) if hint else None))
+    return fields
+
+
+def _condition_fields_from_payload(payload: Any) -> list[ConditionFieldInfo]:
+    fields: list[ConditionFieldInfo] = []
+    for name, spec in _schema_properties(payload).items():
+        field_type = _json_field_type(spec)
+        if not field_type:
+            continue
+        hint = spec.get("description") if isinstance(spec, dict) else None
+        fields.append(_condition_field(str(name), field_type, str(hint) if hint else None))
+    return fields
+
+
+def _builtin_trigger_rows(source: str) -> list[_CatalogTrigger]:
     from services.automation import automation_service
 
-    if source in automation_service.watcher_sources():
-        return None
-    # Tests and optional push-backed sources may not have live watchers registered
-    # when this tool is called, but internal/time sources are always invalid here.
-    if source in {"scheduler", "time", "interval", "cron", "system", "manual"}:
+    events = automation_service.watcher_trigger_info(source)
+    if not events:
+        return []
+    fields = _condition_fields_from_watcher(
+        automation_service.watcher_condition_fields(source)
+    )
+    reactive = automation_service.watcher_is_reactive(source)
+    rows: list[_CatalogTrigger] = []
+    for item in events:
+        rows.append(
+            _CatalogTrigger(
+                info=TriggerInfo(
+                    source=source,
+                    event=item.get("event", ""),
+                    description=item.get("description", ""),
+                    provider="built-in",
+                    condition_fields=fields,
+                    supported=True,
+                    offset_supported=not reactive,
+                )
+            )
+        )
+    return rows
+
+
+async def _composio_trigger_rows(source: str) -> list[_CatalogTrigger]:
+    from core.integrations.composio_gateway import get_composio_gateway
+    from core.integrations.composio_webhooks import derive_source_event
+
+    gateway = get_composio_gateway()
+    if gateway is None:
+        return []
+    rows: list[_CatalogTrigger] = []
+    for item in await gateway.list_trigger_types(source):
+        slug = item.get("slug") or item.get("name", "")
+        if not slug:
+            continue
+        derived_source, event = derive_source_event(slug)
+        requires_config = _requires_provider_config(item.get("config"))
+        description = item.get("description") or item.get("display_name") or ""
+        if requires_config:
+            description = (
+                f"{description} Requires provider configuration that automations "
+                "cannot store yet — do not use this event."
+            ).strip()
+        rows.append(
+            _CatalogTrigger(
+                info=TriggerInfo(
+                    source=derived_source or source,
+                    event=event,
+                    description=description,
+                    provider="composio",
+                    condition_fields=_condition_fields_from_payload(item.get("payload")),
+                    supported=not requires_config,
+                    offset_supported=False,
+                ),
+                slug=slug,
+            )
+        )
+    return rows
+
+
+async def _catalog_for_source(source: str) -> list[_CatalogTrigger] | CapabilityErrorDetail:
+    if not source:
+        return _fail("trigger.source is required. Call list_available_triggers(source) first.")
+    if source in _INTERNAL_SOURCES:
         return _fail(
             f"source='{source}' is not an external event source. "
             "Use scheduler tools for time-based rules."
         )
+
+    from core.plugins.registry import registry
+
+    rows = _builtin_trigger_rows(source)
+    if source not in registry.bespoke_names:
+        composio_rows = await _composio_trigger_rows(source)
+        if not rows and not composio_rows:
+            from core.integrations.composio_gateway import get_composio_gateway
+
+            if get_composio_gateway() is None:
+                return _fail(
+                    f"No built-in triggers for '{source}' and Composio is not configured. "
+                    f"Connect the app, then call list_available_triggers('{source}')."
+                )
+            return _fail(
+                f"No triggers available for '{source}'. "
+                f"Call list_available_triggers('{source}') after connecting the app."
+            )
+        rows.extend(composio_rows)
+    if not rows:
+        return _fail(
+            f"No triggers available for '{source}'. "
+            f"Call list_available_triggers('{source}') for valid source/event values."
+        )
+    return rows
+
+
+async def _resolve_catalog_trigger(
+    source: str,
+    event: str,
+) -> _CatalogTrigger | CapabilityErrorDetail:
+    catalog = await _catalog_for_source(source)
+    if isinstance(catalog, CapabilityErrorDetail):
+        return catalog
+    matches = [row for row in catalog if row.info.event == event]
+    if not matches:
+        valid_events = [row.info.event for row in catalog]
+        return _fail(
+            f"event='{event}' is not valid for source='{source}'. "
+            f"Valid events are: {valid_events}."
+            f"{_event_hint(event, catalog)} "
+            f"Call list_available_triggers('{source}') and use an exact event value."
+        )
+    chosen = matches[0]
+    if not chosen.info.supported:
+        return _fail(
+            f"event='{event}' for source='{source}' requires provider configuration "
+            "that automations cannot store yet. Use a supported event from "
+            f"list_available_triggers('{source}')."
+        )
+    return chosen
+
+
+def _condition_error_for_catalog(
+    catalog: _CatalogTrigger,
+    conditions: list[dict[str, Any]],
+) -> CapabilityErrorDetail | None:
+    if not conditions:
+        return None
+    advertised = {field.field: field for field in catalog.info.condition_fields}
+    if not advertised:
+        return _fail(
+            f"source='{catalog.info.source}' event='{catalog.info.event}' has no "
+            "filterable payload fields. Leave field/value empty and put fire-time "
+            "policy in instructions."
+        )
+    invalid_fields = sorted({
+        str(condition.get("field")) for condition in conditions
+    } - set(advertised))
+    if invalid_fields:
+        return _fail(
+            f"Invalid condition field(s) for source='{catalog.info.source}': "
+            f"{invalid_fields}. Use one of: {sorted(advertised)}. "
+            f"Copy field from list_available_triggers('{catalog.info.source}'). "
+            "If the policy cannot be expressed with those fields, put it in instructions."
+        )
+    for condition in conditions:
+        field = advertised[str(condition["field"])]
+        op = str(condition["op"])
+        if op not in field.operators:
+            return _fail(
+                f"op='{op}' is not valid for field='{field.field}' ({field.type}). "
+                f"Use one of: {list(field.operators)}."
+            )
     return None
 
 
-async def _auto_register_push_trigger(source: str, event: str) -> str | None:
-    """Register the Composio push trigger for (source, event) if one exists.
-
-    Returns:
-      "ok"  — trigger found and registered successfully
-      None  — bespoke watcher handles this source, or no Composio triggers — silent
-      str   — actionable error: wrong event name or registration failure
-    """
-    from core.plugins.registry import registry
-    if source in registry.bespoke_names:
-        return None  # bespoke watcher owns this source — no Composio involvement
-
-    slug, valid_events = await _resolve_slug(source, event)
-    if not valid_events:
-        return None  # poll source or Composio not configured — no action needed
-    if not slug:
-        return (
-            f"Warning: event='{event}' not found for source='{source}'. "
-            f"Valid events are: {valid_events}. "
-            f"Delete this rule, call list_available_triggers('{source}'), and recreate with the correct event name."
+def _offset_error(catalog: _CatalogTrigger, offset: int) -> CapabilityErrorDetail | None:
+    if offset and not catalog.info.offset_supported:
+        return _fail(
+            f"trigger.offset is only valid for anticipated events. "
+            f"{catalog.info.source}.{catalog.info.event} is reactive — use offset=0."
         )
+    return None
+
+
+async def _ensure_push_registered(catalog: _CatalogTrigger) -> CapabilityErrorDetail | None:
+    if catalog.info.provider != "composio" or not catalog.slug:
+        return None
     from core.integrations.composio_gateway import get_composio_gateway
+
     gateway = get_composio_gateway()
-    ok = await gateway.register_trigger(source, slug)
+    if gateway is None:
+        return _fail(
+            f"source='{catalog.info.source}' requires a connected Composio integration. "
+            f"Connect it first, then call list_available_triggers('{catalog.info.source}')."
+        )
+    ok = await gateway.register_trigger(catalog.info.source, catalog.slug)
     if not ok:
-        return f"Warning: push trigger found but registration failed — is '{source}' connected?"
-    return "ok"
+        return _fail(
+            f"Could not register push trigger for '{catalog.info.source}.{catalog.info.event}'. "
+            f"Is '{catalog.info.source}' connected?"
+        )
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Sub-models — typed for LLM schema visibility via CapabilityDefinition
-# ---------------------------------------------------------------------------
+async def _duplicate_name_error(owner_id: str, name: str) -> CapabilityErrorDetail | None:
+    existing = await mongodb.db.trigger_rules.find_one(
+        {
+            "owner_id": owner_id,
+            "name": re.compile(f"^{re.escape(name.strip())}$", re.IGNORECASE),
+            "surface": True,
+            "origin.kind": "external",
+        },
+        {"_id": 0, "id": 1, "name": 1},
+    )
+    if not existing:
+        return None
+    return _fail(
+        f"Automation {existing.get('name')!r} already exists "
+        f"(rule_id={existing['id']!r}). Update it with automations.update_rule; "
+        "do not create a duplicate."
+    )
 
-# `extra="forbid"` on all three sub-models — unknown keys (e.g. `channel_id` on
-# trigger, `type`/`prompt` on action, typoed `op` on condition) raise ValidationError
-# instead of silently persisting as a broken rule.
 
-class TriggerConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    source: str         # "calendar", "gmail", "slack", "github" etc.
-    event: str = ""     # derived event name: "starting"/"ending" (calendar), or derived from Composio
-                        # slug e.g. "new_gmail_message", "email_sent_trigger", "receive_message".
-                        # Use list_available_triggers(source) to discover names for external apps.
-                        # Leave empty to match any event from this source.
-    offset: int = 0     # minutes offset from event start (poll path only; negative = before)
+def _action_contract_error(action: dict[str, Any]) -> CapabilityErrorDetail | None:
+    try:
+        validate_trigger_action_fields(
+            decision=action.get("decision", DECISION_TELL),
+            message=action.get("message") or "",
+            instructions=action.get("instructions"),
+            protocol_name=action.get("protocol"),
+        )
+    except ValueError as exc:
+        return _fail(str(exc))
+    return None
+
+
+async def _protocol_error(action: dict[str, Any], owner_id: str) -> CapabilityErrorDetail | None:
+    protocol_name = action.get("protocol")
+    if not protocol_name:
+        return None
+    from plugins.protocol import protocol_exists
+
+    if await protocol_exists(protocol_name, owner_id):
+        return None
+    return _fail(
+        f"Protocol '{protocol_name}' not found. Use setups.find(setup_type='protocol') "
+        "to choose an existing protocol, or set instructions for one-off live work."
+    )
+
+
+def _matches_query(info: TriggerInfo, query: str | None) -> bool:
+    needle = (query or "").strip().lower()
+    if not needle:
+        return True
+    haystack = " ".join(
+        [
+            info.source,
+            info.event,
+            info.description,
+            info.provider,
+            *[field.field for field in info.condition_fields],
+        ]
+    ).lower()
+    return needle in haystack or all(part in haystack for part in needle.split())
 
 
 ConditionOp = Literal[
     "contains", "not_contains", "equals", "not_equals", "greater_than", "less_than"
 ]
+
+
+class TriggerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: str
+    event: str = ""
+    offset: int = 0
+
+
 class ConditionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    field: str          # e.g. "title", "location", "duration_minutes", "attendee_count", "is_all_day"
+    field: str
     op: ConditionOp
     value: str
 
@@ -387,10 +683,8 @@ class ConditionConfig(BaseModel):
 class ActionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     decision: TriggerDecision = DECISION_TELL
-    message: str = "Automation triggered."  # {field} placeholders resolved from source item
-    protocol: Optional[str] = None          # protocol name to execute
-    # Fire-time work and policy interpreted by the agent alongside rule_id —
-    # for lifecycle / conditional behavior the structured fields cannot capture.
+    message: str = "Automation triggered."
+    protocol: Optional[str] = None
     instructions: Optional[str] = None
 
 
@@ -407,70 +701,49 @@ class AutomationRule(BaseModel):
     created_at: datetime
 
 
+class ConditionFieldInfo(BaseModel):
+    field: str
+    type: str = "string"
+    hint: Optional[str] = None
+    operators: list[str] = Field(default_factory=list)
+
+
 class TriggerInfo(BaseModel):
-    source: str       # use as trigger.source in create_rule
-    event: str        # use as trigger.event in create_rule — exact value required
+    source: str
+    event: str
     description: str
-    provider: str     # "built-in" (works immediately) | "composio" (requires connect_integration first)
-    condition_fields: list[dict[str, Any]] = Field(default_factory=list)
+    provider: str
+    condition_fields: list[ConditionFieldInfo] = Field(default_factory=list)
+    supported: bool = True
+    offset_supported: bool = False
 
 
-def _automation_preview(
-    *,
-    name: str,
-    trigger: dict[str, Any],
-    action: dict[str, Any],
-    conditions: list[dict[str, Any]],
-    importance: AttentionLevel,
-) -> ToolResult:
-    trigger_label = f"{trigger.get('source', '')}.{trigger.get('event', '') or '*'}"
-    condition_text = "All matching events" if not conditions else "; ".join(
-        f"{c['field']} {c['op']} {c['value']}" for c in conditions
-    )
-    action_summary = action.get("message") or action.get("protocol") or "Automation triggered."
-    sections = [
-        {
-            "type": "kv",
-            "pairs": {
-                "Name": name,
-                "Trigger": trigger_label,
-                "Offset": f"{trigger.get('offset', 0)} minutes",
-                "Conditions": condition_text,
-                "Decision": action.get("decision", DECISION_TELL),
-                "Importance": importance,
-            },
-        },
-        {
-            "type": "markdown",
-            "content": (
-                f"Message: {action_summary}\n\n"
-                f"Instructions: {action.get('instructions') or 'None'}\n\n"
-                "If this is correct, call `jarvis.automations.create_rule(..., confirmed=True)` with the same fields."
-            ),
-        },
-    ]
-    return ToolResult(
-        content=(
-            f"Preview only. Automation '{name}' was not created. "
-            "Confirm before persisting this recurring behavior."
-        ),
-        ui=[content_envelope("Automation Preview", sections)],
-    )
+@dataclass
+class _CatalogTrigger:
+    info: TriggerInfo
+    slug: str | None = None
 
 
 class AutomationsPlugin(JarvisPlugin):
     metadata = PluginMetadata(
         name="automations",
         version="1.0.0",
-        description="Create event-based rules: notify, run protocols, or act when external events match conditions.",
+        description=(
+            "Create event-based rules for external apps. Use for 'tell me when...' "
+            "and 'before each meeting' requests; use scheduler for clock times."
+        ),
         utterances=[
             "set up an automation",
             "let me know when something happens",
             "tell me when something happens",
             "watch for something and tell me",
             "when I get an email, let me know",
-            "tell me when someone mentions me on Slack",
+            "tell me when someone messages me on Slack",
             "alert me when I get a GitHub pull request",
+            "ten minutes before each appointment",
+            "remind me before meetings",
+            "heads-up before my calendar events",
+            "delete that automation",
             "pause my automations",
             "turn my automations back on",
             "what can you watch for",
@@ -481,115 +754,101 @@ class AutomationsPlugin(JarvisPlugin):
     async def create_rule(
         self,
         name: str,
-        trigger: dict[str, Any],
-        action: dict[str, Any],
-        conditions: Optional[list[dict[str, Any]]] = None,
-        importance: AttentionLevel = "normal",
+        source: str,
+        event: str = "",
+        offset: int = 0,
+        decision: TriggerDecision = DECISION_TELL,
+        message: str = "Automation triggered.",
+        protocol: Optional[str] = None,
         instructions: Optional[str] = None,
-        confirmed: bool = False,
+        field: Optional[str] = None,
+        op: ConditionOp = "equals",
+        value: Optional[str] = None,
+        importance: AttentionLevel = "normal",
     ) -> ToolResult | CapabilityErrorDetail:
         """
-        Create an event-based automation rule. Use for "notify/alert/remind me when..." requests tied to external app/provider events; use scheduler tools for explicit times.
-        For intervals ("every 45 minutes", "in 2 hours", "tomorrow at 9"), use scheduler.defer for side effects or scheduler.remind for user-facing messages.
-        ALWAYS call list_available_triggers(source) first and use the exact source/event returned; do not guess trigger names. Use setups.find(setup_type="automation") to inspect existing rules before creating duplicates.
-        trigger: {"source": "<source>", "event": "<event from list_available_triggers>", "offset": 0}
-          offset: minutes relative to event time for anticipated sources only, e.g. -5 = 5 min before.
-          Use negative offsets for pre-start reminders; use offset=0 with decision="act" for side effects that should run when/during the event.
-        conditions: [{"field": "<field>", "op": "<op>", "value": "<value>"}] are AND-ed prefilters using condition_fields from list_available_triggers.
-          Use contains/not_contains/equals/not_equals for strings, greater_than/less_than for numbers, and equals "true"/"false" for booleans.
-          Do not invent fields. For OR, semantic matching ("looks urgent"), unavailable fields, time windows, or lifecycle logic, leave conditions empty and use decision="offer" or decision="act" with instructions.
-        action: {"decision": "tell|offer|act", "message": "<brief intent>", "protocol": null, "instructions": null}.
-          `instructions` may also be passed as a top-level argument; it is folded into action.instructions.
-          decision: "tell" announces matching events; "offer" evaluates at fire time and speaks only if useful; "act" does fire-time work headless and stays silent.
-          protocol: existing protocol name from setups.find(setup_type="protocol"), or null.
-          Reactive triggers (e.g. gmail/slack/github): write a short intent; the full event payload is passed at fire time for a richer response.
-          Anticipated triggers (e.g. calendar): use {field} placeholders, e.g. "Meeting '{title}' starts in {offset} minutes".
-          instructions: fire-time policy or work to perform; for decision="offer", state what evidence means speak now, defer, or suppress because it is already handled or no longer useful. The agent receives rule_id and may call update_rule/delete_rule/suppress_event/pause_all or other jarvis.* tools if needed.
-        importance: how hard matching events should try to reach the user.
-          "normal" — announced when active; deferred during quiet/paused.
-          "urgent" — breaks through quiet hours.
-          "critical" — highest tier; still deferred while paused until safety-class origins exist.
-        confirmed: false returns a preview only and does not persist. Call again with confirmed=true after the user approves the preview.
-        Fired rules create TriggerInstance rows and can retry voice delivery if the user is offline.
+        Create an event-based automation and persist it. Use for notify/alert/remind-me-when requests tied to external app events; use scheduler tools for clock times.
+        Copy exact source and event from list_available_triggers or a validation error.
+        field/op/value is an optional catalog filter. instructions are fire-time policy, not a substitute for a filterable field.
+        offset is minutes relative to anticipated events only (negative = before); reactive events require 0.
+        decision: tell announces; offer evaluates at fire time; act does headless work and requires instructions or protocol.
+        Delete a named automation with delete_rule. Pause or resume from inventory with setups.pause / setups.resume.
         """
-        interval_error = _interval_trigger_error(trigger)
+        interval_error = _interval_trigger_error(source, event)
         if interval_error:
             return interval_error
 
-        if instructions and not action.get("instructions"):
-            action = {**action, "instructions": instructions}
+        trigger_dict = TriggerConfig(source=source, event=event, offset=offset).model_dump()
+        action_dict = ActionConfig(
+            decision=decision,
+            message=message,
+            protocol=protocol,
+            instructions=instructions,
+        ).model_dump()
 
-        try:
-            trigger = TriggerConfig.model_validate(trigger).model_dump()
-        except ValidationError as error:
-            return validation_error_message("trigger", TriggerConfig, error)
-        try:
-            action = ActionConfig.model_validate(action).model_dump()
-        except ValidationError as error:
-            return validation_error_message("action", ActionConfig, error)
-        source_error = _unknown_source_error(trigger.get("source", ""))
-        if source_error:
-            return source_error
-        builtin_error = _builtin_trigger_error(trigger.get("source", ""), trigger.get("event", ""))
-        if builtin_error:
-            return builtin_error
+        catalog = await _resolve_catalog_trigger(
+            trigger_dict.get("source", ""),
+            trigger_dict.get("event", ""),
+        )
+        if isinstance(catalog, CapabilityErrorDetail):
+            return catalog
+        offset_error = _offset_error(catalog, int(trigger_dict.get("offset", 0) or 0))
+        if offset_error:
+            return offset_error
+
+        action_error = _action_contract_error(action_dict)
+        if action_error:
+            return action_error
 
         owner_id = get_owner_id()
-        protocol_name = action.get("protocol")
-        if protocol_name:
-            from plugins.protocol import protocol_exists
-            if not await protocol_exists(protocol_name, owner_id):
-                return _fail(
-                    f"Protocol '{protocol_name}' not found. Use setups.find(setup_type='protocol') "
-                    "to choose an existing protocol, or set action.instructions for one-off live work."
-                )
-        try:
-            validated_conditions = [
-                ConditionConfig.model_validate(condition).model_dump()
-                for condition in conditions or []
-            ]
-        except ValidationError as error:
-            return validation_error_message("condition", ConditionConfig, error)
-        condition_error = _condition_field_error(trigger.get("source", ""), validated_conditions)
+        protocol_error = await _protocol_error(action_dict, owner_id)
+        if protocol_error:
+            return protocol_error
+        duplicate_error = await _duplicate_name_error(owner_id, name)
+        if duplicate_error:
+            return duplicate_error
+
+        validated_conditions: list[dict[str, Any]] = []
+        if field is not None or value is not None:
+            if not field or value is None:
+                return _fail("field and value must be provided together for a filter.")
+            collected = _validate_condition_list(
+                [{"field": field, "op": op, "value": value}]
+            )
+            if isinstance(collected, CapabilityErrorDetail):
+                return collected
+            validated_conditions = _rewrite_identity_fields(catalog, collected)
+        condition_error = _condition_error_for_catalog(catalog, validated_conditions)
         if condition_error:
             return condition_error
 
-        if not confirmed:
-            return _automation_preview(
-                name=name,
-                trigger=trigger,
-                action=action,
-                conditions=validated_conditions,
-                importance=importance,
-            )
+        register_error = await _ensure_push_registered(catalog)
+        if register_error:
+            return register_error
 
         rule = await trigger_service.create_rule(
             owner_id=owner_id,
             name=name,
-            origin=_trigger_origin(trigger),
+            origin=_trigger_origin(trigger_dict),
             conditions=field_conditions_from_dicts(validated_conditions),
-            action=_trigger_action(action),
+            action=_trigger_action(action_dict),
             attention=_attention_policy(importance),
             delivery=_delivery_plan(),
-            freshness=_freshness_policy(trigger, action),
+            freshness=_freshness_policy(trigger_dict),
             management=ManagementOwnership(provider="automations", resource_id=None),
         )
         await publish_operations_changed(owner_id, "automations")
 
-        source = trigger.get("source", "")
-        event = trigger.get("event", "")
-        reg_result = await _auto_register_push_trigger(source, event) if source and event else None
-
         msg = f"Automation '{name}' created (id: {rule.id})."
-        if reg_result == "ok":
-            msg += " Push trigger registered — fires when Composio delivers a webhook."
-        elif reg_result is not None:
-            msg += f" {reg_result}"
+        if catalog.info.provider == "composio":
+            msg += " Push trigger registered — fires when the provider delivers a webhook."
         else:
             msg += " Use test_rule to verify against current data."
-        disable_path = f"Disable with jarvis.automations.update_rule(rule_id={rule.id!r}, enabled=False)."
-        trigger_label = f"{trigger.get('source', '')}.{trigger.get('event', '')}"
-        action_label = action.get("message") or action.get("protocol") or "Automation"
+        disable_path = (
+            f"Delete with delete_rule({name!r}). Pause with setups.pause({name!r})."
+        )
+        trigger_label = f"{trigger_dict.get('source', '')}.{trigger_dict.get('event', '')}"
+        action_label = action_dict.get("message") or action_dict.get("protocol") or "Automation"
         return ToolResult(
             content=f"{msg} {disable_path}",
             ui=[receipt_envelope(
@@ -604,22 +863,24 @@ class AutomationsPlugin(JarvisPlugin):
         self,
         rule_id: str,
         name: Optional[str] = None,
-        enabled: Optional[bool] = None,
-        trigger: Optional[dict[str, Any]] = None,
-        conditions: Optional[list[dict[str, Any]]] = None,
-        add_conditions: Optional[list[dict[str, Any]]] = None,
-        remove_conditions: Optional[list[dict[str, Any]]] = None,
-        action: Optional[dict[str, Any]] = None,
-        importance: Optional[AttentionLevel] = None,
-        paused_until: Optional[str] = None,
+        source: Optional[str] = None,
+        event: Optional[str] = None,
+        offset: Optional[int] = None,
+        conditions: Optional[list[ConditionConfig]] = None,
+        add_conditions: Optional[list[ConditionConfig]] = None,
+        remove_conditions: Optional[list[ConditionConfig]] = None,
+        decision: Optional[TriggerDecision] = None,
+        message: Optional[str] = None,
+        protocol: Optional[str] = None,
         instructions: Optional[str] = None,
+        importance: Optional[AttentionLevel] = None,
     ) -> str | CapabilityErrorDetail:
         """
-        Modify an existing event automation rule. Only provided fields are updated.
+        Modify an existing event automation. Only provided fields are updated.
         For small filter tweaks use add_conditions/remove_conditions; use conditions=[] to clear all.
-        Conditions may only use condition_fields from list_available_triggers for the rule source; do not invent fields.
-        Use action={"instructions": "..."} or instructions=... for fire-time policy when the rule needs semantic judgment, unavailable fields, lifecycle behavior, or side-effect work; pass instructions="" to clear.
-        paused_until: ISO datetime to pause until; use unpause_rule to resume immediately.
+        Conditions may only use condition_fields from list_available_triggers; do not invent fields.
+        Use instructions for fire-time policy when structured fields cannot express it; pass instructions="" to clear.
+        Permanently remove with delete_rule. Pause or resume from inventory with setups.pause / setups.resume.
         rule_id accepts the create_rule id or a unique automation name.
         """
         owner_id = get_owner_id()
@@ -631,14 +892,27 @@ class AutomationsPlugin(JarvisPlugin):
 
         if name is not None:
             updates["name"] = name
-        if enabled is not None:
-            updates["enabled"] = enabled
 
-        needs_existing = any(
-            value is not None
-            for value in (trigger, action, conditions, add_conditions, remove_conditions, instructions)
+        trigger_patch = _provided(source=source, event=event, offset=offset)
+        action_patch = _provided(
+            decision=decision,
+            message=message,
+            protocol=protocol,
+            instructions=instructions,
         )
-        existing: dict[str, Any] | None = None
+        condition_replace = None if conditions is None else [
+            item.model_dump() if isinstance(item, ConditionConfig) else dict(item)
+            for item in conditions
+        ]
+        add_dicts = None if add_conditions is None else [
+            item.model_dump() if isinstance(item, ConditionConfig) else dict(item)
+            for item in add_conditions
+        ]
+        remove_dicts = None if remove_conditions is None else [
+            item.model_dump() if isinstance(item, ConditionConfig) else dict(item)
+            for item in remove_conditions
+        ]
+
         existing_rule = await mongodb.db.trigger_rules.find_one(
             {"id": rule_id, "owner_id": owner_id, "origin.kind": "external"},
         )
@@ -646,73 +920,80 @@ class AutomationsPlugin(JarvisPlugin):
             return _fail(f"No rule found with id '{rule_id}'.")
 
         rule_model = TriggerRule.model_validate(existing_rule)
-        if needs_existing or paused_until is not None or importance is not None:
-            existing = _automation_rule_model(rule_model).model_dump()
+        existing = _automation_rule_model(rule_model).model_dump()
+        previous_trigger = dict(existing.get("trigger") or {})
+        merged_trigger = previous_trigger
 
-        if trigger is not None:
+        if trigger_patch:
             try:
-                merged_trigger = merge_model_patch(TriggerConfig, existing.get("trigger"), trigger)
+                merged_trigger = merge_model_patch(
+                    TriggerConfig, existing.get("trigger"), trigger_patch
+                )
             except ValidationError as error:
                 return validation_error_message("trigger", TriggerConfig, error)
-            source_error = _unknown_source_error(merged_trigger.get("source", ""))
-            if source_error:
-                return source_error
-            builtin_error = _builtin_trigger_error(
-                merged_trigger.get("source", ""),
-                merged_trigger.get("event", ""),
-            )
-            if builtin_error:
-                return builtin_error
+
+        catalog = await _resolve_catalog_trigger(
+            merged_trigger.get("source", ""),
+            merged_trigger.get("event", ""),
+        )
+        if isinstance(catalog, CapabilityErrorDetail):
+            return catalog
+        offset_error = _offset_error(catalog, int(merged_trigger.get("offset", 0) or 0))
+        if offset_error:
+            return offset_error
+        if trigger_patch:
             updates["origin"] = _trigger_origin(merged_trigger).model_dump(mode="python")
-        if conditions is not None:
-            rule_trigger = (
-                _automation_trigger_view(TriggerRule.model_validate({**existing_rule, **updates}))
-                if "origin" in updates else existing.get("trigger") or {}
-            )
-            rule_source = rule_trigger.get("source", "")
-            validated_conditions = _validate_condition_list(conditions)
+            updates["freshness"] = _freshness_policy(merged_trigger).model_dump(mode="python")
+
+        if condition_replace is not None:
+            validated_conditions = _validate_condition_list(condition_replace)
             if isinstance(validated_conditions, CapabilityErrorDetail):
                 return validated_conditions
-            condition_error = _condition_field_error(rule_source, validated_conditions)
+            validated_conditions = _rewrite_identity_fields(catalog, validated_conditions)
+            condition_error = _condition_error_for_catalog(catalog, validated_conditions)
             if condition_error:
                 return condition_error
             updates["conditions"] = [
                 condition.model_dump(mode="python")
                 for condition in field_conditions_from_dicts(validated_conditions)
             ]
-        elif add_conditions is not None or remove_conditions is not None:
-            rule_trigger = (
-                _automation_trigger_view(TriggerRule.model_validate({**existing_rule, **updates}))
-                if "origin" in updates else existing.get("trigger") or {}
-            )
-            rule_source = rule_trigger.get("source", "")
-            if add_conditions:
-                validated_add = _validate_condition_list(add_conditions)
+        elif add_dicts is not None or remove_dicts is not None:
+            if add_dicts:
+                validated_add = _validate_condition_list(add_dicts)
                 if isinstance(validated_add, CapabilityErrorDetail):
                     return validated_add
-                condition_error = _condition_field_error(rule_source, validated_add)
+                add_dicts = _rewrite_identity_fields(catalog, validated_add)
+                condition_error = _condition_error_for_catalog(catalog, add_dicts)
                 if condition_error:
                     return condition_error
             patched = _apply_condition_patches(
                 existing.get("conditions", []),
-                add=add_conditions,
-                remove=remove_conditions,
+                add=add_dicts,
+                remove=remove_dicts,
             )
             if isinstance(patched, CapabilityErrorDetail):
                 return patched
+            condition_error = _condition_error_for_catalog(catalog, patched)
+            if condition_error:
+                return condition_error
             updates["conditions"] = [
                 condition.model_dump(mode="python")
                 for condition in field_conditions_from_dicts(patched)
             ]
 
-        action_patch = dict(action) if action is not None else {}
-        if instructions is not None and "instructions" not in action_patch:
-            action_patch["instructions"] = instructions or None
         if action_patch:
             try:
-                action_update = merge_model_patch(ActionConfig, existing.get("action"), action_patch)
+                action_update = merge_model_patch(
+                    ActionConfig, existing.get("action"), action_patch
+                )
             except ValidationError as error:
                 return validation_error_message("action", ActionConfig, error)
+            action_error = _action_contract_error(action_update)
+            if action_error:
+                return action_error
+            protocol_error = await _protocol_error(action_update, owner_id)
+            if protocol_error:
+                return protocol_error
             updates["action"] = _trigger_action(action_update).model_dump(mode="python")
             updates["attention"] = _attention_policy(
                 importance if importance is not None else existing.get("importance", "normal"),
@@ -720,17 +1001,15 @@ class AutomationsPlugin(JarvisPlugin):
             updates["delivery"] = _delivery_plan().model_dump(mode="python")
         elif importance is not None:
             updates["attention"] = _attention_policy(importance).model_dump(mode="python")
-        if paused_until is not None:
-            updates["paused_until"] = coerce_datetime(paused_until)
 
-        policy_updates = {key: value for key, value in updates.items() if key != "updated_at"}
-        if policy_updates and set(policy_updates) <= {"enabled", "paused_until"}:
-            await patch_rule_lifecycle(
-                owner_id,
-                f"rule:{rule_id}",
-                SetupPatch.model_validate(policy_updates),
-            )
-            return f"Rule '{rule_id}' updated."
+        trigger_changed = (
+            previous_trigger.get("source") != merged_trigger.get("source")
+            or previous_trigger.get("event") != merged_trigger.get("event")
+        )
+        if trigger_changed:
+            register_error = await _ensure_push_registered(catalog)
+            if register_error:
+                return register_error
 
         result = await mongodb.db.trigger_rules.update_one(
             {"id": rule_id, "owner_id": owner_id, "origin.kind": "external"},
@@ -738,43 +1017,30 @@ class AutomationsPlugin(JarvisPlugin):
         )
         if result.matched_count == 0:
             return _fail(f"No rule found with id '{rule_id}'.")
+        if trigger_changed:
+            await _deregister_if_unused(
+                owner_id,
+                previous_trigger.get("source", ""),
+                previous_trigger.get("event", ""),
+                exclude_rule_id=rule_id,
+            )
         await publish_operations_changed(owner_id, "automations")
         return f"Rule '{rule_id}' updated."
 
     @tool
-    async def unpause_rule(self, rule_id: str) -> str | CapabilityErrorDetail:
-        """Remove the pause from a specific rule, resuming it immediately."""
-        owner_id = get_owner_id()
-        resolved = await _resolve_automation_rule_id(owner_id, rule_id)
-        if isinstance(resolved, CapabilityErrorDetail):
-            return resolved
-        rule_id = resolved
-        try:
-            await patch_rule_lifecycle(
-                owner_id,
-                f"rule:{rule_id}",
-                SetupPatch.model_validate({"paused_until": None}),
-            )
-        except ValueError:
-            return _fail(f"No rule found with id '{rule_id}'.")
-        return f"Rule '{rule_id}' unpaused."
-
-    @tool
     async def delete_rule(self, rule_id: str) -> str | CapabilityErrorDetail:
         """
-        Delete an external-event automation permanently.
-        rule_id accepts the create_rule id or a unique automation name.
-        For other configured behavior, use setups.delete.
+        Permanently delete one event automation by id or unique name.
+        Use for 'delete that automation' after create_rule. Time-based reminders use scheduler.cancel_alert.
         """
         owner_id = get_owner_id()
         resolved = await _resolve_automation_rule_id(owner_id, rule_id)
         if isinstance(resolved, CapabilityErrorDetail):
             return resolved
-        rule_id = resolved
-        rule = await delete_automation_rule(owner_id, rule_id)
-        if rule is None:
+        deleted = await delete_automation_rule(owner_id, resolved)
+        if deleted is None:
             return _fail(f"No automation matching {rule_id!r}.")
-        return f"Rule '{rule_id}' deleted."
+        return f"Deleted automation {deleted.name}."
 
     @tool
     async def suppress_event(self, rule_id: str, event_id: str) -> str | CapabilityErrorDetail:
@@ -800,7 +1066,7 @@ class AutomationsPlugin(JarvisPlugin):
     async def test_rule(self, rule_id: str) -> str | CapabilityErrorDetail:
         """
         Dry-run a rule against live data. Returns a pre-formatted summary of what would fire.
-        Polling sources: shows upcoming matches with fire times. Push-triggered rules: confirms registration only.
+        Polling sources: shows upcoming matches with fire times. Push-triggered rules: no live dry-run.
         VOICE: "That rule would fire for your 10am Standup today."
         """
         from services.automation import automation_service
@@ -810,12 +1076,13 @@ class AutomationsPlugin(JarvisPlugin):
         if isinstance(resolved, CapabilityErrorDetail):
             return resolved
         rule_id = resolved
-        results = await automation_service.test_rule(rule_id)
+        results = await automation_service.test_rule(rule_id, owner_id=owner_id)
         hold = automation_service.pause_observation()
 
         if results is None:
             rule = await mongodb.db.trigger_rules.find_one({
                 "id": rule_id,
+                "owner_id": owner_id,
                 "origin.kind": "external",
             })
             if not rule:
@@ -826,8 +1093,8 @@ class AutomationsPlugin(JarvisPlugin):
             event_label = f" ({event})" if event else ""
             body = (
                 f"This is a push-delivered trigger for '{source}'{event_label}. "
-                "It fires when Composio delivers a webhook — no dry-run is available. "
-                "The trigger is registered and will fire automatically when the event occurs."
+                "No live dry-run is available. The provider trigger is configured, "
+                "but JARV1S cannot verify delivery until an event arrives."
             )
             return f"{hold}\n{body}" if hold else body
 
@@ -840,8 +1107,8 @@ class AutomationsPlugin(JarvisPlugin):
         today = now_local.date()
 
         lines = [f"This rule would fire for {len(results)} event(s):"]
-        for r in results:
-            fire_utc = datetime.fromisoformat(r["fire_time"])
+        for row in results:
+            fire_utc = datetime.fromisoformat(row["fire_time"])
             fire_local = fire_utc.astimezone(tz)
             fire_date = fire_local.date()
 
@@ -854,15 +1121,15 @@ class AutomationsPlugin(JarvisPlugin):
 
             time_str = fire_local.strftime("%I:%M %p").lstrip("0")
 
-            seconds = r["seconds_until_fire"]
+            seconds = row["seconds_until_fire"]
             if seconds > 0:
                 mins = int(seconds // 60)
                 relative = f"in {mins} min" if mins < 60 else f"in {mins // 60}h {mins % 60}m"
             else:
                 relative = "fire time has passed"
 
-            fired = " — already fired this cycle" if r.get("already_fired") else ""
-            lines.append(f"  - {r['title']} {day} at {time_str} ({relative}){fired}")
+            fired = " — already fired this cycle" if row.get("already_fired") else ""
+            lines.append(f"  - {row['title']} {day} at {time_str} ({relative}){fired}")
 
         body = "\n".join(lines)
         return f"{hold}\n{body}" if hold else body
@@ -902,54 +1169,19 @@ class AutomationsPlugin(JarvisPlugin):
         return "All automations resumed."
 
     @tool
-    async def list_available_triggers(self, app_name: str) -> list[TriggerInfo]:
+    async def list_available_triggers(
+        self,
+        source: str,
+        query: str | None = None,
+    ) -> list[TriggerInfo] | CapabilityErrorDetail:
         """
         List trigger types and condition fields available to author a new rule for a source.
         This is not an inventory of existing automations; use setups.find for configured rules.
-        Built-in triggers include condition_fields for structured filters in create_rule/update_rule.
-
-        provider="built-in": handled by JARV1S directly — works immediately, no connection needed.
-        provider="composio": requires the app to be connected first via connect_integration.
-
-        RULE: if built-in triggers exist for this source, ALWAYS prefer them over composio.
-        Built-in triggers are more reliable and don't require external connections.
-
-        After inspecting the result, call create_rule with the exact source and event values.
-        app_name: e.g. "gmail", "slack", "github".
+        Copy the exact source and event into create_rule. Prefer provider="built-in" when present.
+        supported=false means the event requires provider configuration automations cannot store yet.
+        query optionally filters the returned rows without truncating matches.
         """
-        from core.plugins.registry import registry
-        from services.automation import automation_service
-
-        results: list[TriggerInfo] = []
-        condition_fields = automation_service.watcher_condition_fields(app_name)
-
-        # Built-in watcher triggers always take precedence.
-        watcher_events = automation_service.watcher_trigger_info(app_name)
-        for te in watcher_events:
-            results.append(TriggerInfo(
-                source=app_name,
-                event=te.get("event", ""),
-                description=te.get("description", ""),
-                provider="built-in",
-                condition_fields=condition_fields,
-            ))
-
-        # Only surface Composio triggers for sources without a bespoke plugin.
-        # Bespoke plugins own their source — Composio alternatives are hidden to
-        # prevent the LLM from accidentally routing through an external connection.
-        if app_name not in registry.bespoke_names:
-            from core.integrations.composio_gateway import get_composio_gateway
-            gateway = get_composio_gateway()
-            if gateway:
-                triggers = await gateway.list_trigger_types(app_name)
-                from core.integrations.composio_webhooks import derive_source_event
-                for t in triggers:
-                    slug = t.get("slug") or t.get("name", "")
-                    if not slug:
-                        continue
-                    source, event = derive_source_event(slug)
-                    desc = t.get("description") or t.get("display_name", "")
-                    results.append(TriggerInfo(source=source, event=event, description=desc, provider="composio"))
-
-        return results
-
+        catalog = await _catalog_for_source(source)
+        if isinstance(catalog, CapabilityErrorDetail):
+            return catalog
+        return [row.info for row in catalog if _matches_query(row.info, query)]

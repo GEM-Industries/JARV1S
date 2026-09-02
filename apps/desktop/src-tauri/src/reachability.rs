@@ -472,28 +472,16 @@ fn handler_matches_path(
     path: &str,
     loopback_targets: &[String],
 ) -> bool {
-    handlers.iter().any(|(mount, handler)| {
-        let mount_ok = mount == path || mount.starts_with(&format!("{path}/")) || mount == "/";
-        // Prefer exact path mounts; allow root only if both paths are not present separately.
-        let exact = mount == path || mount.trim_end_matches('/') == path;
-        if !exact && mount != path {
-            // Accept exact path prefix match from Tailscale set-path
-            if !mount_ok || mount == "/" {
-                return false;
-            }
-        }
-        if !exact {
-            return false;
-        }
-        handler
-            .get("Proxy")
-            .and_then(Value::as_str)
-            .is_some_and(|proxy| {
-                let proxy = proxy.trim_end_matches('/');
-                loopback_targets
-                    .iter()
-                    .any(|target| proxy == target || proxy.starts_with(&format!("{target}/")))
-            })
+    let Some(proxy) = handlers
+        .get(path)
+        .and_then(|handler| handler.get("Proxy"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let proxy = proxy.trim_end_matches('/');
+    loopback_targets.iter().any(|origin| {
+        proxy == format!("{}{}", origin.trim_end_matches('/'), path)
     })
 }
 
@@ -736,7 +724,6 @@ pub async fn enable_host_funnel(backend_port: Option<u16>) -> EnableHostFunnelRe
         };
     };
 
-    let target = format!("http://127.0.0.1:{port}");
     // Port 443 may still have JARV1S's legacy private Serve route. Clear it
     // without requiring Funnel permission, then replace it with public paths.
     let clear_result = timeout(
@@ -805,7 +792,8 @@ pub async fn enable_host_funnel(backend_port: Option<u16>) -> EnableHostFunnelRe
             "--yes".to_string(),
             format!("--https={FUNNEL_HTTPS_PORT}"),
             format!("--set-path={path}"),
-            target.clone(),
+            // Tailscale strips --set-path; keep it on the local target.
+            format!("http://127.0.0.1:{port}{path}"),
         ];
         match run_tailscale_interactive(&binary, &args, Duration::from_secs(120)).await {
             Ok(InteractiveCommandResult::ConsentRequired(consent_url)) => {
@@ -1015,6 +1003,25 @@ mod tests {
             "Web": {
                 "jarvis.example.ts.net:443": {
                     "Handlers": {
+                        "/api/v1/webhooks": {"Proxy": "http://127.0.0.1:8000/api/v1/webhooks"},
+                        "/api/v1/push": {"Proxy": "http://127.0.0.1:8000/api/v1/push"}
+                    }
+                }
+            }
+        });
+        let targets = vec!["http://127.0.0.1:8000".to_string()];
+        assert_eq!(
+            find_matching_funnel_url(&status, Some("jarvis.example.ts.net"), &targets),
+            Some("https://jarvis.example.ts.net".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_funnel_proxies_that_strip_the_api_path() {
+        let status = json!({
+            "Web": {
+                "jarvis.example.ts.net:443": {
+                    "Handlers": {
                         "/api/v1/webhooks": {"Proxy": "http://127.0.0.1:8000"},
                         "/api/v1/push": {"Proxy": "http://127.0.0.1:8000"}
                     }
@@ -1024,7 +1031,7 @@ mod tests {
         let targets = vec!["http://127.0.0.1:8000".to_string()];
         assert_eq!(
             find_matching_funnel_url(&status, Some("jarvis.example.ts.net"), &targets),
-            Some("https://jarvis.example.ts.net".to_string())
+            None
         );
     }
 

@@ -134,15 +134,24 @@ When the model repeatedly chooses valid-looking but wrong calls, treat it as an 
   when the domain has a stable identity, singleton rule, or real collision
   invariant; otherwise coexistence is valid and explicit edit language belongs
   on the edit tool.
-- Let edit/cancel tools resolve a unique user-shaped query themselves. When a
-  match can represent both one occurrence and a durable series, pair the query
-  with an explicit, default-safe scope rather than inferring destructive scope
-  from nullable identifiers.
+- Let edit/cancel tools resolve a unique user-shaped query themselves. The
+  common call is target + change + extent; storage ids are optional precision
+  after an ambiguous lookup, not a required list-copy-mutate step.
+- When a match can represent both one occurrence and a durable series, pair the
+  query with an explicit, default-safe scope. Recurrence is evidence about the
+  target, not all-future intent. Keep the least-destructive occurrence scope
+  unless the user explicitly asks for the series, permanence, or all future
+  occurrences. State that default in the model-facing summary.
 - Prefer focused query parameters over broad list-and-filter outputs. A list tool that returns mixed records should accept ordinary user filters such as `kind`, `status`, `local_time`, `message`, or `recurrence` when those are common decision boundaries.
 - Do not require users to know internal storage taxonomy. If colloquial terms like "automation" can mean a durable rule or one-off deferred action, provide an umbrella lookup or make the tool error point to the exact alternate lookup.
 - If users can inspect disabled durable definitions, keep them discoverable through the agent's definitions inventory. Soft-off (`enabled=false`) is not delete, and pending-only inventories should not be stretched to represent disabled definitions.
 - Avoid nullable-parameter puzzles where two optional identifiers encode different scopes. If the model must choose between occurrence vs series, file vs folder, or user vs channel, make that scope explicit in parameter names, enums, separate tools, or fail-closed validation.
 - Return only the fields needed for the likely next step by default. Include stable downstream IDs, human labels, and scope; avoid dumping unrelated records that require the model to manually classify domain state.
+- A result row should expose the mutation identifier for its declared scope,
+  not a sibling scope's convenient id. If an occurrence and its parent series
+  are both mutable, use an explicit series lookup to return a series row; do
+  not put `instance_id`, `series_id`, and `scope="instance"` on one row and ask
+  the model to choose the destructive boundary.
 - Add a new workflow tool only for repeated, high-risk multi-step mutations. For rare repair flows, prefer improving lookup/filtering and validation first; do not grow the tool surface just to encode one transcript.
 - If the fix is "tell the model harder," stop and ask whether code can make the invalid or confusing path unrepresentable.
 
@@ -337,7 +346,7 @@ LLM to call `display.push_content` afterward.
 - **Runtime context vs tools.** Universal per-turn facts already injected by the orchestrator (current local time/date/timezone, origin node, modality) should be answered from fresh runtime context, not by inventing trivial tools. Mutable provider/domain state (devices, files, messages, events) must be fetched inside the tool at call time. For long-running loops where "now" can drift mid-turn, expose a clock/read tool or re-inject runtime context at the loop boundary.
 - **Batch-first tools.** Public `@tool` methods accept a list and act on one-or-many (`control_devices(entity_ids=[...])`). Keep singular forms as internal, non-`@tool` wrappers when needed for compatibility.
 - **Stable identifiers across the chain.** Search/list tools return the exact field downstream tools accept (`entity_id` → `control_devices(entity_ids=...)`). The model never translates a generic `id` into a provider-specific param.
-- **Targeted lookup before mutation.** If a mutation depends on choosing one row from a mixed domain list, expose enough filters on the lookup tool for the model to fetch only plausible targets before it edits, cancels, or answers count/existence questions.
+- **Targeted lookup before mutation.** If a mutation depends on choosing one row from a mixed domain list, expose enough filters on the lookup tool for inspection or disambiguation. A unique user-shaped edit still resolves inside the mutation tool; do not require the model to copy an id from a prior list.
 - **Relative/ambiguous intent is the tool's job.** When users speak in relative terms ("warmer", "brighter", "more orange"), expose one helper that reads current state and computes the concrete change, instead of pushing unit math (Kelvin, 0–255) onto the model.
 - **Explicit intent beats inferred shape.** If a tool name encodes a user-visible product choice, honor that noun and use shape only to fill missing details: `add_alarm("30m")` remains a snoozable alarm, while `add_timer("5pm")` can compute a countdown to 5pm. Do not silently swap products just because the argument shape could fit another tool.
 - **Domain logic lives in the plugin, not the docstring.** Docstrings teach selection and policy; normalization, clamping, and aliasing belong in code near the data model (see `tool-layer-boundaries`).
@@ -367,6 +376,21 @@ When a tool or prompt change fixes model behavior, add the smallest eval that me
 - For prompt-only fixes, assert `max_tool_calls: 0` so the eval proves the model used runtime context instead of unnecessary tools.
 - For history-sensitive bugs, include a stale or conflicting previous assistant turn. This catches recency bleed without hard-coding the one transcript that failed.
 
+Plugin tests own fail-closed mutations. Live probes with stubbed tools own model
+selection. A probe pass rate is not plugin correctness.
+
+Iterate selection/prompt changes in `backend/evals/exp_<topic>.yaml` via
+`--cases`. Change one surface per round; run a baseline, then after. Delete the
+scratch file when done. Promote one original case plus one adjacent negative into
+`agent_behavior.yaml`. Do not hill-climb the frozen suite. Each case needs its
+own `- id:`; duplicate YAML keys silently overwrite and drop the earlier case.
+
+Probe fixtures must match identifier provenance: if production lookups return a
+series row, do not stub an instance id already in hand. Plugin tests encode the
+live mutation contract, not a hoped-for call shape. A lookup-first path that
+still mutates correctly is not a failure; a refusal that steers the model toward
+a wider write is.
+
 Promote a production failure deliberately:
 
 1. Use the turn's ledger `invocations` to classify the failure as routing/tool
@@ -385,7 +409,7 @@ Promote a production failure deliberately:
 If users naturally ask to edit, reschedule, replace, or retarget persistent state, expose one tool that performs the whole mutation safely. Do not make the LLM compose a fragile sequence like list → cancel/delete → create when a missed step can leave duplicate or stale state.
 
 Keep the tool small and domain-owned:
-- Accept the stable identifier plus only fields that can change.
+- Accept a user-shaped query, or an optional stable id after disambiguation, plus only fields that can change.
 - Fetch the existing object inside the tool and preserve omitted fields.
 - Validate the replacement before cancelling/deleting the old object when possible.
 - Return one clear result with the new identifier/details.
@@ -393,11 +417,23 @@ Keep the tool small and domain-owned:
 - Keep cancel as its own tool. Editing a message (or other fields) to say "cancelled" is not cancellation; create/replace docstrings should point clear/stop intents to the cancel tool.
 - If an update fails, return the actionable error and stop. Never recover by creating a second durable object unless the old one was atomically replaced or explicitly disabled; otherwise both can fire.
 
-This does not require a generic CRUD framework. Prefer a narrow tool such as `replace_alert(identifier, when=None, message=None, ...)` when the domain has specific invariants.
+This does not require a generic CRUD framework. Prefer a narrow tool such as
+`replace_alert(query=..., when=None, scope="occurrence")` when the domain has
+specific invariants. Stable ids remain optional precision handles.
 
-For recurring or materialized state, make the mutation scope explicit instead of accepting one opaque ID and guessing. List tools should return the exact downstream identifiers and their scope, e.g. `instance_id` for a one-shot/current occurrence and `series_id` for a recurring rule. The edit tool should accept those same names (`replace_alert(series_id=...)` vs `replace_alert(instance_id=...)`) and reject ambiguous calls.
+For recurring or materialized state, make mutation extent explicit (`scope`)
+instead of encoding it in which identifier the model copied. Scope is extent;
+the identifier names the target. A series identifier with occurrence scope is
+the next pending occurrence, not a series write. Do not infer a wider write from
+a series identifier, and do not refuse a correct narrow scope because the model
+supplied the broader id. Recovery errors are training data: a refusal that says
+"use scope=series" teaches the model to widen the write.
 
-When rejecting ambiguous mutation scope, make the error steer toward the least-destructive valid option and name when the broader scope is appropriate. Example: date-specific or one-off changes should point to the occurrence identifier; permanent/all-future changes should point to the durable rule identifier.
+List rows expose only the identifier for their declared scope. When a pending
+occurrence can override its parent, return the effective occurrence value and
+the durable series baseline from the current parent definition, not the
+occurrence snapshot; otherwise a one-off edit erases the evidence needed to
+answer "normal" or repair the series.
 
 If a durable rule materializes future instances, edits must update durable intent and the materializer must read that current rule when creating the next instance. Do not clone stale instance snapshots forward after a rule edit. The same applies to anticipated external automations: `PendingFire` may keep a schedule-time rule for prefetch, but dispatch (`_fire`) must reload the live rule so `update_rule` action/instruction changes apply even when `fire_time` did not change.
 

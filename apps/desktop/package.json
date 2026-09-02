@@ -1,7 +1,7 @@
 {
   "name": "jarvis-desktop",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.6.1",
   "type": "module",
   "scripts": {
     "ensure:host-stub": "bash scripts/ensure-host-resources-stub.sh",
@@ -14,7 +14,7 @@
     "release:macos": "bash scripts/release-macos.sh",
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build --bundles app"
+    "build": "tauri build --bundles app && bash scripts/bundle-host-resources.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",

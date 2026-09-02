@@ -18,6 +18,14 @@ RUNTIME_VERSION="$(python3 -c "import json; print(json.load(open('$MANIFEST'))['
 RUNTIME_URL="$(python3 -c "import json; print(json.load(open('$MANIFEST'))['runtime_source'])")"
 RUNTIME_SHA="$(python3 -c "import json; print(json.load(open('$MANIFEST'))['runtime_sha256'])")"
 
+if [[ -x "$OUT_DIR/ollama" && -f "$OUT_DIR/manifest.json" ]]; then
+  EXISTING_VERSION="$(python3 -c "import json; print(json.load(open('$OUT_DIR/manifest.json')).get('runtime_version',''))")"
+  if [[ "$EXISTING_VERSION" == "$RUNTIME_VERSION" ]]; then
+    echo "Reusing packaged Ollama helper (version=$RUNTIME_VERSION)"
+    exit 0
+  fi
+fi
+
 ARCHIVE_NAME="ollama-darwin.tgz"
 ARCHIVE_PATH="$CACHE_DIR/$RUNTIME_VERSION/$ARCHIVE_NAME"
 mkdir -p "$(dirname "$ARCHIVE_PATH")" "$OUT_DIR"

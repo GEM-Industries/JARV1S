@@ -216,6 +216,7 @@ async def test_generation_waits_for_inflight_turn_preparation():
         assert await generation
 
     assert ws.send.await_args.kwargs["max_buffer_delay_ms"] == 0
+    assert ws.send.await_args.kwargs["generation_config"] == {"emotion": "distant"}
 
 
 @pytest.mark.asyncio
@@ -250,3 +251,4 @@ async def test_warmup_disables_server_side_buffering():
         await service.warmup()
 
     assert ws.send.await_args.kwargs["max_buffer_delay_ms"] == 0
+    assert ws.send.await_args.kwargs["generation_config"] == {"emotion": "distant"}

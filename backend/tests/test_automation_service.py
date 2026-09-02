@@ -15,7 +15,15 @@ from services.automation import (
     render_automation_message,
 )
 from core.triggers.conditions import field_conditions_from_dicts
-from plugins.automations import AutomationsPlugin
+from plugins.automations import (
+    AutomationsPlugin,
+    ConditionFieldInfo,
+    TriggerInfo,
+    _CatalogTrigger,
+    _fail,
+    delete_automation_rule,
+)
+from core.plugins.registry import build_capability_definition
 
 
 class _AsyncCursor:
@@ -101,6 +109,62 @@ def _item() -> dict:
     }
 
 
+def _mongo(*, insert_one=None, find_one=None, update_one=None, existing=None):
+    trigger_rules = SimpleNamespace(
+        insert_one=insert_one or AsyncMock(),
+        find_one=find_one or AsyncMock(return_value=existing),
+        update_one=update_one or AsyncMock(return_value=SimpleNamespace(matched_count=1)),
+        delete_one=AsyncMock(return_value=SimpleNamespace(deleted_count=1)),
+    )
+    return SimpleNamespace(
+        db=SimpleNamespace(
+            trigger_rules=trigger_rules,
+            automation_fired=SimpleNamespace(delete_many=AsyncMock()),
+        )
+    )
+
+
+def _patch_rule_mongo(monkeypatch, mongo) -> None:
+    monkeypatch.setattr("plugins.automations.mongodb", mongo)
+    monkeypatch.setattr("core.triggers.service.mongodb", mongo)
+    monkeypatch.setattr(
+        "core.plugins.registry.registry",
+        SimpleNamespace(bespoke_names={"calendar", "gmail"}),
+    )
+
+
+def _catalog_row(
+    *,
+    source: str,
+    event: str,
+    provider: str = "built-in",
+    fields: list[str] | None = None,
+    supported: bool = True,
+    offset_supported: bool = True,
+    slug: str | None = None,
+    description: str = "",
+) -> _CatalogTrigger:
+    return _CatalogTrigger(
+        info=TriggerInfo(
+            source=source,
+            event=event,
+            description=description or f"{source}.{event}",
+            provider=provider,
+            condition_fields=[
+                ConditionFieldInfo(
+                    field=name,
+                    type="string",
+                    operators=["contains", "not_contains", "equals", "not_equals"],
+                )
+                for name in (fields or [])
+            ],
+            supported=supported,
+            offset_supported=offset_supported,
+        ),
+        slug=slug,
+    )
+
+
 def test_render_automation_message_adds_calendar_title_for_generic_message() -> None:
     rule = _rule()
     rule["action"]["message"] = "Your meeting is starting in five minutes"
@@ -116,75 +180,166 @@ async def test_create_rule_rejects_interval_triggers_with_scheduler_hint() -> No
 
     result = await plugin.create_rule(
         name="pushups",
-        trigger={"source": "time", "event": "interval", "interval_minutes": 45},
-        action={"decision": "offer", "message": "Move"},
+        source="time",
+        event="interval",
+        decision="offer",
+        message="Move",
     )
 
     assert "Use scheduler.remind" in result
     assert "every 45m" in result
 
 
+def test_create_rule_schema_is_flat() -> None:
+    plugin = AutomationsPlugin()
+    definition = build_capability_definition(
+        plugin, "create_rule", plugin.create_rule, enabled=True
+    )
+    props = definition.input_schema.get("properties") or {}
+    assert "source" in props
+    assert "event" in props
+    assert "offset" in props
+    assert "decision" in props
+    assert "message" in props
+    assert "field" in props
+    assert "op" in props
+    assert "value" in props
+    assert "trigger" not in props
+    assert "action" not in props
+    assert "conditions" not in props
+    assert definition.input_schema.get("additionalProperties") is False
+
+
 @pytest.mark.asyncio
-async def test_create_rule_returns_actionable_error_for_invalid_trigger_shape(
-    monkeypatch,
-) -> None:
+async def test_create_rule_persists_immediately(monkeypatch) -> None:
+    inserted: dict = {}
+
+    async def insert_one(doc):
+        inserted.update(doc)
+
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=AsyncMock(side_effect=insert_one)))
+
     result = await AutomationsPlugin().create_rule(
         name="event reminder",
-        trigger={"source": "calendar", "event": "starting", "lead_time": 5},
-        action={"message": "Event soon"},
+        source="calendar",
+        event="starting",
+        offset=-5,
+        decision="offer",
+        message="Meeting soon",
     )
-
-    assert "Invalid trigger" in result
-    assert "Accepted fields: source, event, offset" in result
-    assert "lead_time: Extra inputs are not permitted" in result
-
-
-@pytest.mark.asyncio
-async def test_update_rule_returns_actionable_error_for_invalid_trigger_shape(
-    monkeypatch,
-) -> None:
-    existing = _trigger_rule_doc(_rule())
-    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    with patch("plugins.automations.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(
-                find_one=AsyncMock(return_value=existing),
-                update_one=AsyncMock(),
-            )
-        )
-
-        result = await AutomationsPlugin().update_rule(
-            rule_id="rule-1",
-            trigger={"offset_minutes": -10},
-        )
-
-    assert "Invalid trigger" in result
-    assert "Accepted fields: source, event, offset" in result
-    assert "offset_minutes: Extra inputs are not permitted" in result
-    mock_mongo.db.trigger_rules.update_one.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_create_rule_previews_before_persisting(monkeypatch) -> None:
-    insert_one = AsyncMock()
-
-    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    with patch("plugins.automations.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            automations=SimpleNamespace(insert_one=insert_one)
-        )
-
-        result = await AutomationsPlugin().create_rule(
-            name="event reminder",
-            trigger={"source": "calendar", "event": "starting", "offset": -5},
-            action={"decision": "offer", "message": "Meeting soon"},
-        )
 
     text = getattr(result, "content", result)
     ui = list(getattr(result, "ui", None) or [])
-    assert "Preview only" in text
-    assert ui[0].component == "ContentWidget"
-    assert ui[0].data["title"] == "Automation Preview"
+    assert "created" in text
+    assert "Preview only" not in text
+    assert ui[0].data["display"] == "receipt"
+    assert inserted["origin"]["source"] == "calendar"
+    assert inserted["origin"]["event"] == "starting"
+
+
+@pytest.mark.asyncio
+async def test_create_rule_accepts_flat_field_filter(monkeypatch) -> None:
+    inserted: dict = {}
+
+    async def insert_one(doc):
+        inserted.update(doc)
+
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=AsyncMock(side_effect=insert_one)))
+
+    result = await AutomationsPlugin().create_rule(
+        name="standup reminder",
+        source="calendar",
+        event="starting",
+        offset=-5,
+        decision="tell",
+        message="Standup soon",
+        field="title",
+        op="contains",
+        value="standup",
+    )
+
+    assert "created" in getattr(result, "content", result)
+    assert inserted["conditions"] == [
+        {"kind": "field", "parameters": {"field": "title", "op": "contains", "value": "standup"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_rule_aliases_sender_id_to_catalog_user(monkeypatch) -> None:
+    inserted: dict = {}
+
+    async def insert_one(doc):
+        inserted.update(doc)
+
+    catalog = [
+        _catalog_row(
+            source="slack",
+            event="receive_direct_message",
+            provider="composio",
+            fields=["user", "text"],
+            offset_supported=False,
+            slug="SLACK_RECEIVE_DIRECT_MESSAGE",
+        )
+    ]
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations._catalog_for_source", AsyncMock(return_value=catalog))
+    monkeypatch.setattr("plugins.automations._ensure_push_registered", AsyncMock(return_value=None))
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=AsyncMock(side_effect=insert_one)))
+
+    result = await AutomationsPlugin().create_rule(
+        name="Direct messages",
+        source="slack",
+        event="receive_direct_message",
+        field="sender_id",
+        value="U123",
+        decision="tell",
+        message="New direct message",
+    )
+
+    assert "created" in getattr(result, "content", result)
+    assert inserted["conditions"] == [
+        {"kind": "field", "parameters": {"field": "user", "op": "equals", "value": "U123"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_create_rule_invalid_event_includes_related_fields(monkeypatch) -> None:
+    insert_one = AsyncMock()
+    catalog = [
+        _catalog_row(
+            source="slack",
+            event="receive_message",
+            provider="composio",
+            fields=["user", "text"],
+            offset_supported=False,
+            slug="SLACK_RECEIVE_MESSAGE",
+        ),
+        _catalog_row(
+            source="slack",
+            event="receive_direct_message",
+            provider="composio",
+            fields=["user"],
+            offset_supported=False,
+            slug="SLACK_RECEIVE_DIRECT_MESSAGE",
+        ),
+    ]
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations._catalog_for_source", AsyncMock(return_value=catalog))
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=insert_one))
+
+    result = await AutomationsPlugin().create_rule(
+        name="Slack DMs",
+        source="slack",
+        event="message_received",
+        decision="tell",
+        message="New Slack message",
+    )
+
+    assert "event='message_received' is not valid" in result
+    assert "receive_message" in result
+    assert "fields=['user', 'text']" in result
     insert_one.assert_not_awaited()
 
 
@@ -196,22 +351,17 @@ async def test_create_rule_persists_action_instructions(monkeypatch) -> None:
         inserted.update(doc)
 
     monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.automations._auto_register_push_trigger", AsyncMock(return_value=None))
-    with patch("core.triggers.service.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(insert_one=AsyncMock(side_effect=insert_one))
-        )
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=AsyncMock(side_effect=insert_one)))
 
-        result = await AutomationsPlugin().create_rule(
-            name="event reminder",
-            trigger={"source": "calendar", "event": "starting", "offset": -5},
-            action={
-                "message": "Meeting soon",
-                "decision": "offer",
-                "instructions": "only if the meeting is not cancelled",
-            },
-            confirmed=True,
-        )
+    result = await AutomationsPlugin().create_rule(
+        name="event reminder",
+        source="calendar",
+        event="starting",
+        offset=-5,
+        decision="offer",
+        message="Meeting soon",
+        instructions="only if the meeting is not cancelled",
+    )
 
     assert "created" in result
     assert inserted["action"]["instructions"] == "only if the meeting is not cancelled"
@@ -230,22 +380,17 @@ async def test_create_rule_does_not_stale_at_start_silent_calendar_action(monkey
         inserted.update(doc)
 
     monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.automations._auto_register_push_trigger", AsyncMock(return_value=None))
-    with patch("core.triggers.service.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(insert_one=AsyncMock(side_effect=insert_one))
-        )
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=AsyncMock(side_effect=insert_one)))
 
-        result = await AutomationsPlugin().create_rule(
-            name="Meeting Quiet Mode",
-            trigger={"source": "calendar", "event": "starting", "offset": 0},
-            action={
-                "decision": "act",
-                "message": "Set quiet mode for this meeting",
-                "instructions": "Call jarvis.attention.mute for this meeting.",
-            },
-            confirmed=True,
-        )
+    result = await AutomationsPlugin().create_rule(
+        name="Meeting Quiet Mode",
+        source="calendar",
+        event="starting",
+        offset=0,
+        decision="act",
+        message="Set quiet mode for this meeting",
+        instructions="Call jarvis.attention.mute for this meeting.",
+    )
 
     assert "created" in result
     assert inserted["freshness"]["stale_if_source_event_started"] is False
@@ -259,46 +404,42 @@ async def test_create_rule_does_not_stale_at_start_calendar_notification(monkeyp
         inserted.update(doc)
 
     monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.automations._auto_register_push_trigger", AsyncMock(return_value=None))
-    with patch("core.triggers.service.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(insert_one=AsyncMock(side_effect=insert_one))
-        )
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=AsyncMock(side_effect=insert_one)))
 
-        result = await AutomationsPlugin().create_rule(
-            name="Meeting starts now",
-            trigger={"source": "calendar", "event": "starting", "offset": 0},
-            action={"decision": "tell", "message": "Meeting {title} starts now."},
-            confirmed=True,
-        )
+    result = await AutomationsPlugin().create_rule(
+        name="Meeting starts now",
+        source="calendar",
+        event="starting",
+        offset=0,
+        decision="tell",
+        message="Meeting {title} starts now.",
+    )
 
     assert "created" in result
     assert inserted["freshness"]["stale_if_source_event_started"] is False
 
 
 @pytest.mark.asyncio
-async def test_create_rule_accepts_top_level_instructions(monkeypatch) -> None:
-    inserted: dict = {}
-
-    async def insert_one(doc):
-        inserted.update(doc)
-
+async def test_create_rule_rejects_duplicate_name_case_insensitive(monkeypatch) -> None:
+    insert_one = AsyncMock()
     monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.automations._auto_register_push_trigger", AsyncMock(return_value=None))
-    with patch("core.triggers.service.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(insert_one=AsyncMock(side_effect=insert_one))
-        )
+    _patch_rule_mongo(
+        monkeypatch,
+        _mongo(insert_one=insert_one, existing={"id": "rule-1", "name": "Event Reminder"}),
+    )
 
-        await AutomationsPlugin().create_rule(
-            name="event reminder",
-            trigger={"source": "calendar", "event": "starting", "offset": -5},
-            action={"decision": "offer", "message": "Meeting soon"},
-            instructions="only if the meeting is not cancelled",
-            confirmed=True,
-        )
+    result = await AutomationsPlugin().create_rule(
+        name="event reminder",
+        source="calendar",
+        event="starting",
+        offset=-5,
+        decision="offer",
+        message="Meeting soon",
+    )
 
-    assert inserted["action"]["instructions"] == "only if the meeting is not cancelled"
+    assert "already exists" in result
+    assert "automations.update_rule" in result
+    insert_one.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -318,6 +459,7 @@ async def test_update_rule_merges_partial_action_with_existing_action(monkeypatc
         return SimpleNamespace(matched_count=1)
 
     monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.protocol.protocol_exists", AsyncMock(return_value=True))
     with patch("plugins.automations.mongodb") as mock_mongo:
         mock_mongo.db = SimpleNamespace(
             trigger_rules=SimpleNamespace(
@@ -328,11 +470,9 @@ async def test_update_rule_merges_partial_action_with_existing_action(monkeypatc
 
         result = await AutomationsPlugin().update_rule(
             rule_id="rule-1",
-            action={
-                "decision": "tell",
-                "protocol": "Meeting Start",
-                "instructions": "Run the Meeting Start protocol.",
-            },
+            decision="tell",
+            protocol="Meeting Start",
+            instructions="Run the Meeting Start protocol.",
         )
 
     assert "updated" in result
@@ -366,13 +506,14 @@ async def test_update_rule_merges_partial_trigger_with_existing_trigger(monkeypa
 
         result = await AutomationsPlugin().update_rule(
             rule_id="rule-1",
-            trigger={"offset": -5},
+            offset=-5,
         )
 
     assert "updated" in result
     assert updated["origin"]["source"] == "calendar"
     assert updated["origin"]["event"] == "starting"
     assert updated["origin"]["offset_minutes"] == -5
+    assert updated["freshness"]["stale_if_source_event_started"] is True
 
 
 @pytest.mark.asyncio
@@ -381,18 +522,18 @@ async def test_create_rule_rejects_missing_protocol_before_persisting(monkeypatc
 
     monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
     monkeypatch.setattr("plugins.protocol.protocol_exists", AsyncMock(return_value=False))
-    with patch("core.triggers.service.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(trigger_rules=SimpleNamespace(insert_one=insert_one))
+    mongo = _mongo(insert_one=insert_one)
+    _patch_rule_mongo(monkeypatch, mongo)
 
-        result = await AutomationsPlugin().create_rule(
-            name="brief on bank emails",
-            trigger={"source": "gmail", "event": "new_message", "offset": 0},
-            action={
-                "message": "Bank email briefing",
-                "protocol": "missing_protocol",
-                "decision": "tell",
-            },
-        )
+    result = await AutomationsPlugin().create_rule(
+        name="brief on bank emails",
+        source="gmail",
+        event="",
+        offset=0,
+        message="Bank email briefing",
+        protocol="missing_protocol",
+        decision="tell",
+    )
 
     assert "Protocol 'missing_protocol' not found" in result
     insert_one.assert_not_awaited()
@@ -407,14 +548,20 @@ async def test_create_rule_rejects_invalid_builtin_trigger_event(monkeypatch) ->
         "services.automation.automation_service.watcher_trigger_info",
         lambda source: [{"event": "starting", "description": "Calendar event starts"}],
     )
+    monkeypatch.setattr(
+        "core.plugins.registry.registry",
+        SimpleNamespace(bespoke_names={"calendar", "gmail"}),
+    )
 
     with patch("core.triggers.service.mongodb") as mock_mongo:
         mock_mongo.db = SimpleNamespace(trigger_rules=SimpleNamespace(insert_one=insert_one))
 
         result = await AutomationsPlugin().create_rule(
             name="Meeting Quiet Mode",
-            trigger={"source": "calendar", "event": "event_starting"},
-            action={"message": "Entering quiet mode", "decision": "act"},
+            source="calendar",
+            event="event_starting",
+            decision="tell",
+            message="Entering quiet mode",
         )
 
     assert "event='event_starting' is not valid" in result
@@ -431,16 +578,19 @@ async def test_create_rule_rejects_unknown_builtin_condition_field(monkeypatch) 
         "services.automation.automation_service.watcher_condition_fields",
         lambda source: [{"field": "title", "type": "string"}],
     )
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=insert_one))
 
-    with patch("core.triggers.service.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(trigger_rules=SimpleNamespace(insert_one=insert_one))
-
-        result = await AutomationsPlugin().create_rule(
-            name="Meeting Reminder",
-            trigger={"source": "calendar", "event": "starting", "offset": -1},
-            conditions=[{"field": "is_cancelled", "op": "equals", "value": "false"}],
-            action={"message": "Meeting soon", "decision": "tell"},
-        )
+    result = await AutomationsPlugin().create_rule(
+        name="Meeting Reminder",
+        source="calendar",
+        event="starting",
+        offset=-1,
+        field="is_cancelled",
+        op="equals",
+        value="false",
+        decision="tell",
+        message="Meeting soon",
+    )
 
     assert "Invalid condition field" in result
     assert "is_cancelled" in result
@@ -836,7 +986,10 @@ async def test_list_available_triggers_includes_condition_fields(monkeypatch) ->
     results = await AutomationsPlugin().list_available_triggers("calendar")
 
     assert len(results) == 1
-    assert results[0].condition_fields == [{"field": "title", "type": "string"}]
+    assert results[0].condition_fields[0].field == "title"
+    assert "contains" in results[0].condition_fields[0].operators
+    assert results[0].supported is True
+    assert results[0].offset_supported is True
 
 
 _AUTOMATION_HOLD = (
@@ -896,62 +1049,6 @@ def _automation_setup(rule_id: str, name: str) -> ManagedSetup:
 
 
 @pytest.mark.asyncio
-async def test_delete_rule_by_unique_name_uses_resolved_id(monkeypatch) -> None:
-    row = _automation_setup("rule-helen", "Email from Helen McCosker")
-    delete_rule = AsyncMock(return_value=object())
-    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=row))
-    monkeypatch.setattr("plugins.automations.delete_automation_rule", delete_rule)
-    with patch("plugins.automations.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(find_one=AsyncMock(return_value=None)),
-        )
-        result = await AutomationsPlugin().delete_rule("Email from Helen McCosker")
-
-    assert "deleted" in result
-    delete_rule.assert_awaited_once_with("geoff", "rule-helen")
-
-
-@pytest.mark.asyncio
-async def test_delete_rule_ambiguous_name_does_not_write(monkeypatch) -> None:
-    rows = [
-        _automation_setup("rule-helen", "Email from Helen McCosker"),
-        _automation_setup("rule-helen-cal", "Helen calendar digest"),
-    ]
-    delete_rule = AsyncMock()
-    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=rows))
-    monkeypatch.setattr("plugins.automations.delete_automation_rule", delete_rule)
-    with patch("plugins.automations.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(find_one=AsyncMock(return_value=None)),
-        )
-        result = await AutomationsPlugin().delete_rule("Helen")
-
-    assert "Ambiguous automation" in result
-    assert "resource_ref" in result
-    assert "setups.find" not in result
-    delete_rule.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_delete_rule_unknown_name_does_not_point_at_setups_find(monkeypatch) -> None:
-    delete_rule = AsyncMock()
-    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
-    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=None))
-    monkeypatch.setattr("plugins.automations.delete_automation_rule", delete_rule)
-    with patch("plugins.automations.mongodb") as mock_mongo:
-        mock_mongo.db = SimpleNamespace(
-            trigger_rules=SimpleNamespace(find_one=AsyncMock(return_value=None)),
-        )
-        result = await AutomationsPlugin().delete_rule("Email from Helen McCosker")
-
-    assert "No automation matching" in result
-    assert "setups.find" not in result
-    delete_rule.assert_not_awaited()
-
-
-@pytest.mark.asyncio
 async def test_update_rule_by_unique_name_uses_resolved_id(monkeypatch) -> None:
     row = _automation_setup("rule-helen", "Email from Helen McCosker")
     existing = _trigger_rule_doc({**_rule(), "id": "rule-helen", "name": row.name})
@@ -963,8 +1060,6 @@ async def test_update_rule_by_unique_name_uses_resolved_id(monkeypatch) -> None:
 
     monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
     monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=row))
-    patch_lifecycle = AsyncMock()
-    monkeypatch.setattr("plugins.automations.patch_rule_lifecycle", patch_lifecycle)
     with patch("plugins.automations.mongodb") as mock_mongo:
         mock_mongo.db = SimpleNamespace(
             trigger_rules=SimpleNamespace(
@@ -974,9 +1069,399 @@ async def test_update_rule_by_unique_name_uses_resolved_id(monkeypatch) -> None:
         )
         result = await AutomationsPlugin().update_rule(
             rule_id="Email from Helen McCosker",
-            enabled=False,
+            name="Email from Helen",
         )
 
     assert result == "Rule 'rule-helen' updated."
-    patch_lifecycle.assert_awaited_once()
-    mock_mongo.db.trigger_rules.update_one.assert_not_awaited()
+    assert updated["name"] == "Email from Helen"
+
+
+@pytest.mark.asyncio
+async def test_update_rule_ambiguous_name_does_not_write(monkeypatch) -> None:
+    rows = [
+        _automation_setup("rule-helen", "Email from Helen McCosker"),
+        _automation_setup("rule-helen-cal", "Helen calendar digest"),
+    ]
+    update_one = AsyncMock()
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=rows))
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(
+                find_one=AsyncMock(return_value=None),
+                update_one=update_one,
+            )
+        )
+        result = await AutomationsPlugin().update_rule(rule_id="Helen", name="Helen updated")
+
+    assert "Ambiguous automation" in result
+    assert "resource_ref" in result
+    update_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_rule_unknown_name_does_not_write(monkeypatch) -> None:
+    update_one = AsyncMock()
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations.resolve_managed_setup", AsyncMock(return_value=None))
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(
+                find_one=AsyncMock(return_value=None),
+                update_one=update_one,
+            )
+        )
+        result = await AutomationsPlugin().update_rule(
+            rule_id="Email from Helen McCosker",
+            name="Email from Helen",
+        )
+
+    assert "No automation matching" in result
+    update_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_available_triggers_uses_composio_payload_fields(monkeypatch) -> None:
+    class Gateway:
+        async def list_trigger_types(self, source):
+            return [
+                {
+                    "slug": "SLACK_RECEIVE_DIRECT_MESSAGE",
+                    "description": "Direct message received",
+                    "config": {},
+                    "payload": {
+                        "properties": {
+                            "user": {"type": "string"},
+                            "text": {"type": "string"},
+                            "channel": {"type": "object", "properties": {"id": {"type": "string"}}},
+                        }
+                    },
+                }
+            ]
+
+    monkeypatch.setattr("core.plugins.registry.registry", SimpleNamespace(bespoke_names=set()))
+    monkeypatch.setattr(
+        "services.automation.automation_service.watcher_trigger_info",
+        lambda source: [],
+    )
+    monkeypatch.setattr(
+        "core.integrations.composio_gateway.get_composio_gateway",
+        lambda: Gateway(),
+    )
+
+    results = await AutomationsPlugin().list_available_triggers("slack")
+
+    assert len(results) == 1
+    assert results[0].event == "receive_direct_message"
+    assert {field.field for field in results[0].condition_fields} == {"user", "text"}
+    assert results[0].supported is True
+    assert results[0].offset_supported is False
+
+
+@pytest.mark.asyncio
+async def test_create_rule_rejects_unknown_composio_condition_field(monkeypatch) -> None:
+    insert_one = AsyncMock()
+    catalog = [
+        _catalog_row(
+            source="slack",
+            event="receive_direct_message",
+            provider="composio",
+            fields=["user", "text"],
+            offset_supported=False,
+            slug="SLACK_RECEIVE_DIRECT_MESSAGE",
+        )
+    ]
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations._catalog_for_source", AsyncMock(return_value=catalog))
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=insert_one))
+
+    result = await AutomationsPlugin().create_rule(
+        name="Direct messages",
+        source="slack",
+        event="receive_direct_message",
+        field="channel_topic",
+        op="contains",
+        value="alerts",
+        decision="tell",
+        message="New direct message",
+    )
+
+    assert "channel_topic" in result
+    assert "user" in result
+    insert_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_rule_rejects_configured_composio_trigger(monkeypatch) -> None:
+    insert_one = AsyncMock()
+    catalog = [
+        _catalog_row(
+            source="gmail",
+            event="new_gmail_message",
+            provider="composio",
+            fields=["sender"],
+            supported=False,
+            offset_supported=False,
+            slug="GMAIL_NEW_GMAIL_MESSAGE",
+        )
+    ]
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations._catalog_for_source", AsyncMock(return_value=catalog))
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=insert_one))
+
+    result = await AutomationsPlugin().create_rule(
+        name="New mail",
+        source="gmail",
+        event="new_gmail_message",
+        decision="tell",
+        message="New mail",
+    )
+
+    assert "requires provider configuration" in result
+    insert_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_rule_does_not_persist_when_registration_fails(monkeypatch) -> None:
+    insert_one = AsyncMock()
+    catalog = [
+        _catalog_row(
+            source="slack",
+            event="receive_direct_message",
+            provider="composio",
+            fields=["user"],
+            offset_supported=False,
+            slug="SLACK_RECEIVE_DIRECT_MESSAGE",
+        )
+    ]
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations._catalog_for_source", AsyncMock(return_value=catalog))
+    monkeypatch.setattr(
+        "plugins.automations._ensure_push_registered",
+        AsyncMock(return_value=_fail("Could not register push trigger for 'slack.receive_direct_message'.")),
+    )
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=insert_one))
+
+    result = await AutomationsPlugin().create_rule(
+        name="Leo DMs",
+        source="slack",
+        event="receive_direct_message",
+        decision="tell",
+        message="Leo messaged you",
+    )
+
+    assert "Could not register" in result
+    insert_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_rule_rejects_nonzero_offset_on_reactive_trigger(monkeypatch) -> None:
+    insert_one = AsyncMock()
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=insert_one))
+
+    result = await AutomationsPlugin().create_rule(
+        name="new mail",
+        source="gmail",
+        event="",
+        offset=-5,
+        decision="tell",
+        message="New mail",
+    )
+
+    assert "offset is only valid for anticipated events" in result
+    insert_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_rule_rejects_conditions_when_payload_has_no_fields(monkeypatch) -> None:
+    insert_one = AsyncMock()
+    catalog = [
+        _catalog_row(
+            source="github",
+            event="commit_event",
+            provider="composio",
+            fields=[],
+            offset_supported=False,
+            slug="GITHUB_COMMIT_EVENT",
+        )
+    ]
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations._catalog_for_source", AsyncMock(return_value=catalog))
+    monkeypatch.setattr("plugins.automations._ensure_push_registered", AsyncMock(return_value=None))
+    _patch_rule_mongo(monkeypatch, _mongo(insert_one=insert_one))
+
+    result = await AutomationsPlugin().create_rule(
+        name="GitHub commits",
+        source="github",
+        event="commit_event",
+        field="author",
+        op="equals",
+        value="geoff",
+        decision="tell",
+        message="New commit",
+    )
+
+    assert "no filterable payload fields" in result
+    assert "instructions" in result
+    insert_one.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_rule_registers_replacement_before_write(monkeypatch) -> None:
+    existing = _trigger_rule_doc({
+        **_rule(),
+        "trigger": {"source": "slack", "event": "receive_direct_message", "offset": 0},
+    })
+    order: list[str] = []
+    catalog = _catalog_row(
+        source="calendar",
+        event="starting",
+        fields=["title"],
+        offset_supported=True,
+    )
+
+    async def register(_catalog):
+        order.append("register")
+        return None
+
+    async def update_one(_query, update):
+        order.append("write")
+        return SimpleNamespace(matched_count=1)
+
+    async def unused(*_args, **_kwargs):
+        order.append("cleanup")
+
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations._resolve_catalog_trigger", AsyncMock(return_value=catalog))
+    monkeypatch.setattr("plugins.automations._ensure_push_registered", register)
+    monkeypatch.setattr("plugins.automations._deregister_if_unused", unused)
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(
+                find_one=AsyncMock(return_value=existing),
+                update_one=AsyncMock(side_effect=update_one),
+            )
+        )
+        result = await AutomationsPlugin().update_rule(
+            rule_id="rule-1",
+            source="calendar",
+            event="starting",
+            offset=-10,
+        )
+
+    assert "updated" in result
+    assert order == ["register", "write", "cleanup"]
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_rule_keeps_shared_push_subscription(monkeypatch) -> None:
+    rule = _trigger_rule_doc({
+        **_rule(),
+        "id": "rule-a",
+        "trigger": {"source": "slack", "event": "receive_direct_message", "offset": 0},
+    })
+    deregister = AsyncMock()
+    monkeypatch.setattr("plugins.automations.cancel_open_instances_for_rule", AsyncMock())
+    monkeypatch.setattr("plugins.automations._deregister_push_trigger", deregister)
+    monkeypatch.setattr("plugins.automations.publish_operations_changed", AsyncMock())
+    mongo = _mongo(find_one=AsyncMock(side_effect=[rule, {"id": "rule-b"}]))
+    monkeypatch.setattr("plugins.automations.mongodb", mongo)
+
+    deleted = await delete_automation_rule("geoff", "rule-a")
+
+    assert deleted is not None
+    deregister.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_automation_rule_deregisters_when_last_subscriber(monkeypatch) -> None:
+    rule = _trigger_rule_doc({
+        **_rule(),
+        "id": "rule-a",
+        "trigger": {"source": "slack", "event": "receive_direct_message", "offset": 0},
+    })
+    deregister = AsyncMock()
+    monkeypatch.setattr("plugins.automations.cancel_open_instances_for_rule", AsyncMock())
+    monkeypatch.setattr("plugins.automations._deregister_push_trigger", deregister)
+    monkeypatch.setattr("plugins.automations.publish_operations_changed", AsyncMock())
+    mongo = _mongo(find_one=AsyncMock(side_effect=[rule, None]))
+    monkeypatch.setattr("plugins.automations.mongodb", mongo)
+
+    deleted = await delete_automation_rule("geoff", "rule-a")
+
+    assert deleted is not None
+    deregister.assert_awaited_once_with("slack", "receive_direct_message")
+
+
+@pytest.mark.asyncio
+async def test_delete_rule_removes_named_automation(monkeypatch) -> None:
+    rule = _trigger_rule_doc({
+        **_rule(),
+        "id": "rule-a",
+        "name": "Slack mentions",
+        "trigger": {"source": "slack", "event": "receive_direct_message", "offset": 0},
+    })
+
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    monkeypatch.setattr("plugins.automations.cancel_open_instances_for_rule", AsyncMock())
+    monkeypatch.setattr("plugins.automations._deregister_if_unused", AsyncMock())
+    monkeypatch.setattr("plugins.automations.publish_operations_changed", AsyncMock())
+    mongo = _mongo(find_one=AsyncMock(side_effect=[rule, rule]))
+    monkeypatch.setattr("plugins.automations.mongodb", mongo)
+
+    result = await AutomationsPlugin().delete_rule("rule-a")
+
+    assert result == "Deleted automation Slack mentions."
+    mongo.db.trigger_rules.delete_one.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_test_rule_is_owner_scoped(monkeypatch) -> None:
+    find_one = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "services.automation.mongodb",
+        SimpleNamespace(db=SimpleNamespace(trigger_rules=SimpleNamespace(find_one=find_one))),
+    )
+    from services.automation import AutomationService
+
+    result = await AutomationService().test_rule("rule-1", owner_id="geoff")
+
+    assert result == []
+    find_one.assert_awaited_once()
+    query = find_one.await_args.args[0]
+    assert query["id"] == "rule-1"
+    assert query["owner_id"] == "geoff"
+
+
+@pytest.mark.asyncio
+async def test_test_rule_push_trigger_does_not_claim_end_to_end(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "services.automation.automation_service.test_rule",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "services.automation.automation_service.pause_observation",
+        lambda now=None: None,
+    )
+    monkeypatch.setattr("plugins.automations.get_owner_id", lambda: "geoff")
+    with patch("plugins.automations.mongodb") as mock_mongo:
+        mock_mongo.db = SimpleNamespace(
+            trigger_rules=SimpleNamespace(
+                find_one=AsyncMock(
+                    return_value=_trigger_rule_doc({
+                        **_rule(),
+                        "trigger": {
+                            "source": "slack",
+                            "event": "receive_direct_message",
+                            "offset": 0,
+                        },
+                    })
+                ),
+            )
+        )
+        result = await AutomationsPlugin().test_rule("rule-1")
+
+    assert "cannot verify delivery" in result
+    assert "will fire" not in result
+    assert "slack" in result

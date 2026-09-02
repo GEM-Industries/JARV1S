@@ -67,7 +67,9 @@ When a test is warranted:
 - Use `invoke_tool(plugin, "tool_name", ...)` when testing plugin logic without injection/UI wrapper behavior.
 - Use `fake_tool_data_store` for plugins backed by `plugins.db` tool-data helpers.
 - Add a routing/eval check when tool selection or always-on offering is part of the risk.
-- Add one eval in `backend/evals/agent_behavior.yaml` when tool selection or prompt behavior is part of the risk.
+- Prove fail-closed mutations with a plugin test. Probe model selection in
+  `backend/evals/exp_<topic>.yaml`; promote one frozen pair into
+  `agent_behavior.yaml`. A probe pass rate is not plugin correctness.
 
 ## Avoid
 

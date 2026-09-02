@@ -13,7 +13,7 @@ does not list tool signatures.
 
 | Set | Contents |
 | :--- | :--- |
-| **Always-on** | Explicit FQNs in `tool_router.ALWAYS_ON_FQNS`: `system.search_tools`, all `files.*`, `display.push_content`, `system.exec`, `search.web`, `profile.add_memory` / `remember` / `update_memory`, `agents.dispatch` / `resume` / `get_status` / `cancel_task` / `close` |
+| **Always-on** | Explicit FQNs in `tool_router.ALWAYS_ON_FQNS`: `system.search_tools`, all `files.*`, `display.push_content`, `system.exec`, `system.approve_pending` / `deny_pending`, `search.web`, `profile.add_memory` / `remember` / `update_memory`, `agents.dispatch` / `resume` / `get_status` / `cancel_task` / `close` |
 | **Routed** | Every tool from plugins that cleared the active policy |
 | **Discovered next iteration** | `system.search_tools` hits and named `edit_tool` / `fqn` values from a successful result |
 

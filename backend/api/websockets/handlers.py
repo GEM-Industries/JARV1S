@@ -58,6 +58,24 @@ logger = logging.getLogger(__name__)
 _LOCAL_UNMUTE_ACK = "Online."
 _LOCAL_POWER_CHECK_ACK = "For you sir, always."
 
+
+async def _resolve_pending_confirmation(session_id: str, session, text: str) -> bool:
+    from core.plugins.consent import resolve_pending_from_utterance
+
+    owner_id = getattr(session, "owner_id", session_id)
+    result = await resolve_pending_from_utterance(owner_id, text)
+    if result is None:
+        return False
+    session.voice_turn = None
+    await orchestrator._deliver_text(
+        session_id,
+        result,
+        None,
+        delivery="local_command",
+        persist=False,
+    )
+    return True
+
 # Per-owner/node client diagnostic budget (events / rolling window).
 _CLIENT_DIAG_BUDGET = 60
 _CLIENT_DIAG_WINDOW_S = 60.0
@@ -2178,6 +2196,8 @@ async def _commit_voice_turn(
     )
 
 async def _handle_local_voice_command(session_id: str, session, voice_turn: VoiceInputTurn) -> bool:
+    if await _resolve_pending_confirmation(session_id, session, voice_turn.transcript_text):
+        return True
     command = resolve_local_command(
         voice_turn.transcript_text,
         soft_muted=bool(getattr(session, "soft_muted", False)),
@@ -2539,6 +2559,9 @@ async def handle_text_input(session_id: str, message: WSMessage) -> None:
 
     if _has_active_input_or_run(session):
         logger.info("Ignoring text input while session has active input/run: session=%s", session_id)
+        return
+
+    if await _resolve_pending_confirmation(session_id, session, text):
         return
 
     AssistantOrchestrator._set_current_run_task(

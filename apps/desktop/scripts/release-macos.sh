@@ -81,6 +81,9 @@ if [[ ! -d "$APP_PATH" ]]; then
   exit 1
 fi
 
+echo "Staging Host runtime into the app bundle..."
+bash scripts/bundle-host-resources.sh "$APP_PATH"
+
 VERSION="$(node -p "JSON.parse(require('fs').readFileSync('$DESKTOP/src-tauri/tauri.conf.json','utf8')).version")"
 DMG_PATH="$BUNDLE_DIR/macos/JARV1S_${VERSION}_aarch64.dmg"
 APP_ZIP="$BUNDLE_DIR/macos/JARV1S_${VERSION}_aarch64.zip"

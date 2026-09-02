@@ -146,5 +146,21 @@ async def test_rules_create_rejects_duplicate_scheduled_name(monkeypatch) -> Non
     assert result.message == (
         "Scheduled rule 'Morning Wakeup Lights' already exists "
         "(series_id='rule-morning'). Update it with "
-        "scheduler.replace_alert(series_id=..., ...); do not create a duplicate."
+        "scheduler.replace_alert(query='Morning Wakeup Lights', scope='series', ...); "
+        "do not create a duplicate."
     )
+
+
+@pytest.mark.asyncio
+async def test_rules_create_rejects_external_origin(monkeypatch) -> None:
+    from plugins.rules import RulesPlugin
+
+    monkeypatch.setattr("plugins.rules.get_owner_id", lambda: "owner-1")
+    result = await RulesPlugin().create(
+        name="Leo DMs",
+        origin={"kind": "external", "source": "slack", "event": "receive_direct_message"},
+        action={"decision": "tell", "message": "Leo messaged you"},
+    )
+
+    assert "automations.create_rule" in result
+    assert "list_available_triggers" in result

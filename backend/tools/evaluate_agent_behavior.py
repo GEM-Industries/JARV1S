@@ -149,8 +149,32 @@ def _safe_label(label: str) -> str:
     return cleaned or "agent-behavior"
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Fail on duplicate mapping keys. PyYAML otherwise keeps the last value."""
+
+
+def _construct_mapping_unique(
+    loader: yaml.SafeLoader, node: yaml.nodes.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ValueError(
+                f"Duplicate YAML key {key!r} at line {key_node.start_mark.line + 1}"
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping_unique,
+)
+
+
 def _load_cases(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    payload = yaml.safe_load(path.read_text()) or {}
+    payload = yaml.load(path.read_text(), Loader=_UniqueKeyLoader) or {}
     meta = payload.get("meta") or {}
     cases = payload.get("cases") or []
     return meta, cases
@@ -555,6 +579,13 @@ def _summarize_case(
         for score in row.scores:
             if not score["passed"]:
                 failures.append(f"run {row.run}: {score['name']} — {score.get('detail', '')}")
+        codes = [
+            call.get("code")
+            for call in (row.snapshot or {}).get("tool_calls") or []
+            if call.get("code")
+        ]
+        if codes:
+            failures.append(f"run {row.run}: tools — {'; '.join(codes)}")
     return CaseSummary(
         case_id=case["id"],
         priority=case.get("priority", "P1"),
@@ -701,16 +732,15 @@ async def async_main() -> int:
         _print_summary(summaries)
 
     failed = [item for item in summaries if not item.passed]
-    if args.probe:
-        return 0
     if failed:
         print("\nFailures:")
         for item in failed:
             print(f"- {item.case_id}: pass_rate={item.pass_rate:.0%}")
             for detail in item.failures:
                 print(f"    {detail}")
-        return 1
-    return 0
+    if args.probe:
+        return 0
+    return 1 if failed else 0
 
 
 def main() -> int:
